@@ -53,8 +53,16 @@ pub fn load_settings(app: AppHandle) -> Result<serde_json::Value, String> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| e.to_string())
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) if value.is_object() => Ok(value),
+        _ => {
+            // Keep the unreadable file for the user and start from defaults
+            // instead of failing every launch.
+            let _ = std::fs::copy(&path, path.with_file_name("settings.json.bad"));
+            Ok(serde_json::json!({}))
+        }
+    }
 }
 
 #[tauri::command(async)]

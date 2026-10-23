@@ -261,8 +261,8 @@ async function handlePaths(paths) {
             nested: $("extract-nested").checked,
           });
           log(extractSummary(result));
-          await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` });
           found = result.flatMap((r) => r.isos || []);
+          await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` }).catch(() => {});
         });
         if (found.length) await convertIsos(found, dest);
       })());
