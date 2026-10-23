@@ -72,6 +72,7 @@ pub fn copy_tree(
         verified: verify,
         warnings: Vec::new(),
     };
+    fileops::check_output_folder(dest_dir)?;
     fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
     // Probe the destination volume after the folder exists so canonicalize works.
     let vol = filesystem_for(dest_dir).ok();
@@ -394,6 +395,18 @@ mod tests {
         let err = copy_tree(&root.join("games"), &root.join("games/inner"), false, false).unwrap_err();
         assert!(err.contains("inside itself"), "{err}");
         assert!(!root.join("games/inner/games").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copying_into_a_file_says_so() {
+        let root = std::env::temp_dir().join(format!("unpack-usb-intofile-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.bin"), b"a").unwrap();
+        fs::write(root.join("blocker"), b"file").unwrap();
+        let err = copy_tree(&root.join("a.bin"), &root.join("blocker"), false, false).unwrap_err();
+        assert!(err.contains("is a file, not a folder"), "{err}");
         let _ = fs::remove_dir_all(&root);
     }
 
