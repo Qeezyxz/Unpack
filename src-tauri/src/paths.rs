@@ -74,11 +74,27 @@ pub fn sanitize_xbox_folder_name(name: &str) -> String {
         })
         .collect();
     let trimmed = cleaned.trim().trim_matches('.');
-    if trimmed.is_empty() {
+    // Cut to length first: a cut can leave a trailing space or dot, which
+    // Windows will not keep on a folder name.
+    let short: String = trimmed.chars().take(42).collect();
+    let short = short.trim_end_matches(['.', ' ']);
+    if short.is_empty() {
         "Game".into()
+    } else if is_windows_device_name(short) {
+        format!("_{short}")
     } else {
-        trimmed.chars().take(42).collect()
+        short.to_string()
     }
+}
+
+/// `CON`, `NUL`, `COM1` and friends cannot be folder names on Windows.
+pub fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0')
 }
 
 #[cfg(test)]
@@ -109,5 +125,11 @@ mod tests {
         assert_eq!(sanitize_xbox_folder_name("Halo 3"), "Halo 3");
         assert_eq!(sanitize_xbox_folder_name("A:B/C"), "A-B-C");
         assert_eq!(sanitize_xbox_folder_name("   "), "Game");
+        assert_eq!(sanitize_xbox_folder_name("Con"), "_Con");
+        assert_eq!(sanitize_xbox_folder_name("com1"), "_com1");
+        assert_eq!(sanitize_xbox_folder_name("Console Wars"), "Console Wars");
+        let long = format!("{} tail", "a".repeat(41));
+        assert_eq!(sanitize_xbox_folder_name(&long), "a".repeat(41));
+        assert_eq!(sanitize_xbox_folder_name("Halo: Reach."), "Halo- Reach");
     }
 }

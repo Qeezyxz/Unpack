@@ -31,14 +31,39 @@ fn hash_file<D: Digest>(path: &Path) -> Result<String, String> {
     Ok(to_hex(&hasher.finalize()))
 }
 
+/// Accepts a SHA-1 (40 hex) or SHA-256 (64 hex) value, with an optional
+/// `sha1:` / `sha256:` label and any spaces. `None` means nothing to check.
+pub fn normalize_hash(expected: &str) -> Result<Option<String>, String> {
+    let lower = expected.trim().to_lowercase();
+    let value = lower
+        .strip_prefix("sha256:")
+        .or_else(|| lower.strip_prefix("sha-256:"))
+        .or_else(|| lower.strip_prefix("sha1:"))
+        .or_else(|| lower.strip_prefix("sha-1:"))
+        .unwrap_or(&lower);
+    let value: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !value.chars().all(|c| c.is_ascii_hexdigit()) || !matches!(value.len(), 40 | 64) {
+        return Err(format!(
+            "That is not a SHA-1 (40 characters) or SHA-256 (64 characters) hash; it has {} characters. Fix it or clear the box.",
+            value.len()
+        ));
+    }
+    Ok(Some(value))
+}
+
 pub fn verify_hash(path: &Path, expected: &str) -> Result<String, String> {
-    let expected = expected.trim().to_lowercase();
+    let Some(expected) = normalize_hash(expected)? else {
+        return sha256_file(path);
+    };
     let actual = if expected.len() == 40 {
         sha1_file(path)?
     } else {
         sha256_file(path)?
     };
-    if !expected.is_empty() && actual != expected {
+    if actual != expected {
         return Err(format!(
             "hash mismatch for {}: expected {expected}, got {actual}",
             path.display()
@@ -70,6 +95,10 @@ mod tests {
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
         assert!(verify_hash(&path, "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").is_ok());
-        assert!(verify_hash(&path, "deadbeef").is_err());
+        assert!(verify_hash(&path, "deadbeef").unwrap_err().contains("not a SHA-1"));
+        assert!(verify_hash(&path, "SHA1: AAF4C61DDCC5E8A2DABEDE0F3B482CD9AEA9434D").is_ok());
+        assert!(verify_hash(&path, &"z".repeat(40)).is_err());
+        assert!(verify_hash(&path, &"0".repeat(64)).unwrap_err().contains("mismatch"));
+        assert_eq!(normalize_hash("   ").unwrap(), None);
     }
 }

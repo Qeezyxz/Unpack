@@ -204,6 +204,7 @@ pub fn convert_isos(
     if dest_dir.as_os_str().is_empty() {
         return Err("choose an output folder".into());
     }
+    fileops::check_output_folder(dest_dir)?;
     let paths = expand_iso_set(sources, auto_companions, &mut progress)?;
     let groups = group_discs(&paths)?;
     let mut reports = Vec::new();
@@ -511,6 +512,14 @@ fn convert_god(
     let content_type = title_info.content_type;
     let info = iso_info(source, &exe_info, content_type, source_iso.get_max_used_prefix_size());
 
+    let needed = source_iso.volume_descriptor.root_offset + source_iso.get_max_used_prefix_size();
+    if source_iso_file_meta.len() < needed {
+        return Err(format!(
+            "The ISO ends early: {} should be at least {needed} bytes but is only {}. The file is incomplete or damaged, so nothing was written.",
+            file_name(source),
+            source_iso_file_meta.len()
+        ));
+    }
     let data_size = if trim {
         source_iso.get_max_used_prefix_size()
     } else {
@@ -697,6 +706,17 @@ pub fn merge_replace_allowed(dest: &Path) -> bool {
     !name.eq_ignore_ascii_case("default.xex") && !name.eq_ignore_ascii_case("default.xbe")
 }
 
+/// Characters that would escape the folder or that Windows cannot store.
+fn is_unsafe_name_char(c: char) -> bool {
+    c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+}
+
+fn truncated_message(name: &str, got: u64, expected: u64) -> String {
+    format!(
+        "The ISO ends early: {name} should be {expected} bytes but only {got} were there. The file is incomplete or damaged, so nothing was kept for it."
+    )
+}
+
 fn extract_dir(
     iso_path: &Path,
     volume: &VolumeDescriptor,
@@ -717,7 +737,7 @@ fn extract_dir(
         let safe = entry
             .name
             .chars()
-            .map(|c| if matches!(c, '/' | '\\' | '\0') { '_' } else { c })
+            .map(|c| if is_unsafe_name_char(c) { '_' } else { c })
             .collect::<String>();
         let dest_path = dest.join(&safe);
         if let Some(sub) = &entry.subdirectory {
@@ -747,8 +767,14 @@ fn extract_dir(
             {
                 let mut out = File::create(&tmp).map_err(|e| e.to_string())?;
                 let mut limited = (&mut reader).take(entry.size as u64);
-                std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
+                let copied_bytes =
+                    std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
                 out.flush().map_err(|e| e.to_string())?;
+                if copied_bytes != entry.size as u64 {
+                    drop(out);
+                    let _ = fs::remove_file(&tmp);
+                    return Err(truncated_message(&safe, copied_bytes, entry.size as u64));
+                }
             }
             fileops::replace_file(&tmp, &dest_path)?;
             files.push(dest_path.display().to_string());
@@ -928,6 +954,55 @@ mod tests {
             "GOD convert must not write a TitleID folder"
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unsafe_names_are_flattened() {
+        for c in ['/', '\\', ':', '<', '>', '"', '|', '?', '*', '\0'] {
+            assert!(is_unsafe_name_char(c), "{c:?}");
+        }
+        assert!(!is_unsafe_name_char('.'));
+        assert!(!is_unsafe_name_char('a'));
+    }
+
+    #[test]
+    fn truncated_iso_stops_instead_of_saving_a_short_file() {
+        let root = std::env::temp_dir().join(format!(
+            "unpack-truncated-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let iso = root.join("Sample.iso");
+        let dest = root.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        let title = 0x4D5307E6;
+        write_xsf_iso(
+            &iso,
+            &[
+                ("default.xex", minimal_xex(title, 1, 1, 0x11111111, b"XEX")),
+                ("big.bin", vec![7u8; 10_000]),
+            ],
+        );
+        let full = fs::metadata(&iso).unwrap().len();
+        let file = fs::OpenOptions::new().write(true).open(&iso).unwrap();
+        file.set_len(full - 6_000).unwrap();
+        drop(file);
+
+        let err = convert_isos(&[iso.clone()], &dest, "xex", false, true, false, |_, _, _| {})
+            .unwrap_err();
+        assert!(err.contains("ends early") && err.contains("big.bin"), "{err}");
+        let god_err = convert_isos(&[iso], &dest, "god", true, true, false, |_, _, _| {})
+            .unwrap_err();
+        assert!(god_err.contains("ends early"), "{god_err}");
+        assert!(
+            fs::read_dir(&dest).unwrap().next().is_none(),
+            "a damaged ISO must not leave a half-extracted folder"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1175,6 +1250,142 @@ mod tests {
             "expected disc 1 and disc 2 GOD packages, got {media:?}"
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn damaged_discs_never_panic_hang_or_leave_litter() {
+        let root = std::env::temp_dir().join(format!("unpack-fuzz-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let good = root.join("good.iso");
+        write_xsf_iso(
+            &good,
+            &[
+                ("default.xex", minimal_xex(0x4D5307E6, 1, 1, 0x11111111, b"XEX")),
+                ("a.bin", vec![1u8; 5000]),
+                ("b.bin", vec![2u8; 3000]),
+            ],
+        );
+        let original = fs::read(&good).unwrap();
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..400 {
+            let mut bytes = original.clone();
+            match round % 4 {
+                0 => {
+                    let cut = (next() as usize) % bytes.len();
+                    bytes.truncate(cut);
+                }
+                1 => {
+                    for _ in 0..4 {
+                        let at = 0x10000 + (next() as usize) % 0x40;
+                        bytes[at] = next() as u8;
+                    }
+                }
+                2 => {
+                    for _ in 0..6 {
+                        let at = 0x10800 + (next() as usize) % 0x60;
+                        bytes[at] = next() as u8;
+                    }
+                }
+                _ => {
+                    for _ in 0..8 {
+                        let at = (next() as usize) % bytes.len();
+                        bytes[at] = next() as u8;
+                    }
+                }
+            }
+            let iso = root.join(format!("fuzz{round}.iso"));
+            fs::write(&iso, &bytes).unwrap();
+            let dest = root.join(format!("out{round}"));
+            fs::create_dir_all(&dest).unwrap();
+            for mode in ["xex", "god"] {
+                let (iso_in, dest_in) = (iso.clone(), dest.clone());
+                let handle = std::thread::spawn(move || {
+                    let _ = inspect_iso(&iso_in);
+                    convert_isos(&[iso_in], &dest_in, mode, false, true, false, |_, _, _| {})
+                });
+                let start = std::time::Instant::now();
+                while !handle.is_finished() {
+                    assert!(
+                        start.elapsed() < std::time::Duration::from_secs(20),
+                        "round {round} {mode} hung"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                let result = handle.join();
+                assert!(result.is_ok(), "round {round} {mode} panicked");
+                if result.unwrap().is_err() {
+                    let litter: Vec<String> = fs::read_dir(&dest)
+                        .unwrap()
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    assert!(litter.is_empty(), "round {round} {mode} left {litter:?}");
+                }
+                let _ = fs::remove_dir_all(&dest);
+                fs::create_dir_all(&dest).unwrap();
+            }
+            let _ = fs::remove_file(&iso);
+            let _ = fs::remove_dir_all(&dest);
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_complete_disc_converts_to_god_and_can_be_converted_again() {
+        let root = std::env::temp_dir().join(format!("unpack-god-ok-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let iso = root.join("Halo.iso");
+        let dest = root.join("out");
+        write_xsf_iso(
+            &iso,
+            &[
+                ("default.xex", minimal_xex(0x4D5307E6, 1, 1, 0x11111111, b"XEX")),
+                ("data.bin", vec![3u8; 40_000]),
+            ],
+        );
+        for _ in 0..2 {
+            let reports = convert_isos(&[iso.clone()], &dest, "god", true, true, false, |_, _, _| {}).unwrap();
+            assert_eq!(reports.len(), 1);
+            assert!(reports[0].verified);
+            let header = PathBuf::from(&reports[0].output);
+            assert!(header.is_file(), "{header:?}");
+            assert!(header.to_string_lossy().contains("4D5307E6"));
+        }
+        let litter: Vec<String> = fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(litter, vec!["4D5307E6".to_string()], "no staging or backup folders may remain");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unusable_output_folder_is_a_plain_error_and_leaves_nothing() {
+        let root = std::env::temp_dir().join(format!("unpack-god-baddest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let iso = root.join("Halo.iso");
+        write_xsf_iso(
+            &iso,
+            &[("default.xex", minimal_xex(0x4D5307E6, 1, 1, 0x11111111, b"XEX")), ("data.bin", vec![3u8; 20_000])],
+        );
+        let blocker = root.join("not-a-folder");
+        fs::write(&blocker, b"i am a file").unwrap();
+        for mode in ["god", "xex"] {
+            let err = convert_isos(&[iso.clone()], &blocker.join("out"), mode, true, false, false, |_, _, _| {}).unwrap_err();
+            assert!(err.contains("is a file, not a folder"), "{mode}: {err}");
+            assert_eq!(fs::read(&blocker).unwrap(), b"i am a file");
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }

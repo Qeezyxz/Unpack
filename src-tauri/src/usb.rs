@@ -72,6 +72,7 @@ pub fn copy_tree(
         verified: verify,
         warnings: Vec::new(),
     };
+    fileops::check_output_folder(dest_dir)?;
     fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
     // Probe the destination volume after the folder exists so canonicalize works.
     let vol = filesystem_for(dest_dir).ok();
@@ -85,9 +86,18 @@ pub fn copy_tree(
             &mut report,
         )?;
     } else {
+        if let (Ok(from), Ok(into)) = (fs::canonicalize(src), fs::canonicalize(dest_dir)) {
+            if into.starts_with(&from) {
+                return Err(format!(
+                    "Cannot copy {} into a folder inside itself ({}). Pick a destination outside it.",
+                    src.display(),
+                    dest_dir.display()
+                ));
+            }
+        }
         // Keep the folder name so USB:\Halo\default.xex, not USB:\default.xex.
         let nested = dest_dir.join(file_name(src));
-        copy_dir(src, &nested, verify, overwrite_protected, vol.as_ref(), &mut report)?;
+        copy_dir(src, &nested, verify, overwrite_protected, vol.as_ref(), &mut report, 0)?;
     }
     Ok(report)
 }
@@ -113,14 +123,18 @@ fn copy_dir(
     overwrite_protected: bool,
     vol: Option<&VolumeInfo>,
     report: &mut CopyReport,
+    depth: u32,
 ) -> Result<(), String> {
+    if depth > fileops::MAX_FOLDER_DEPTH {
+        return Err(fileops::too_deep_message(src));
+    }
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     for entry in fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let from = entry.path();
         let to = dest.join(entry.file_name());
         if from.is_dir() {
-            copy_dir(&from, &to, verify, overwrite_protected, vol, report)?;
+            copy_dir(&from, &to, verify, overwrite_protected, vol, report, depth + 1)?;
         } else {
             copy_one(&from, &to, verify, overwrite_protected, vol, report)?;
         }
@@ -169,7 +183,11 @@ fn copy_one(
     // Copy to a sibling temp, hash, then swap. Never delete dest first.
     let tmp = fileops::sibling(dest, "unpack-tmp");
     fileops::clear_path(&tmp)?;
-    fs::copy(src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
+    if let Err(e) = fs::copy(src, &tmp) {
+        // A half-written temp file would keep eating a drive that may be full.
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("copy {}: {e}", src.display()));
+    }
     if verify {
         let a = hashutil::sha256_file(src)?;
         let b = hashutil::sha256_file(&tmp)?;
@@ -215,12 +233,33 @@ fn detect_filesystem(path: &Path) -> Result<String, String> {
 
 #[cfg(windows)]
 fn volume_root(path: &Path) -> Result<PathBuf, String> {
-    let s = path.to_string_lossy();
-    if s.len() >= 2 && s.as_bytes()[1] == b':' {
-        Ok(PathBuf::from(format!("{}:\\", s.chars().next().unwrap())))
+    Ok(PathBuf::from(volume_root_text(&path.to_string_lossy())))
+}
+
+/// The root GetVolumeInformationW wants: `E:\` or `\\server\share\`.
+/// `canonicalize` hands back `\\?\E:\...` and `\\?\UNC\server\share\...`, so those
+/// prefixes are peeled off first.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn volume_root_text(path: &str) -> String {
+    let path = path.replace('/', "\\");
+    let plain = if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = path.strip_prefix("\\\\?\\") {
+        rest.to_string()
     } else {
-        Ok(path.to_path_buf())
+        path
+    };
+    let bytes = plain.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return format!("{}:\\", &plain[..1]);
     }
+    if let Some(rest) = plain.strip_prefix("\\\\") {
+        let mut parts = rest.split('\\').filter(|p| !p.is_empty());
+        if let (Some(server), Some(share)) = (parts.next(), parts.next()) {
+            return format!("\\\\{server}\\{share}\\");
+        }
+    }
+    plain
 }
 
 #[cfg(not(windows))]
@@ -268,6 +307,15 @@ pub fn list_fat32_warnings(paths: &[PathBuf], dest: &Path) -> Result<Vec<String>
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn windows_volume_roots_survive_canonical_paths() {
+        assert_eq!(volume_root_text(r"E:\Games\Halo"), r"E:\");
+        assert_eq!(volume_root_text(r"\\?\E:\Games\Halo"), r"E:\");
+        assert_eq!(volume_root_text(r"e:/Games"), r"e:\");
+        assert_eq!(volume_root_text(r"\\?\UNC\nas\share\Games"), r"\\nas\share\");
+        assert_eq!(volume_root_text(r"\\nas\share"), r"\\nas\share\");
+    }
 
     #[test]
     fn fat32_failure_gets_a_plain_hint() {
@@ -335,6 +383,64 @@ mod tests {
         let report = copy_tree(&src, &dest, true, false).unwrap();
         assert_eq!(report.copied, 1);
         assert!(report.verified);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copying_a_folder_into_itself_is_refused() {
+        let root = std::env::temp_dir().join(format!("unpack-usb-self-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("games/inner")).unwrap();
+        fs::write(root.join("games/a.bin"), b"a").unwrap();
+        let err = copy_tree(&root.join("games"), &root.join("games/inner"), false, false).unwrap_err();
+        assert!(err.contains("inside itself"), "{err}");
+        assert!(!root.join("games/inner/games").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copying_into_a_file_says_so() {
+        let root = std::env::temp_dir().join(format!("unpack-usb-intofile-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.bin"), b"a").unwrap();
+        fs::write(root.join("blocker"), b"file").unwrap();
+        let err = copy_tree(&root.join("a.bin"), &root.join("blocker"), false, false).unwrap_err();
+        assert!(err.contains("is a file, not a folder"), "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copying_onto_the_same_place_never_loses_the_file() {
+        let root = std::env::temp_dir().join(format!("unpack-usb-same-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("games/sub")).unwrap();
+        fs::write(root.join("games/a.bin"), b"keep me").unwrap();
+        fs::write(root.join("games/sub/b.bin"), b"and me").unwrap();
+        let _ = copy_tree(&root.join("games/a.bin"), &root.join("games"), true, false);
+        assert_eq!(fs::read(root.join("games/a.bin")).unwrap(), b"keep me");
+        let _ = copy_tree(&root.join("games"), &root, true, false);
+        assert_eq!(fs::read(root.join("games/a.bin")).unwrap(), b"keep me");
+        assert_eq!(fs::read(root.join("games/sub/b.bin")).unwrap(), b"and me");
+        let leftovers: Vec<_> = fs::read_dir(root.join("games"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.iter().all(|n| !n.contains("unpack-part") && !n.contains(".tmp")), "{leftovers:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_loop_ends_with_an_error_not_a_crash() {
+        let root = std::env::temp_dir().join(format!("unpack-usb-loop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/sub")).unwrap();
+        fs::write(root.join("src/sub/a.bin"), b"a").unwrap();
+        std::os::unix::fs::symlink(root.join("src"), root.join("src/sub/back")).unwrap();
+        let err = copy_tree(&root.join("src"), &root.join("out"), false, false).unwrap_err();
+        assert!(err.contains("nested too deeply"), "{err}");
         let _ = fs::remove_dir_all(&root);
     }
 }

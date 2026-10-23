@@ -16,6 +16,11 @@ const HOMEBREW = [
   { name: "WillowTree (Borderlands)", cat: "Save Editors", blurb: "Borderlands save editor for Xbox 360 (characters, items, stats).", url: "https://github.com/mattweidner/WillowTreeSharp" },
 ];
 
+const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ESCAPES[c]);
+}
+
 const state = {
   packFiles: [],
   xboxFiles: [],
@@ -35,13 +40,33 @@ function native() {
   return Boolean(window.__TAURI__?.core?.invoke);
 }
 
+let toastTimer;
+function setStatus(text) {
+  $("job-status").textContent = text;
+  // The status line sits behind an open dialog, so Connect / Send / Download
+  // results would go unseen. Show them in a toast above it.
+  const toast = $("job-toast");
+  const dialogOpen = !$("overlay").classList.contains("hidden");
+  toast.textContent = text;
+  toast.hidden = !(dialogOpen && text);
+  fadeToast();
+}
+
+function fadeToast() {
+  clearTimeout(toastTimer);
+  const toast = $("job-toast");
+  if (!toast.hidden && !runningJobs.length) {
+    toastTimer = setTimeout(() => { toast.hidden = true; }, 8000);
+  }
+}
+
 function log(line) {
-  $("job-status").textContent = line;
+  setStatus(line);
 }
 
 function showError(message) {
   const text = String(message ?? "").replace(/^Error:\s*/, "").trim() || "Something went wrong.";
-  $("job-status").textContent = "";
+  setStatus("");
   $("job-error-text").textContent = text;
   $("job-error").classList.remove("hidden");
 }
@@ -67,8 +92,31 @@ async function pickDir(title) {
 }
 
 async function remember() {
-  if (!native()) return;
-  try { await invoke("save_settings", { settings: collectSettings() }); } catch (_) { /* ignore */ }
+  if (!native()) return true;
+  try {
+    await invoke("save_settings", { settings: collectSettings() });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function saveButton(id) {
+  const btn = $(id);
+  const label = btn.textContent;
+  btn.onclick = async () => {
+    const ok = await remember();
+    btn.textContent = ok ? "Saved" : "Could not save";
+    setTimeout(() => { btn.textContent = label; }, 1500);
+  };
+}
+
+function xboxPort() {
+  const text = $("xbox-port").value.trim();
+  if (!text) return 21;
+  const n = Number(text);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error("The port must be a number from 1 to 65535 (the usual one is 21).");
+  return n;
 }
 
 function maxJobs() {
@@ -80,6 +128,7 @@ function showJobs() {
   const bar = $("job-progress");
   if (!runningJobs.length) {
     bar.hidden = true;
+    fadeToast();
     setPresence(currentView, null);
     return;
   }
@@ -119,6 +168,7 @@ function isIso(path) {
 
 function openModal(name) {
   closeModal();
+  $("job-toast").hidden = true;
   $("overlay").classList.remove("hidden");
   $(`modal-${name}`).classList.remove("hidden");
   const view = { library: "library", mods: "mods", homebrew: "homebrew", xbox: "xbox", dlc: "content", archive: "extract", settings: "settings" }[name] || "extract";
@@ -127,6 +177,7 @@ function openModal(name) {
 
 function closeModal() {
   $("overlay").classList.add("hidden");
+  $("job-toast").hidden = true;
   document.querySelectorAll(".modal").forEach((el) => el.classList.add("hidden"));
   setPresence("extract", null);
 }
@@ -137,7 +188,7 @@ function collectSettings() {
     usbRoot: $("usb-dest").value,
     downloadDir: $("dl-dest").value,
     xboxHost: $("xbox-host").value,
-    xboxPort: Number($("xbox-port").value || 21),
+    xboxPort: Number($("xbox-port").value) || 21,
     xboxUser: $("xbox-user").value,
     xboxPass: $("xbox-pass").value,
     xboxName: $("xbox-name").value,
@@ -193,7 +244,7 @@ function setList(id, paths) {
   el.innerHTML = "";
   paths.forEach((p, i) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span>${p}</span><button type="button">remove</button>`;
+    li.innerHTML = `<span>${esc(p)}</span><button type="button">remove</button>`;
     li.querySelector("button").onclick = () => {
       paths.splice(i, 1);
       setList(id, paths);
@@ -227,7 +278,9 @@ function extractSummary(result) {
   const left = result.reduce((n, r) => n + (r.inner_left || 0), 0);
   let text = opened ? `Extracted ${count} archive(s) and opened ${opened} inside.` : `Extracted ${count} archive(s).`;
   if (left) {
-    text += ` ${left} zip/rar/7z file(s) inside were left closed. Turn on "Open zips inside zips" to open them.`;
+    text += $("extract-nested").checked
+      ? ` ${left} zip/rar/7z file(s) inside could not be opened and were left as they are.`
+      : ` ${left} zip/rar/7z file(s) inside were left closed. Turn on "Open zips inside zips" to open them.`;
   }
   return text;
 }
@@ -240,6 +293,9 @@ async function handlePaths(paths) {
   const tasks = [];
   if (archives.length) {
     setList("recent-files", archives.slice());
+    if (!$("extract-auto").checked) {
+      log(`Added ${archives.length} file(s) but nothing was extracted. Turn on "Extract as soon as they open" to extract on drop.`);
+    }
     if ($("extract-auto").checked) {
       if (!dest) {
         showError("Choose a destination folder first.");
@@ -256,12 +312,15 @@ async function handlePaths(paths) {
             nested: $("extract-nested").checked,
           });
           log(extractSummary(result));
-          await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` });
           found = result.flatMap((r) => r.isos || []);
+          await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` }).catch(() => {});
         });
         if (found.length) await convertIsos(found, dest);
       })());
     }
+  }
+  if (isos.length && $("auto-iso").value === "off") {
+    log("Auto ISO is Off, so the disc image was left alone. Pick GOD or XEX to convert it.");
   }
   if (isos.length && $("auto-iso").value !== "off") {
     if (!dest) {
@@ -283,7 +342,7 @@ function renderHomebrew() {
       const card = document.createElement("article");
       card.className = "card";
       const save = t.cat === "Save Editors";
-      card.innerHTML = `<div><h3>${t.name}</h3><span class="tag${save ? " save" : ""}">${t.cat}</span></div><p>${t.blurb}</p><button type="button">Open source page</button>`;
+      card.innerHTML = `<div><h3>${esc(t.name)}</h3><span class="tag${save ? " save" : ""}">${esc(t.cat)}</span></div><p>${esc(t.blurb)}</p><button type="button">Open source page</button>`;
       card.querySelector("button").onclick = async () => {
         try { await invoke("open_path", { path: t.url }); }
         catch (e) { showError(e); window.open(t.url, "_blank"); }
@@ -310,7 +369,7 @@ async function refreshLibrary() {
     empty.classList.add("hidden");
     items.forEach((item) => {
       const li = document.createElement("li");
-      li.innerHTML = `<span>${item.name}</span><span class="muted">${item.kind} ${item.title_id || ""}</span>`;
+      li.innerHTML = `<span>${esc(item.name)}</span><span class="muted">${esc(item.kind)} ${esc(item.title_id || "")}</span>`;
       li.onclick = () => {
         state.xboxFiles = [item.path].filter(Boolean);
         if (state.xboxFiles.length) {
@@ -375,10 +434,10 @@ async function init() {
     if (native()) {
       const meta = await invoke("app_meta");
       $("settings-meta").innerHTML = `
-        <dt>Version</dt><dd>${meta.version}</dd>
+        <dt>Version</dt><dd>${esc(meta.version)}</dd>
         <dt>TitleIDs</dt><dd>${meta.title_count.toLocaleString()}</dd>
-        <dt>7-Zip</dt><dd>${meta.seven_zip || "not found (put 7za.exe next to Unpack.exe)"}</dd>
-        <dt>Config</dt><dd>${meta.config_dir}</dd>`;
+        <dt>7-Zip</dt><dd>${esc(meta.seven_zip || "not found (put 7za.exe next to Unpack.exe)")}</dd>
+        <dt>Config</dt><dd>${esc(meta.config_dir)}</dd>`;
       state.settings = await invoke("load_settings");
       applySettings(state.settings);
       const presenceOn = state.settings?.discordPresence !== false;
@@ -395,7 +454,7 @@ async function init() {
       const p = event.payload;
       $("job-progress").max = Math.max(1, p.total);
       $("job-progress").value = p.current;
-      $("job-status").textContent = p.message;
+      setStatus(p.message);
     });
     try {
       const webview = window.__TAURI__.webview.getCurrentWebview();
@@ -438,15 +497,21 @@ async function init() {
     const d = await pickDir("Extract to");
     if (d) $("extract-dest").value = d;
   };
-  $("sample-zip").onclick = () => job("Creating sample ZIP…", async () => {
-    const dest = $("extract-dest").value.trim();
-    if (!dest) throw new Error("Choose a destination folder first.");
-    const inputs = await pickMany("Pick any small file to pack as a sample");
-    if (!inputs.length) throw new Error("Pick a file to wrap in a sample ZIP, or drop a real archive.");
-    const out = `${dest.replace(/[\\/]+$/, "")}/Unpack-sample.zip`;
-    await invoke("create_archive", { inputs, dest: out });
-    await handlePaths([out]);
-  });
+  $("sample-zip").onclick = async () => {
+    let sample = null;
+    await job("Creating sample ZIP…", async () => {
+      const dest = $("extract-dest").value.trim();
+      if (!dest) throw new Error("Choose a destination folder first.");
+      const inputs = await pickMany("Pick any small file to pack as a sample");
+      if (!inputs.length) throw new Error("Pick a file to wrap in a sample ZIP, or drop a real archive.");
+      const out = `${dest.replace(/[\\/]+$/, "")}/Unpack-sample.zip`;
+      await invoke("create_archive", { inputs, dest: out });
+      sample = out;
+    });
+    // Extracting is its own job. Starting it from inside this one would wait
+    // for a slot this job is still holding, and hang when only one job may run.
+    if (sample) await handlePaths([sample]);
+  };
 
   $("pick-library").onclick = async () => {
     const d = await pickDir("Game library folder");
@@ -454,18 +519,33 @@ async function init() {
   };
   $("scan-library").onclick = () => job("Scanning library…", refreshLibrary);
 
+  const renderMods = () => {
+    const q = $("mods-search").value.trim().toLowerCase();
+    const list = $("mods-list");
+    list.innerHTML = "";
+    state.modFiles.forEach((p, i) => {
+      if (q && !p.toLowerCase().includes(q)) return;
+      const li = document.createElement("li");
+      li.innerHTML = `<span>${esc(p)}</span><button type="button">remove</button>`;
+      li.querySelector("button").onclick = () => {
+        state.modFiles.splice(i, 1);
+        renderMods();
+      };
+      list.appendChild(li);
+    });
+    $("mods-empty").classList.toggle("hidden", state.modFiles.length > 0);
+  };
+  $("mods-search").oninput = renderMods;
   $("pick-mod-files").onclick = async () => {
     const files = await pickMany("Mod files");
     state.modFiles.push(...files);
-    $("mods-empty").classList.toggle("hidden", state.modFiles.length > 0);
-    setList("mods-list", state.modFiles);
+    renderMods();
   };
   $("pick-mod-folder").onclick = async () => {
     const d = await pickDir("Mods folder");
     if (d) {
       state.modFiles.push(d);
-      $("mods-empty").classList.toggle("hidden", true);
-      setList("mods-list", state.modFiles);
+      renderMods();
     }
   };
   $("pick-dl-dest").onclick = async () => {
@@ -491,7 +571,7 @@ async function init() {
         el.innerHTML = "";
         rows.forEach((r) => {
           const li = document.createElement("li");
-          li.innerHTML = `<span>${r.name}</span><span>${r.title_id}</span>`;
+          li.innerHTML = `<span>${esc(r.name)}</span><span>${esc(r.title_id)}</span>`;
           el.appendChild(li);
         });
       } catch (e) { showError(e); }
@@ -514,17 +594,17 @@ async function init() {
   $("xbox-test").onclick = () => job("Connecting…", async () => {
     const msg = await invoke("xbox_test", {
       host: $("xbox-host").value,
-      port: Number($("xbox-port").value || 21),
+      port: xboxPort(),
       user: $("xbox-user").value,
       pass: $("xbox-pass").value,
     });
     log(msg);
   });
-  $("xbox-save").onclick = remember;
+  saveButton("xbox-save");
   $("run-send").onclick = () => job("Sending to Xbox…", async () => {
     const report = await invoke("send_to_xbox", {
       host: $("xbox-host").value,
-      port: Number($("xbox-port").value || 21),
+      port: xboxPort(),
       user: $("xbox-user").value,
       pass: $("xbox-pass").value,
       dest: "/Hdd1/Games",
@@ -548,6 +628,7 @@ async function init() {
     if (!state.packFiles.length || !state.packOut) throw new Error("Choose files and an archive name.");
     const result = await invoke("create_archive", { inputs: state.packFiles, dest: state.packOut });
     log(`Created ${result.archive}`);
+    $("pack-out").textContent = `Created ${result.archive}`;
   });
 
   $("pick-packages").onclick = async () => {
@@ -559,15 +640,23 @@ async function init() {
     if (d) $("content-root").value = d;
   };
   $("run-place").onclick = () => job("Placing DLC / updates…", async () => {
+    if (!state.packageFiles.length) throw new Error("Choose DLC / TU files first.");
     if (!$("content-root").value) throw new Error("Choose a library or USB root.");
     const el = $("content-results");
     el.innerHTML = "";
+    let failed = 0;
     for (const path of state.packageFiles) {
-      const item = await invoke("place_content", { path, libraryRoot: $("content-root").value });
       const li = document.createElement("li");
-      li.innerHTML = `<span>${item.name || path}</span><span>${item.detail}</span>`;
+      try {
+        const item = await invoke("place_content", { path, libraryRoot: $("content-root").value });
+        li.innerHTML = `<span>${esc(item.name || path)}</span><span>${esc(item.detail)}</span>`;
+      } catch (e) {
+        failed++;
+        li.innerHTML = `<span>${esc(path)}</span><span>${esc(String(e && e.message || e))}</span>`;
+      }
       el.appendChild(li);
     }
+    if (failed) throw new Error(`${failed} of ${state.packageFiles.length} package(s) could not be placed. See the list.`);
   });
 
   $("max-jobs").onchange = remember;
@@ -578,7 +667,7 @@ async function init() {
     await invoke("discord_set_enabled", { enabled }).catch(() => {});
     await remember();
   };
-  $("save-settings").onclick = remember;
+  saveButton("save-settings");
 
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
@@ -586,6 +675,16 @@ async function init() {
       $("drop-zone").click();
     }
     if (e.key === "Escape") closeModal();
+  });
+
+  // "Copy as path" in Explorer wraps the path in quotes, and pasted paths often carry spaces.
+  ["extract-dest", "library-root", "usb-dest", "dl-dest", "content-root"].forEach((id) => {
+    const input = $(id);
+    if (!input) return;
+    input.addEventListener("change", () => {
+      const clean = input.value.trim().replace(/^"(.*)"$/, "$1").trim();
+      if (clean !== input.value) input.value = clean;
+    });
   });
 
   syncIsoBadge();

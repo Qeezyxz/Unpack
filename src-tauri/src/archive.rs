@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ArchiveResult {
@@ -97,6 +97,7 @@ pub fn extract_archives_with(
     let seven = find_seven_zip().ok_or_else(|| {
         "7-Zip was not found. Put 7za.exe next to Unpack.exe, or install 7-Zip / p7zip and set UNPACK_7ZA.".to_string()
     })?;
+    crate::fileops::check_output_folder(dest)?;
     fs_create(dest)?;
     let mut results = Vec::new();
     let total = archives.len() as u64;
@@ -121,13 +122,11 @@ pub fn extract_archives_with(
         };
         match extract_one(&seven, archive, &out, opts, true) {
             Ok(status) => {
-                let mut nested = 0u32;
-                let mut inner_left = 0u32;
-                if opts.nested {
-                    nested = extract_nested(&seven, &out, opts, 1, &mut progress)?;
+                let (nested, inner_left) = if opts.nested {
+                    extract_nested(&seven, &out, opts, 1, &mut progress)?
                 } else {
-                    inner_left = find_archives(&out).len() as u32;
-                }
+                    (0, find_archives(&out).len() as u32)
+                };
                 results.push(ArchiveResult {
                     archive: archive.display().to_string(),
                     destination: out.display().to_string(),
@@ -197,13 +196,13 @@ fn extract_nested(
     opts: &ExtractOptions,
     depth: u32,
     progress: &mut Option<&mut dyn FnMut(String, u64, u64)>,
-) -> Result<u32, String> {
+) -> Result<(u32, u32), String> {
     if depth > MAX_NESTED_DEPTH {
-        return Ok(0);
+        return Ok((0, 0));
     }
     let nested = find_archives(root);
     if nested.is_empty() {
-        return Ok(0);
+        return Ok((0, 0));
     }
     if nested.len() > MAX_NESTED_ARCHIVES {
         return Err(format!(
@@ -213,6 +212,7 @@ fn extract_nested(
         ));
     }
     let mut opened = 0u32;
+    let mut left = 0u32;
     for (i, archive) in nested.iter().enumerate() {
         emit_progress(
             progress,
@@ -225,11 +225,31 @@ fn extract_nested(
         let Some(out) = unique_dir(parent, &stem, "number")? else {
             continue;
         };
-        extract_one(seven, archive, &out, opts, true)?;
+        // A broken or locked inner archive must not undo the outer one that
+        // already came out fine; it just stays where it is.
+        if extract_one(seven, archive, &out, opts, true).is_err() {
+            left += 1;
+            continue;
+        }
         opened += 1;
-        opened += extract_nested(seven, &out, opts, depth + 1, progress)?;
+        let (deeper, deeper_left) = extract_nested(seven, &out, opts, depth + 1, progress)?;
+        opened += deeper;
+        left += deeper_left;
     }
-    Ok(opened)
+    Ok((opened, left))
+}
+
+/// `game.part2.rar` and later volumes open together with `game.part1.rar`.
+fn is_later_rar_volume(lower_name: &str) -> bool {
+    let Some(base) = lower_name.strip_suffix(".rar") else {
+        return false;
+    };
+    let Some((_, number)) = base.rsplit_once(".part") else {
+        return false;
+    };
+    !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
+        && number.trim_start_matches('0') != "1"
 }
 
 fn is_archive_file(path: &Path) -> bool {
@@ -238,6 +258,9 @@ fn is_archive_file(path: &Path) -> bool {
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if is_later_rar_volume(&name) {
+        return false;
+    }
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") || name.ends_with(".tar.xz") {
         return true;
     }
@@ -291,7 +314,7 @@ fn walk_files(dir: &Path, depth: u32, max_depth: u32, visit: &mut dyn FnMut(&Pat
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if crate::fileops::is_plain_dir(&path) {
             walk_files(&path, depth + 1, max_depth, visit);
         } else {
             visit(&path);
@@ -300,10 +323,20 @@ fn walk_files(dir: &Path, depth: u32, max_depth: u32, visit: &mut dyn FnMut(&Pat
 }
 
 fn archive_stem(path: &Path) -> String {
-    path.file_stem()
+    let stem = path
+        .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "archive".into())
+        .unwrap_or_default();
+    // Windows drops a trailing space or dot from a folder name, so the folder
+    // we report would not be the folder that exists.
+    let stem = stem.trim().trim_end_matches('.').trim_end();
+    if stem.is_empty() {
+        "archive".into()
+    } else if crate::paths::is_windows_device_name(stem) {
+        format!("_{stem}")
+    } else {
+        stem.to_string()
+    }
 }
 
 fn unique_dir(parent: &Path, stem: &str, existing: &str) -> Result<Option<PathBuf>, String> {
@@ -349,7 +382,7 @@ pub fn create_archive(inputs: &[PathBuf], dest: &Path) -> Result<ArchiveResult, 
     if let Some(parent) = dest.parent() {
         fs_create(parent)?;
     }
-    let mut args: Vec<OsString> = vec!["a".into(), "-y".into(), dest.as_os_str().to_os_string()];
+    let mut args: Vec<OsString> = vec!["a".into(), "-y".into(), "--".into(), dest.as_os_str().to_os_string()];
     for input in inputs {
         args.push(input.as_os_str().to_os_string());
     }
@@ -365,16 +398,27 @@ pub fn create_archive(inputs: &[PathBuf], dest: &Path) -> Result<ArchiveResult, 
 }
 
 fn run_7z(bin: &Path, args: &[OsString]) -> Result<String, String> {
-    let output = Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .args(args.iter().map(|a| a.as_os_str()))
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // No flashing console window, and no password prompt waiting on a keyboard.
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("failed to run {}: {e}", bin.display()))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let combined = format!("{stderr}{stdout}");
     if !output.status.success() {
-        if combined.to_ascii_lowercase().contains("wrong password")
-            || combined.to_ascii_lowercase().contains("encrypted")
+        let lower = combined.to_ascii_lowercase();
+        if lower.contains("wrong password")
+            || lower.contains("encrypted")
+            || lower.contains("enter password")
         {
             return Err("this archive is password-protected; Unpack does not prompt for passwords".into());
         }
@@ -402,6 +446,16 @@ fn fs_create(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folder_names_from_archives_are_safe_on_windows() {
+        assert_eq!(archive_stem(Path::new("/x/Halo 3.zip")), "Halo 3");
+        assert_eq!(archive_stem(Path::new("/x/Halo 3 .zip")), "Halo 3");
+        assert_eq!(archive_stem(Path::new("/x/CON.zip")), "_CON");
+        assert_eq!(archive_stem(Path::new("/x/aux.7z")), "_aux");
+        assert_eq!(archive_stem(Path::new("/x/game.part1.rar")), "game.part1");
+        assert_eq!(archive_stem(Path::new("/x/. .zip")), "archive");
+    }
+
     use super::*;
     use std::io::Write;
 
@@ -500,6 +554,123 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_inner_archive_does_not_undo_the_outer_one() {
+        let Some(bin) = find_seven_zip() else {
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("unpack-badinner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let stage = root.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(stage.join("broken.zip"), b"this is not a zip at all").unwrap();
+        let outer = root.join("outer.zip");
+        run_7z(
+            &bin,
+            &[
+                OsString::from("a"),
+                OsString::from("-y"),
+                outer.as_os_str().to_os_string(),
+                stage.join("keep.txt").as_os_str().to_os_string(),
+                stage.join("broken.zip").as_os_str().to_os_string(),
+            ],
+        )
+        .unwrap();
+        let dest = root.join("out");
+        let done = extract_archives_with(&[outer], &dest, &ExtractOptions::default(), None)
+            .expect("the outer archive came out fine, so this is not an error");
+        assert_eq!(std::fs::read_to_string(dest.join("outer").join("keep.txt")).unwrap(), "keep");
+        assert!(dest.join("outer").join("broken.zip").is_file(), "the bad inner file stays");
+        assert_eq!(done[0].nested, 0);
+        assert_eq!(done[0].inner_left, 1);
+        let litter: Vec<_> = std::fs::read_dir(dest.join("outer")).unwrap().flatten().collect();
+        assert_eq!(litter.len(), 2, "no half-made folder for the bad inner archive");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn entries_that_climb_out_of_the_folder_stay_inside() {
+        if find_seven_zip().is_none() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("unpack-climb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // A zip written by hand (stored, no compression) with a "../" entry.
+        let zip = root.join("evil.zip");
+        std::fs::write(&zip, hand_made_zip(&[("../escaped.txt", b"nope"), ("fine.txt", b"ok")])).unwrap();
+        let dest = root.join("out");
+        let _ = extract_archives(&[zip], &dest);
+        assert!(!root.join("escaped.txt").exists(), "an entry escaped the destination");
+        assert_eq!(std::fs::read_to_string(dest.join("evil").join("fine.txt")).unwrap(), "ok");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn hand_made_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &b in data {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, data) in entries {
+            let offset = out.len() as u32;
+            let crc = crc32(data);
+            let mut local = Vec::new();
+            local.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            local.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            local.extend_from_slice(&crc.to_le_bytes());
+            local.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            local.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            local.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            local.extend_from_slice(&0u16.to_le_bytes());
+            local.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&local);
+            out.extend_from_slice(data);
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            central.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&[0u8; 12]);
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn extracting_into_a_file_says_so() {
+        if find_seven_zip().is_none() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("unpack-intofile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let blocker = root.join("blocker");
+        std::fs::write(&blocker, b"file").unwrap();
+        let err = extract_archives(&[root.join("x.zip")], &blocker.join("deeper")).unwrap_err();
+        assert!(err.contains("is a file, not a folder"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn unique_dir_adds_a_number() {
         let root = std::env::temp_dir().join(format!("unpack-unique-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -507,6 +678,75 @@ mod tests {
         let next = unique_dir(&root, "Game", "number").unwrap().unwrap();
         assert_eq!(next.file_name().unwrap(), "Game (2)");
         assert!(unique_dir(&root, "Game", "skip").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn later_rar_volumes_are_not_opened_on_their_own() {
+        assert!(is_later_rar_volume("game.part2.rar"));
+        assert!(is_later_rar_volume("game.part03.rar"));
+        assert!(is_later_rar_volume("game.part10.rar"));
+        assert!(!is_later_rar_volume("game.part1.rar"));
+        assert!(!is_later_rar_volume("game.part001.rar"));
+        assert!(!is_later_rar_volume("game.rar"));
+        assert!(!is_later_rar_volume("party.rar"));
+        assert!(is_archive_file(Path::new("x/game.part1.rar")));
+        assert!(!is_archive_file(Path::new("x/game.part2.rar")));
+    }
+
+    #[test]
+    fn password_protected_and_broken_archives_give_plain_errors() {
+        let Some(bin) = find_seven_zip() else {
+            eprintln!("skipping: 7-Zip not installed");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("unpack-badarc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let note = root.join("note.txt");
+        std::fs::write(&note, b"x").unwrap();
+        let locked = root.join("locked.7z");
+        run_7z(
+            &bin,
+            &[
+                OsString::from("a"),
+                OsString::from("-y"),
+                OsString::from("-psecret"),
+                OsString::from("-mhe=on"),
+                locked.as_os_str().to_os_string(),
+                note.as_os_str().to_os_string(),
+            ],
+        )
+        .unwrap();
+        let dest = root.join("out");
+        let err = extract_archives(&[locked], &dest).unwrap_err();
+        assert!(err.contains("password-protected"), "{err}");
+        assert!(!dest.join("locked").exists(), "a failed extract must not leave a folder");
+
+        let broken = root.join("broken.zip");
+        std::fs::write(&broken, b"PK\x03\x04 this is not really a zip").unwrap();
+        let err = extract_archives(&[broken], &dest).unwrap_err();
+        assert!(!err.is_empty());
+        assert!(!dest.join("broken").exists(), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_archive_handles_odd_names() {
+        if find_seven_zip().is_none() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("unpack-mkarc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let odd = root.join("-dash name.txt");
+        std::fs::write(&odd, b"odd").unwrap();
+        let out = root.join("-made.zip");
+        create_archive(&[odd], &out).unwrap();
+        let dest = root.join("out");
+        extract_archives(&[out], &dest).unwrap();
+        let found: Vec<_> = std::fs::read_dir(dest.join("-made")).unwrap().flatten().collect();
+        assert_eq!(found.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

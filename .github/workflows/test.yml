@@ -21,5 +21,7 @@ jobs:
             libayatana-appindicator3-dev libxdo-dev p7zip-full
       - name: Theme tests
         run: npm test
+      - name: UI tests (real app.js against a mock Tauri bridge)
+        run: bash tests/ui/run.sh
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml

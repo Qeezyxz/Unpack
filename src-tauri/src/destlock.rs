@@ -17,9 +17,39 @@ fn busy() -> &'static Busy {
     })
 }
 
+/// Canonical form of `path` even when the folder does not exist yet: the
+/// nearest existing parent is resolved and the missing names are put back on.
+fn resolve(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map(|d| d.join(path)).unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = absolute.as_path();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(probe) {
+            let mut out = real;
+            for name in missing.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+        match (probe.file_name(), probe.parent()) {
+            (Some(name), Some(parent)) => {
+                missing.push(name.to_os_string());
+                probe = parent;
+            }
+            _ => return absolute,
+        }
+    }
+}
+
 fn key(dest: &Path) -> PathBuf {
-    let base = std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf());
-    let text = base.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+    let base = resolve(dest);
+    let text = base.to_string_lossy().into_owned();
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    let text = text.trim_end_matches(['/', '\\']).to_string();
     #[cfg(windows)]
     let text = text.to_lowercase();
     PathBuf::from(text)
@@ -106,6 +136,18 @@ mod tests {
         let _gb = acquire(&b, || panic!("b should be free"));
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_folder_has_one_key_before_and_after_it_exists() {
+        let parent = fresh("later");
+        let child = parent.join("Out").join("Games");
+        let before = key(&child);
+        std::fs::create_dir_all(&child).unwrap();
+        assert_eq!(before, key(&child));
+        let relative = std::env::current_dir().unwrap();
+        assert_eq!(key(Path::new(".")), key(&relative));
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[test]

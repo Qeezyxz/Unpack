@@ -87,6 +87,7 @@ fn local_ipv4() -> Option<Ipv4Addr> {
 }
 
 pub fn test_login(host: &str, port: u16, user: &str, pass: &str) -> Result<String, String> {
+    let host = host.trim();
     if !net::is_lan_host(host) {
         return Err("Send to Xbox only accepts local network addresses".into());
     }
@@ -105,7 +106,8 @@ pub fn send_paths(
     include_launch_ini: bool,
     mut progress: impl FnMut(String, u64, u64),
 ) -> Result<SendReport, String> {
-    if host.trim().is_empty() {
+    let host = host.trim();
+    if host.is_empty() {
         return Err("Xbox IP is required".into());
     }
     if !net::is_lan_host(host) {
@@ -244,7 +246,7 @@ fn expand_files(paths_in: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     for p in paths_in {
         if p.is_dir() {
-            collect_files(p, &mut out)?;
+            collect_files(p, &mut out, 0)?;
         } else if p.exists() {
             out.push(p.clone());
         } else {
@@ -254,13 +256,16 @@ fn expand_files(paths_in: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) -> Result<(), String> {
+    if depth > crate::fileops::MAX_FOLDER_DEPTH {
+        return Err(crate::fileops::too_deep_message(dir));
+    }
     let entries = fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_files(&path, out)?;
+            collect_files(&path, out, depth + 1)?;
         } else {
             out.push(path);
         }
@@ -309,6 +314,309 @@ mod tests {
     fn missing_local_file_is_an_error() {
         let err = expand_files(&[PathBuf::from("/no/such/unpack-file.bin")]).unwrap_err();
         assert!(err.contains("not found"));
+    }
+
+    use crate::testftp::{Cfg, FakeFtp};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "unpack-xbox-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    fn blob(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 31 % 251) as u8).collect()
+    }
+
+    fn send(
+        fake: &FakeFtp,
+        paths: &[PathBuf],
+        launch: bool,
+    ) -> Result<SendReport, String> {
+        send_paths(
+            "127.0.0.1",
+            fake.port,
+            "xbox",
+            "xbox",
+            "/Hdd1/Games",
+            paths,
+            launch,
+            |_, _, _| {},
+        )
+    }
+
+    #[test]
+    fn uploads_a_folder_and_renames_the_part_file() {
+        let fake = FakeFtp::start(Cfg::default());
+        let dir = scratch("ok");
+        let game = dir.join("Halo");
+        fs::create_dir_all(game.join("Data")).unwrap();
+        fs::write(game.join("default.xex"), blob(5000)).unwrap();
+        fs::write(game.join("Data/0000"), blob(70_000)).unwrap();
+        let report = send(&fake, &[game], false).unwrap();
+        assert_eq!(report.uploaded, 2);
+        assert_eq!(report.resumed, 0);
+        assert_eq!(fake.file("Hdd1/Games/Halo/default.xex").unwrap(), blob(5000));
+        assert_eq!(fake.file("Hdd1/Games/Halo/Data/0000").unwrap(), blob(70_000));
+        assert!(fake.names().iter().all(|n| !n.ends_with(".part")), "{:?}", fake.names());
+    }
+
+    #[test]
+    fn a_second_send_of_the_same_file_is_skipped() {
+        let fake = FakeFtp::start(Cfg::default());
+        let dir = scratch("again");
+        let file = dir.join("game.bin");
+        fs::write(&file, blob(9000)).unwrap();
+        send(&fake, &[file.clone()], false).unwrap();
+        let before = fake.stors();
+        let report = send(&fake, &[file], false).unwrap();
+        assert_eq!(fake.stors(), before, "nothing should be uploaded twice");
+        assert!(report.warnings.iter().any(|w| w.contains("already on the Xbox")));
+    }
+
+    #[test]
+    fn a_dropped_transfer_resumes_with_rest() {
+        let fake = FakeFtp::start(Cfg {
+            drop_stor: vec![Some(600_000)],
+            ..Cfg::default()
+        });
+        let dir = scratch("rest");
+        let file = dir.join("big.bin");
+        let body = blob(1_500_000);
+        fs::write(&file, &body).unwrap();
+        let report = send(&fake, &[file], false).unwrap();
+        assert_eq!(report.resumed, 1);
+        assert_eq!(fake.logins(), 2, "one reconnect expected");
+        assert!(fake.saw("REST "));
+        assert_eq!(fake.file("Hdd1/Games/big.bin").unwrap(), body);
+        assert!(!fake.has("Hdd1/Games/big.bin.part"));
+    }
+
+    #[test]
+    fn resume_falls_back_to_append_without_rest() {
+        let fake = FakeFtp::start(Cfg {
+            drop_stor: vec![Some(600_000)],
+            rest_ok: false,
+            ..Cfg::default()
+        });
+        let dir = scratch("appe");
+        let file = dir.join("big.bin");
+        let body = blob(1_500_000);
+        fs::write(&file, &body).unwrap();
+        let report = send(&fake, &[file], false).unwrap();
+        assert_eq!(report.resumed, 1);
+        assert!(fake.saw("APPE "));
+        assert_eq!(fake.file("Hdd1/Games/big.bin").unwrap(), body);
+    }
+
+    #[test]
+    fn a_server_without_size_still_receives_the_file() {
+        let fake = FakeFtp::start(Cfg {
+            size_ok: false,
+            ..Cfg::default()
+        });
+        let dir = scratch("nosize");
+        let file = dir.join("game.bin");
+        fs::write(&file, blob(12_345)).unwrap();
+        let report = send(&fake, &[file], false).unwrap();
+        assert_eq!(report.uploaded, 1);
+        assert_eq!(fake.file("Hdd1/Games/game.bin").unwrap(), blob(12_345));
+    }
+
+    #[test]
+    fn a_pasted_ip_with_spaces_still_connects() {
+        let fake = FakeFtp::start(Cfg::default());
+        let msg = test_login("  127.0.0.1\t", fake.port, "xbox", "xbox").unwrap();
+        assert!(msg.starts_with("Connected to 127.0.0.1:"), "{msg}");
+        let dir = scratch("spaces");
+        let file = dir.join("a.bin");
+        fs::write(&file, blob(100)).unwrap();
+        let report = send_paths(" 127.0.0.1 ", fake.port, "xbox", "xbox", "/Hdd1/Games", &[file], false, |_, _, _| {}).unwrap();
+        assert_eq!(report.uploaded, 1);
+    }
+
+    #[test]
+    fn a_full_drive_stops_at_once_with_a_plain_message() {
+        let fake = FakeFtp::start(Cfg {
+            capacity: Some(400_000),
+            ..Cfg::default()
+        });
+        let dir = scratch("full");
+        let file = dir.join("big.bin");
+        fs::write(&file, blob(1_500_000)).unwrap();
+        let err = send(&fake, &[file], false).unwrap_err();
+        assert!(err.contains("drive is full"), "{err}");
+        assert_eq!(fake.logins(), 1, "a full drive is not a Wi-Fi drop, so no reconnect");
+        assert_eq!(fake.stors(), 1);
+    }
+
+    #[test]
+    fn a_connection_that_never_gets_going_gives_up_with_a_plain_message() {
+        let fake = FakeFtp::start(Cfg {
+            drop_stor: vec![Some(1000), Some(1000), Some(1000), Some(1000)],
+            ..Cfg::default()
+        });
+        let dir = scratch("stall");
+        let file = dir.join("big.bin");
+        fs::write(&file, blob(1_500_000)).unwrap();
+        let err = send(&fake, &[file], false).unwrap_err();
+        assert!(err.contains("stopped taking"), "{err}");
+        assert!(fake.logins() <= 3, "{} logins", fake.logins());
+    }
+
+    #[test]
+    fn launch_ini_is_skipped_unless_asked_and_replaced_atomically() {
+        let fake = FakeFtp::start(Cfg::default());
+        let dir = scratch("ini");
+        let ini = dir.join("launch.ini");
+        fs::write(&ini, b"[Paths]\nDefault = Hdd1:\\Games\n").unwrap();
+        let report = send(&fake, &[ini.clone()], false).unwrap();
+        assert_eq!(report.skipped_protected, 1);
+        assert!(!fake.has("Hdd1/Games/launch.ini"));
+        let report = send(&fake, &[ini], true).unwrap();
+        assert_eq!(report.uploaded, 1);
+        assert!(fake.has("Hdd1/Games/launch.ini"));
+        assert!(!fake.has("Hdd1/Games/launch.ini.part"));
+    }
+
+    #[test]
+    fn a_login_with_line_breaks_is_refused_before_it_is_sent() {
+        let fake = FakeFtp::start(Cfg::default());
+        let dir = scratch("crlf");
+        let file = dir.join("a.bin");
+        fs::write(&file, b"x").unwrap();
+        let err = send_paths(
+            "127.0.0.1",
+            fake.port,
+            "xbox\r\nDELE everything",
+            "xbox",
+            "/Hdd1/Games",
+            &[file],
+            false,
+            |_, _, _| {},
+        )
+        .unwrap_err();
+        assert!(err.contains("line breaks"), "{err}");
+        assert!(!fake.saw("DELE everything"));
+    }
+
+    /// Runs against a real FTP server (pyftpdlib) when UNPACK_REAL_FTP_PORT is
+    /// set, e.g. `UNPACK_REAL_FTP_PORT=2121 cargo test real_ftp -- --ignored`.
+    #[test]
+    #[ignore = "needs an external FTP server with user xbox / password xbox"]
+    fn real_ftp_server_round_trip() {
+        let Ok(port) = std::env::var("UNPACK_REAL_FTP_PORT") else {
+            return;
+        };
+        let port: u16 = port.parse().unwrap();
+        let root = std::env::var("UNPACK_REAL_FTP_ROOT").unwrap_or_else(|_| "/tmp/ftproot".into());
+        let dir = scratch("real");
+        let game = dir.join("Real Game");
+        fs::create_dir_all(game.join("Data")).unwrap();
+        let big = blob(3_000_000);
+        fs::write(game.join("default.xex"), blob(9000)).unwrap();
+        fs::write(game.join("Data/0000"), &big).unwrap();
+        fs::write(game.join("Data/Café número 2.txt"), b"accents and spaces").unwrap();
+        let go = || {
+            send_paths("127.0.0.1", port, "xbox", "xbox", "/Hdd1/Games", &[game.clone()], false, |_, _, _| {})
+        };
+        let first = go().unwrap();
+        assert_eq!(first.uploaded, 3, "{first:?}");
+        let accented = PathBuf::from(&root).join("Hdd1/Games/Real Game/Data/Café número 2.txt");
+        assert_eq!(fs::read(&accented).unwrap(), b"accents and spaces");
+        let on_disk = PathBuf::from(&root).join("Hdd1/Games/Real Game/Data/0000");
+        assert_eq!(fs::read(&on_disk).unwrap(), big);
+        let again = go().unwrap();
+        assert!(again.warnings.iter().any(|w| w.contains("already on the Xbox")), "{again:?}");
+        fs::remove_file(&on_disk).unwrap();
+        fs::write(on_disk.with_file_name("0000.part"), &big[..1_000_000]).unwrap();
+        let resumed = go().unwrap();
+        assert_eq!(resumed.resumed, 1, "{resumed:?}");
+        assert_eq!(fs::read(&on_disk).unwrap(), big);
+        assert!(!on_disk.with_file_name("0000.part").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_loop_in_the_folder_is_an_error() {
+        let dir = scratch("loop");
+        fs::create_dir_all(dir.join("game/sub")).unwrap();
+        fs::write(dir.join("game/sub/a.bin"), b"a").unwrap();
+        std::os::unix::fs::symlink(dir.join("game"), dir.join("game/sub/back")).unwrap();
+        let err = expand_files(&[dir.join("game")]).unwrap_err();
+        assert!(err.contains("nested too deeply"), "{err}");
+    }
+
+    #[test]
+    fn a_reply_with_accented_text_does_not_panic_the_client() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _ = s.write_all("220 hola\r\n".as_bytes());
+            let mut buf = [0u8; 256];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all("\u{e9}\u{e9}\u{e9} contrase\u{f1}a incorrecta\r\n".as_bytes());
+            let _ = s.write_all("\u{e9}\u{e9}1 mas\r\n".as_bytes());
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        let result = std::panic::catch_unwind(|| test_login("127.0.0.1", port, "xbox", "xbox"));
+        assert!(result.is_ok(), "the client panicked on a multi-byte reply");
+    }
+
+    #[test]
+    fn a_server_that_talks_nonsense_gets_an_error_not_a_panic_or_hang() {
+        use std::io::{Read, Write};
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..60 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let junk: Vec<u8> = (0..(next() % 300) as usize).map(|_| next() as u8).collect();
+            let texty = round % 3 == 0;
+            std::thread::spawn(move || {
+                let Ok((mut s, _)) = listener.accept() else { return };
+                if texty {
+                    let _ = s.write_all(b"220 ready\r\n");
+                    let mut buf = [0u8; 128];
+                    let _ = s.read(&mut buf);
+                    let _ = s.write_all(b"331 ");
+                }
+                let _ = s.write_all(&junk);
+            });
+            let started = std::time::Instant::now();
+            let result = std::panic::catch_unwind(|| test_login("127.0.0.1", port, "xbox", "xbox"));
+            assert!(result.is_ok(), "panic on round {round}");
+            assert!(started.elapsed() < std::time::Duration::from_secs(20), "hang on round {round}");
+        }
     }
 
     #[test]

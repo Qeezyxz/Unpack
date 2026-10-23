@@ -143,8 +143,6 @@
       <div class="tab-panel" id="mods-files">
         <div class="row">
           <input id="mods-search" placeholder="Search your mods…" />
-          <select id="mods-game"><option>All games</option></select>
-          <select id="mods-type"><option>All types</option></select>
           <button type="button" id="pick-mod-files" class="ghost">+ Add files…</button>
           <button type="button" id="pick-mod-folder" class="ghost">Add folder…</button>
         </div>
@@ -300,6 +298,8 @@
         <button type="button" class="primary close-modal">Done</button>
       </footer>
     </section>
+
+    <p class="toast" id="job-toast" role="status" aria-live="polite" hidden></p>
 
     <div class="alert hidden" id="job-error" role="alert" aria-live="assertive">
       <span class="alert-icon" aria-hidden="true">!</span>

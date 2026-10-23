@@ -84,7 +84,10 @@ pub fn copy_replace(src: &Path, dest: &Path) -> Result<(), String> {
     }
     let tmp = sibling(dest, "unpack-tmp");
     clear_path(&tmp)?;
-    fs::copy(src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
+    if let Err(e) = fs::copy(src, &tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("copy {}: {e}", src.display()));
+    }
     let src_len = fs::metadata(src).map_err(|e| e.to_string())?.len();
     let tmp_len = fs::metadata(&tmp).map_err(|e| e.to_string())?.len();
     if src_len != tmp_len {
@@ -95,6 +98,21 @@ pub fn copy_replace(src: &Path, dest: &Path) -> Result<(), String> {
         ));
     }
     replace_file(&tmp, dest)
+}
+
+/// A real folder, not a symlink or junction that could point back up the tree.
+pub fn is_plain_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).map(|m| m.is_dir()).unwrap_or(false)
+}
+
+/// Folders nested deeper than this are almost certainly a link loop.
+pub const MAX_FOLDER_DEPTH: u32 = 48;
+
+pub fn too_deep_message(path: &Path) -> String {
+    format!(
+        "{} is nested too deeply (is there a shortcut or link that points back up the folder tree?)",
+        path.display()
+    )
 }
 
 pub fn clear_path(path: &Path) -> Result<(), String> {
@@ -150,6 +168,27 @@ impl Drop for Staging {
             let _ = fs::remove_dir_all(&self.path);
         }
     }
+}
+
+/// Say plainly when a chosen output folder cannot be used, before any work
+/// starts. Nothing is created: only the nearest folder that already exists is
+/// looked at.
+pub fn check_output_folder(path: &Path) -> Result<(), String> {
+    let mut probe = Some(path);
+    while let Some(p) = probe {
+        match fs::metadata(p) {
+            Ok(meta) if meta.is_dir() => return Ok(()),
+            Ok(_) => {
+                return Err(format!(
+                    "The output folder \"{}\" can't be used because \"{}\" is a file, not a folder.",
+                    path.display(),
+                    p.display()
+                ))
+            }
+            Err(_) => probe = p.parent().filter(|q| !q.as_os_str().is_empty()),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

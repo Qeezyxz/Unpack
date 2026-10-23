@@ -66,8 +66,7 @@ fn utf16be_zstring(bytes: &[u8]) -> String {
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .take_while(|u| *u != 0)
         .collect();
-    String::from_utf16(&units)
-        .unwrap_or_default()
+    String::from_utf16_lossy(&units)
         .trim()
         .to_string()
 }
@@ -114,5 +113,33 @@ mod tests {
         let info = parse_stfs_bytes(&buf).unwrap();
         assert_eq!(info.title_id, "4D5307E6");
         assert!(info.display_name.is_empty());
+    }
+
+    #[test]
+    fn random_and_truncated_packages_never_panic() {
+        let mut seed = 0x2545F4914F6CDD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..2000 {
+            let len = (next() as usize) % 0x900;
+            let mut buf: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            if round % 2 == 0 && buf.len() >= 4 {
+                buf[0..4].copy_from_slice([b"CON ", b"LIVE", b"PIRS"][round % 3]);
+            }
+            let _ = parse_stfs_bytes(&buf);
+        }
+        let odd_name = {
+            let mut buf = sample_package(1, 2, "x");
+            buf[0x411] = 0xD8;
+            buf[0x412] = 0x00;
+            buf[0x413] = 0x00;
+            buf[0x414] = 0x41;
+            buf
+        };
+        assert!(parse_stfs_bytes(&odd_name).unwrap().display_name.ends_with('A'));
     }
 }

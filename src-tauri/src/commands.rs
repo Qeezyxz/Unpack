@@ -47,17 +47,25 @@ pub fn app_meta(app: AppHandle) -> Result<AppMeta, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_settings(app: AppHandle) -> Result<serde_json::Value, String> {
     let path = settings_path(&app)?;
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| e.to_string())
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) if value.is_object() => Ok(value),
+        _ => {
+            // Keep the unreadable file for the user and start from defaults
+            // instead of failing every launch.
+            let _ = std::fs::copy(&path, path.with_file_name("settings.json.bad"));
+            Ok(serde_json::json!({}))
+        }
+    }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
     let path = settings_path(&app)?;
     let body = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
@@ -87,7 +95,7 @@ pub fn discord_set_enabled(app: AppHandle, enabled: bool) -> Result<(), String> 
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pick_files(app: AppHandle, title: Option<String>, extensions: Option<Vec<String>>) -> Result<Vec<String>, String> {
     let mut dialog = app.dialog().file();
     if let Some(title) = title {
@@ -105,7 +113,7 @@ pub fn pick_files(app: AppHandle, title: Option<String>, extensions: Option<Vec<
         .collect())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pick_folder(app: AppHandle, title: Option<String>) -> Result<Option<String>, String> {
     let mut dialog = app.dialog().file();
     if let Some(title) = title {
@@ -114,7 +122,7 @@ pub fn pick_folder(app: AppHandle, title: Option<String>) -> Result<Option<Strin
     Ok(dialog.blocking_pick_folder().and_then(dialog_path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pick_save(app: AppHandle, title: Option<String>, default_name: Option<String>) -> Result<Option<String>, String> {
     let mut dialog = app.dialog().file();
     if let Some(title) = title {
@@ -138,18 +146,26 @@ pub fn notify(app: AppHandle, title: String, body: String) -> Result<(), String>
 
 #[tauri::command]
 pub fn open_path(app: AppHandle, path: String) -> Result<(), String> {
-    if path.starts_with("http://") || path.starts_with("https://") {
+    if is_web_url(&path) {
         app.opener()
             .open_url(path, None::<&str>)
             .map_err(|e| e.to_string())
-    } else {
+    } else if std::path::Path::new(&path).is_dir() {
         app.opener()
             .open_path(path, None::<&str>)
             .map_err(|e| e.to_string())
+    } else {
+        // Launching an arbitrary file would run it, so only pages and folders open.
+        Err("Unpack only opens web pages and folders".into())
     }
 }
 
-#[tauri::command]
+fn is_web_url(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+#[tauri::command(async)]
 pub fn xbox_test(host: String, port: u16, user: String, pass: String) -> Result<String, String> {
     xbox::test_login(&host, port, &user, &pass)
 }
@@ -274,17 +290,17 @@ pub async fn scan_library(root: String) -> Result<Vec<library::LibraryItem>, Str
         .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn parse_package(path: String) -> Result<stfs::StfsInfo, String> {
     stfs::parse_stfs_file(&PathBuf::from(path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn place_content(path: String, library_root: String) -> Result<library::LibraryItem, String> {
     library::place_content(&PathBuf::from(path), &PathBuf::from(library_root))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn volume_info(path: String) -> Result<usb::VolumeInfo, String> {
     usb::filesystem_for(&PathBuf::from(path))
 }
@@ -321,7 +337,7 @@ pub async fn copy_to_usb(
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn hash_file(path: String) -> Result<serde_json::Value, String> {
     let p = PathBuf::from(path);
     Ok(serde_json::json!({
@@ -343,6 +359,9 @@ pub async fn download_url(
     let dest = download::dest_for_url(&PathBuf::from(dest_dir), &url);
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _file = destlock::acquire(&dest, || {
+            progress::emit(&app2, "download", destlock::WAIT_MESSAGE, 0, 1);
+        });
         download::download_url(
             &url,
             &dest,
@@ -393,7 +412,21 @@ pub async fn send_to_xbox(
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_dir(path: String) -> Result<Vec<String>, String> {
     library::list_dir(&PathBuf::from(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_web_url;
+
+    #[test]
+    fn only_web_pages_count_as_urls() {
+        assert!(is_web_url("https://example.com/a"));
+        assert!(is_web_url("HTTP://example.com"));
+        assert!(!is_web_url("file:///etc/passwd"));
+        assert!(!is_web_url("C:\\Windows\\notepad.exe"));
+        assert!(!is_web_url("ms-settings:"));
+    }
 }

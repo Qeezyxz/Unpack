@@ -1,3 +1,4 @@
+use crate::net;
 use crate::paths;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -48,6 +49,7 @@ impl FtpClient {
     }
 
     pub fn command(&mut self, line: &str) -> Result<(u16, String), String> {
+        reject_line_break(line)?;
         self.writer
             .write_all(format!("{line}\r\n").as_bytes())
             .map_err(|e| e.to_string())?;
@@ -68,7 +70,9 @@ impl FtpClient {
             }
             text.push_str(&line);
             if line.len() >= 4 {
-                let code: u16 = line[0..3].parse().unwrap_or(0);
+                // `get` because a reply with accented text in its first bytes
+                // must not panic on a character boundary.
+                let code: u16 = line.get(0..3).and_then(|c| c.parse().ok()).unwrap_or(0);
                 if line.as_bytes()[3] == b' ' {
                     return Ok((code, text));
                 }
@@ -83,8 +87,10 @@ impl FtpClient {
         }
         let addr = parse_pasv(&msg, self.control_ip)?;
         let stream = connect_timeout(&addr, Duration::from_secs(8))?;
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(600)));
+        // A single 64 KB write that makes no progress for this long means the
+        // console is gone; fail so Send can reconnect instead of hanging.
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(90)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
         Ok(stream)
     }
 
@@ -207,11 +213,7 @@ impl FtpClient {
     fn size_of(&mut self, name: &str) -> Result<Option<u64>, String> {
         let (code, msg) = self.command(&format!("SIZE {name}"))?;
         if code == 213 {
-            let n = msg
-                .split_whitespace()
-                .find_map(|p| p.parse::<u64>().ok())
-                .ok_or_else(|| format!("bad SIZE reply: {msg}"))?;
-            Ok(Some(n))
+            Ok(parse_size_reply(&msg).ok())
         } else {
             // FSD/FileZilla-on-XeXMenu often lack SIZE. Skip rather than fail.
             Ok(None)
@@ -254,6 +256,7 @@ impl FtpClient {
                 return Err(format!("REST {offset} rejected: {code} {msg}"));
             }
         }
+        reject_line_break(name)?;
         self.writer
             .write_all(format!("{cmd} {name}\r\n").as_bytes())
             .map_err(|e| e.to_string())?;
@@ -372,7 +375,36 @@ pub fn looks_like_drop(err: &str) -> bool {
         || e.contains("broken pipe")
         || e.contains("connection reset")
         || e.contains("os error 10054")
+        || e.contains("os error 10053")
+        || e.contains("os error 10060")
         || e.contains("os error 104")
+        || e.contains("os error 110")
+        || e.contains("os error 32")
+        || e.contains("did not properly respond")
+        || e.contains("forcibly closed")
+        || e.contains("connection was aborted")
+        || e.contains("unexpected eof")
+        || e.contains("failed to fill whole buffer")
+}
+
+/// The reply text starts with the 3-digit code ("213 1048576"); the size is
+/// the number after it.
+fn parse_size_reply(msg: &str) -> Result<u64, String> {
+    msg.lines()
+        .find_map(|line| {
+            let rest = line.strip_prefix("213")?;
+            rest.split_whitespace().next()?.parse::<u64>().ok()
+        })
+        .ok_or_else(|| format!("bad SIZE reply: {}", msg.trim()))
+}
+
+/// A line break inside a command would let one FTP command smuggle in another.
+fn reject_line_break(text: &str) -> Result<(), String> {
+    if text.contains('\r') || text.contains('\n') || text.contains('\0') {
+        Err("FTP commands cannot contain line breaks (check the Xbox login and file names)".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn connect_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
@@ -380,7 +412,12 @@ fn connect_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
     if addrs.is_empty() {
         return Err(format!("could not resolve {addr}"));
     }
-    TcpStream::connect_timeout(&addrs[0], timeout).map_err(|e| format!("{addr}: {e}"))
+    let Some(local) = addrs.iter().find(|a| net::is_lan_ip(a.ip())) else {
+        return Err(format!(
+            "{addr} points outside your local network. Send to Xbox only talks to a local address."
+        ));
+    };
+    TcpStream::connect_timeout(local, timeout).map_err(|e| format!("{addr}: {e}"))
 }
 
 fn xbox_path_candidates(path: &str) -> Vec<String> {
@@ -485,6 +522,28 @@ mod tests {
         assert_eq!(resume_action(1000, None, Some(0)), ResumeAction::Restart);
         assert!(looks_like_drop("transfer dropped while sending game.xex: reset"));
         assert!(!looks_like_drop("CWD /Hdd1 failed: 550"));
+        for windows_text in [
+            "An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond. (os error 10060)",
+            "An established connection was aborted by the software in your host machine. (os error 10053)",
+        ] {
+            assert!(looks_like_drop(windows_text), "{windows_text}");
+        }
+        assert!(!looks_like_drop("PASV failed: 425 Can't open data connection"));
+    }
+
+    #[test]
+    fn line_breaks_cannot_smuggle_ftp_commands() {
+        assert!(reject_line_break("game.xex").is_ok());
+        assert!(reject_line_break("a.xex\r\nDELE launch.ini").is_err());
+        assert!(reject_line_break("a\nb").is_err());
+        assert!(reject_line_break("a\0b").is_err());
+    }
+
+    #[test]
+    fn public_resolution_is_refused() {
+        let err = connect_timeout("8.8.8.8:21", Duration::from_millis(50)).unwrap_err();
+        assert!(err.contains("outside your local network"), "{err}");
     }
 
     #[test]
@@ -501,6 +560,36 @@ mod tests {
         assert!(stalled(0));
         assert!(stalled(STALL_BYTES - 1));
         assert!(!stalled(STALL_BYTES));
+    }
+
+    #[test]
+    fn odd_pasv_replies_never_panic() {
+        let fallback = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
+        for msg in [
+            "",
+            "227",
+            "227 ()",
+            "227 )(",
+            "227 (1,2,3)",
+            "227 (999,999,999,999,999,999)",
+            "227 (a,b,c,d,e,f)",
+            "227 (192,168,1,5,255,255)",
+            "227 (192,168,1,5,-1,2)",
+            "227 Entering (1,2,3,4,5,6,7,8)",
+            "227 \u{e9}\u{e9} (1,2,3,4,5,6)",
+        ] {
+            let _ = parse_pasv(msg, fallback);
+        }
+        assert!(parse_pasv("227 )(", fallback).is_err());
+    }
+
+    #[test]
+    fn size_reply_is_the_number_after_the_code() {
+        assert_eq!(parse_size_reply("213 1048576\r\n").unwrap(), 1_048_576);
+        assert_eq!(parse_size_reply("213 0\r\n").unwrap(), 0);
+        assert_eq!(parse_size_reply("213-status\r\n213 77\r\n").unwrap(), 77);
+        assert!(parse_size_reply("213 lots\r\n").is_err());
+        assert!(parse_size_reply("213\r\n").is_err());
     }
 
     #[test]

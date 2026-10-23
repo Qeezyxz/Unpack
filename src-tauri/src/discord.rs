@@ -89,7 +89,9 @@ fn worker(rx: Receiver<Cmd>) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let mut enabled = true;
+    // Stay silent until the saved setting says presence is wanted, so someone
+    // who turned it off never flashes on Discord at launch.
+    let mut enabled = false;
     let mut client: Option<DiscordIpcClient> = None;
     let mut last = ActivityText {
         details: "Xbox 360 toolkit".into(),

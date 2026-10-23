@@ -6,7 +6,8 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "test": "node src/theme.test.mjs"
+    "test": "node src/theme.test.mjs",
+    "test:ui": "bash tests/ui/run.sh"
   },
   "devDependencies": { "@tauri-apps/cli": "2.12.3" }
 }
