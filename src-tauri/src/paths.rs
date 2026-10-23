@@ -88,7 +88,7 @@ pub fn sanitize_xbox_folder_name(name: &str) -> String {
 }
 
 /// `CON`, `NUL`, `COM1` and friends cannot be folder names on Windows.
-fn is_windows_device_name(name: &str) -> bool {
+pub fn is_windows_device_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
     matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || (stem.len() == 4

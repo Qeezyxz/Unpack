@@ -316,10 +316,20 @@ fn walk_files(dir: &Path, depth: u32, max_depth: u32, visit: &mut dyn FnMut(&Pat
 }
 
 fn archive_stem(path: &Path) -> String {
-    path.file_stem()
+    let stem = path
+        .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "archive".into())
+        .unwrap_or_default();
+    // Windows drops a trailing space or dot from a folder name, so the folder
+    // we report would not be the folder that exists.
+    let stem = stem.trim().trim_end_matches('.').trim_end();
+    if stem.is_empty() {
+        "archive".into()
+    } else if crate::paths::is_windows_device_name(stem) {
+        format!("_{stem}")
+    } else {
+        stem.to_string()
+    }
 }
 
 fn unique_dir(parent: &Path, stem: &str, existing: &str) -> Result<Option<PathBuf>, String> {
@@ -429,6 +439,16 @@ fn fs_create(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folder_names_from_archives_are_safe_on_windows() {
+        assert_eq!(archive_stem(Path::new("/x/Halo 3.zip")), "Halo 3");
+        assert_eq!(archive_stem(Path::new("/x/Halo 3 .zip")), "Halo 3");
+        assert_eq!(archive_stem(Path::new("/x/CON.zip")), "_CON");
+        assert_eq!(archive_stem(Path::new("/x/aux.7z")), "_aux");
+        assert_eq!(archive_stem(Path::new("/x/game.part1.rar")), "game.part1");
+        assert_eq!(archive_stem(Path::new("/x/. .zip")), "archive");
+    }
+
     use super::*;
     use std::io::Write;
 
