@@ -29,6 +29,7 @@
   --danger: #c62828;
   --shadow: 0 18px 50px rgba(16, 24, 32, 0.12);
   --drop-line: #aebccd;
+  --card-btn: #eef2f7;
   color-scheme: light;
 }
 * { box-sizing: border-box; }
@@ -362,7 +363,7 @@ button.primary {
 .tag.save { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
 .card button {
   align-self: flex-start;
-  background: #11151c;
+  background: var(--card-btn, #11151c);
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 6px 10px;
