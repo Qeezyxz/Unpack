@@ -1,8 +1,24 @@
 # Unpack
 
-Unpack **1.4.0** is a Windows (and Linux-dev) desktop tool for extracting archives (ZIP, RAR, 7Z, and more), converting Xbox 360 ISOs to Games on Demand or extracted XEX folders, managing a game library, installing DLC/title updates, handling mod menus, and sending files to a modded Xbox 360 over the local network. While it is open, Discord can show Rich Presence (current tool and job). You can turn that off in Settings.
+This GitHub repository is the **complete source code** for Unpack. It is public / open source: you can clone it, read it, change it, and build it yourself.
+
+Unpack is a Windows (and Linux-dev) desktop tool for extracting archives (ZIP, RAR, 7Z, and more), converting Xbox 360 ISOs to Games on Demand or extracted XEX folders, managing a game library, installing DLC/title updates, handling mod menus, and sending files to a modded Xbox 360 over the local network.
 
 Use at your own risk. Back up `launch.ini` and anything you convert or copy. See `DISCLAIMER.txt`.
+
+## What’s in this repo
+
+The `main` branch is the whole program, not an installer-only dump.
+
+```
+src/                      UI (HTML, CSS, JavaScript)
+src-tauri/src/            Rust backend (extract, convert, USB, FTP, library)
+src-tauri/vendor/iso2god  Vendored ISO → GOD engine (MIT)
+.github/workflows/        Tests and the Windows installer build
+LICENSE                   Terms for using and sharing the source
+```
+
+Current version: **1.4.0**.
 
 ## Build from source
 
@@ -16,64 +32,41 @@ Needs Node 22, Rust 1.90+ (`rust-toolchain.toml`), and the WebView2 runtime on W
 
 ISO conversion uses a vendored copy of [iso2god-rs](https://github.com/iliazeus/iso2god-rs) (MIT). The TitleID library starts from that crate’s list and adds the Xbox 360 / original Xbox TitleID CSVs so conversions keep a real name (or the TitleID) instead of collapsing to `(unknown)`.
 
-## Status
+## Optional: Windows installer
 
-- **1.4.0** — Safer copies and Send to Xbox, nested archives, and up to two jobs at once (changeable in Settings). 1.3.0 restored the original dark UI. 1.2.0 added Discord Rich Presence. 1.1.1 added the full TitleID lists and Disc 1 / Disc 2 merge.
-- Build from source with `npx tauri build` on Windows for an installer / portable zip.
-- Keep backups. This is a hobbyist offline tool.
+If you just want to run Unpack, Windows builds are attached to the [latest GitHub Release](https://github.com/Qeezyxz/Unpack/releases/latest). The source on `main` is still the real project.
 
-## Known Bugs
+**Installer:** download `Unpack_1.4.0_x64-setup.exe`. Windows may show "Windows protected your PC" because the file isn't signed — **More info**, then **Run anyway**. No admin rights; it installs for your user account.
 
-- **Send to Xbox / `launch.ini` (fixed in 1.1.0, hardened in 1.4.0):** Older builds could delete `launch.ini` if a transfer was interrupted. Current builds skip `launch.ini` unless you opt in, write a `.part` file first, and only rename over the real file when the copy is complete. USB copy and ISO convert use the same “finish first, then swap” rule. Keep a backup anyway.
+**Portable:** unzip `Unpack-portable.zip` and run `Unpack.exe`. Keep `7za.exe` and `WebView2Loader.dll` in the same folder.
 
-## VirusTotal
+Requires WebView2 (already on Windows 10/11).
 
-Unsigned NSIS / Tauri builds are often flagged only by Trapmine (`Malicious.high.ml.score`). That is a common machine-learning false positive. Check the file you downloaded against the [latest GitHub Release](https://github.com/Qeezyxz/Unpack/releases/latest). Previous 1.3.0 reports:
-
-- Installer: [VirusTotal report](https://www.virustotal.com/gui/file/06d10c80350857f733c4a1bf864e799c68f0d5e4d6423410dc4264934fd0f2f8)
-- Portable: [VirusTotal report](https://www.virustotal.com/gui/file/1d6a4c0551bef9fc413fce2a773cd2a4752ee7ba86f754fa57af420691571b84)
-
-## Install
-
-Windows builds are attached to the [latest GitHub Release](https://github.com/Qeezyxz/Unpack/releases/latest).
-
-**Option A (recommended): the installer**
-1. Download and run `Unpack_1.4.0_x64-setup.exe`.
-2. Windows may show "Windows protected your PC" because the file isn't signed. Click **More info**, then **Run anyway**.
-3. The installer doesn't need admin rights. It installs only for your user account.
-
-**Option B: portable (no install)**
-Unzip `Unpack-portable.zip` anywhere and run `Unpack.exe`. Keep `7za.exe` and `WebView2Loader.dll` in the same folder.
-
-Requires the WebView2 runtime (already included on Windows 10/11).
+Unsigned NSIS / Tauri builds are often flagged only by Trapmine (`Malicious.high.ml.score`). That is a common machine-learning false positive. Previous 1.3.0 reports: [installer](https://www.virustotal.com/gui/file/06d10c80350857f733c4a1bf864e799c68f0d5e4d6423410dc4264934fd0f2f8), [portable](https://www.virustotal.com/gui/file/1d6a4c0551bef9fc413fce2a773cd2a4752ee7ba86f754fa57af420691571b84).
 
 ## Features
 
 - Archive extraction and creation (ZIP, RAR, 7Z, TAR, etc.) via bundled 7-Zip
 - Opens zip/rar/7z files found inside an extracted folder (optional; on by default)
-- Batch processing; two jobs at once by default (set 1–4 in Settings)
-- Xbox 360 ISO → Games on Demand or extracted XEX folder, with verification. Multi-disc (Disc 1 + Disc 2) merges into one playable XEX folder, or one TitleID GOD set
+- Two jobs at once by default (set 1–4 in Settings — click the Unpack logo)
+- Xbox 360 ISO → Games on Demand or extracted XEX folder, with verification. Disc 1 + Disc 2 merge into one playable folder
 - Game Library (TitleID catalog for Xbox 360 and original Xbox)
 - USB copy with FAT32 checks and verification
 - Auto-detect and place DLC / Title Updates
-- Mod Menus management
-- Link downloader with resume and hash check
-- Homebrew Tools section
-- Send to Xbox (local network only, to Aurora / XeXMenu / DashLaunch). Drops resume from the leftover `.part` file when the console allows it
-- Discord Rich Presence (optional; off in Settings)
-- Notifications, drag-and-drop, keyboard shortcuts
-- Installer + portable + cleanup tool
+- Mod Menus and Homebrew Tools
+- Send to Xbox (local network only, to Aurora / XeXMenu / DashLaunch). If Wi-Fi drops, Send again — it can continue the leftover `.part` file
+- Discord Rich Presence (optional; talks only to the local Discord client, application ID `1562281261504929922`)
+- Installer + portable builds from this same source
 
-## Discord Rich Presence
+## Status
 
-Unpack talks to the local Discord client over IPC using application ID `1562281261504929922`. It does not send files, paths, or ISOs. If Discord is closed, Unpack retries in the background.
+- **1.4.0** — Safer copies and Send to Xbox, nested archives, jobs-at-once setting
+- **1.3.0** — Original dark UI and Unpack mark
+- **1.2.0** — Discord Rich Presence
+- **1.1.1** — Full TitleID lists and Disc 1 / Disc 2 merge
 
-For the large artwork, in the [Discord Developer Portal](https://discord.com/developers/applications/1562281261504929922/rich-presence/visualizer) upload an image whose asset key is `unpack` (the app icon works). Presence still shows text without it.
-
-Settings is behind the Unpack logo at the top left (original layout). There you can turn Presence off and set how many jobs run at once.
-
-See `DISCLAIMER.txt` and `LICENSE` for terms.
+Older builds could delete `launch.ini` if a transfer was interrupted. Current source skips `launch.ini` unless you opt in, writes a `.part` file first, and only renames over the real file when the copy is complete.
 
 ## License
 
-Non-commercial. See [LICENSE](LICENSE).
+The full source on `main` is public. You may copy, modify, and share it under [LICENSE](LICENSE) (hobbyist / non-commercial: don’t sell Unpack). Third-party notices: [THIRD-PARTY.md](THIRD-PARTY.md).
