@@ -84,6 +84,72 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.remove("show"), 2600);
 }
 
+// Red error banner: stays on top of every dialog until dismissed or the next job starts.
+function showError(message) {
+  const el = document.getElementById("job-error");
+  if (!el) return;
+  const text = String(message ?? "").replace(/^Error:\s*/, "").trim() || "Something went wrong.";
+  el.querySelector("[data-error-text]").textContent = text;
+  el.classList.remove("hidden");
+}
+function clearError() {
+  const el = document.getElementById("job-error");
+  if (!el) return;
+  el.classList.add("hidden");
+  el.querySelector("[data-error-text]").textContent = "";
+}
+function bindErrorBanner() {
+  const el = document.getElementById("job-error");
+  if (!el) return;
+  el.querySelector("[data-error-dismiss]").addEventListener("click", clearError);
+  el.querySelector("[data-error-copy]").addEventListener("click", async (e) => {
+    const text = el.querySelector("[data-error-text]").textContent;
+    const b = e.currentTarget;
+    try {
+      await navigator.clipboard.writeText(text);
+      b.textContent = "Copied";
+    } catch {
+      const range = document.createRange();
+      range.selectNodeContents(el.querySelector("[data-error-text]"));
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      b.textContent = "Selected";
+    }
+    setTimeout(() => { b.textContent = "Copy"; }, 1500);
+  });
+}
+bindErrorBanner();
+
+// Discord Rich Presence: only a coarse view name and a count-based label leave the page (never
+// file names or paths); Rust builds the text. Sent only when it changes.
+let presenceKey = "";
+function presenceNow() {
+  let view = "extract";
+  if (settingsOpen) view = "settings";
+  else if (xboxView && !xboxView.hidden) view = "xbox";
+  else if (modsView) view = "mods";
+  else if (libraryView) view = "library";
+  else if (godPanel) view = "convert";
+  else if (homebrewView) view = "homebrew";
+  const saving = jobs.filter((j) => j.phase === "saving").length;
+  const converting = godPanel ? godPanel.items.filter((i) => i.phase === "working").length : 0;
+  const sending = xboxView ? xboxView.sends.filter((x) => x.running).length : 0;
+  const bits = [];
+  if (saving) bits.push(`Extracting ${saving} archive${saving === 1 ? "" : "s"}`);
+  if (converting) bits.push(`Converting ${converting} ISO${converting === 1 ? "" : "s"}`);
+  if (sending) bits.push(`Sending ${sending} item${sending === 1 ? "" : "s"}`);
+  return { view, job: bits.join(" · ") || null };
+}
+function updatePresence() {
+  if (!N.IS_DESKTOP || !N.settings.discordPresence) return;
+  const p = presenceNow();
+  const key = p.view + "|" + (p.job || "");
+  if (key === presenceKey) return;
+  presenceKey = key;
+  N.invoke("discord_set_activity", { view: p.view, job: p.job }).catch(() => {});
+}
+
 function detectFormat(buf, name = "") {
   const n = name.toLowerCase();
   if (buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b) return "zip";
@@ -677,6 +743,7 @@ async function openNative(job) {
     job.status = "Failed";
     job.progress = 0;
     job.error = friendlyError(err);
+    showError(`${job.name}: ${job.error}`);
     render();
   }
 }
@@ -707,6 +774,7 @@ async function extractNative(job, opts = {}) {
   job.progress = 0;
   job.error = "";
   job.status = "Extracting…";
+  clearError();
   render();
   const off = N.onJobProgress(job.id, (p) => {
     job.progress = p.percent;
@@ -723,16 +791,19 @@ async function extractNative(job, opts = {}) {
       layout,
       skipJunk,
       sealIsos: N.settings.autoIsoMode !== "off" && N.settings.deleteIsoAfterGod,
+      nested: N.settings.nested,
     });
     job.output = res.output;
-    job.warnings = res.warnings || [];
+    job.warnings = [...(res.warnings || [])];
+    const inside = nestedNote(res);
+    if (inside.warn) job.warnings.push(inside.warn);
     job.progress = 100;
     if (res.skipped) {
       job.phase = "skipped";
       job.status = "Already in this folder — skipped";
     } else {
       job.phase = "saved";
-      job.status = `Saved ${res.files} files to ${res.output}`;
+      job.status = `Saved ${res.files} files to ${res.output}${inside.status}`;
     }
     onJobDone?.(job, layout);
     if (job.phase === "saved" && N.settings.autoIsoMode !== "off") queueExtractedIsos(job, layout, res);
@@ -753,6 +824,7 @@ async function extractNative(job, opts = {}) {
       job.phase = "failed";
       job.status = "Failed";
       job.error = friendlyError(err);
+      showError(`${job.name}: ${job.error}`);
     }
     onJobDone?.(job, layout);
   } finally {
@@ -761,6 +833,17 @@ async function extractNative(job, opts = {}) {
   }
 }
 let onJobDone = null; // set by the history section below
+
+/** Wording for "zips inside zips": how many were opened, and how many were left closed and why. */
+function nestedNote(res) {
+  const opened = res.nested || 0, left = res.inner_left || 0;
+  const status = opened ? ` · opened ${opened} archive${opened === 1 ? "" : "s"} inside` : "";
+  const plural = left === 1 ? "archive was" : "archives were";
+  const warn = !left ? "" : N.settings.nested
+    ? `${left} ${plural} inside and left closed (password, damaged, or too many levels). They are in the output folder.`
+    : `${left} ${plural} inside and left closed. Turn on "Open zips inside zips" in Settings to open them.`;
+  return { status, warn };
+}
 
 // Batch "Auto-convert ISOs to GOD": after an archive extracts into its own new folder, every
 // .iso inside it is converted (one at a time, app-wide) into "<Game> (GOD)" next to that folder,
@@ -793,7 +876,8 @@ async function queueExtractedIsos(job, layout, res) {
         const r = await N.invoke(cmd, { id: g.id, token: g.token, deleteIso: wantDelete });
         g.phase = "saved";
         g.progress = 100;
-        g.status = `${label} done → ${r.output}${r.iso_deleted ? " · extracted ISO deleted" : r.kept_reason ? " · " + r.kept_reason : ""}`;
+        g.status = `${label} done → ${r.output}${discNote(r)}${r.iso_deleted ? " · extracted ISO deleted" : r.kept_reason ? " · " + r.kept_reason : ""}`;
+        if (r.warning) g.warning = r.warning;
         addHistory({ name: r.name || g.name, source: g.path, output: r.output, result: "created", label: mode === "xex" ? "XEX auto-extracted" : "GOD auto-converted" });
         retryDlcNotFound();
         batchStats.godOk++;
@@ -805,7 +889,7 @@ async function queueExtractedIsos(job, layout, res) {
         if (code === "CANCELLED") { g.phase = "skipped"; g.status = `${label} cancelled · ISO kept`; }
         else if (/truncated/i.test(code)) { g.phase = "failed"; g.status = "Skipped: ISO is incomplete/truncated · ISO kept"; g.error = friendlyError(err); }
         else if (/Not an Xbox ISO|executable/i.test(code)) { g.phase = "skipped"; g.status = "Skipped: not an Xbox 360 / Xbox ISO · ISO kept"; }
-        else { g.phase = "failed"; g.status = `${label} failed · ISO kept`; g.error = friendlyError(err); }
+        else { g.phase = "failed"; g.status = `${label} failed · ISO kept`; g.error = friendlyError(err); showError(`${g.name}: ${g.error}`); }
         addHistory({ name: g.name, source: g.path, output: "", result: g.phase === "failed" ? "failed" : "skipped", label: g.phase === "failed" ? `${label} failed` : `${label} skipped` });
       } finally {
         off();
@@ -917,6 +1001,7 @@ async function copyGameToUsb(g) {
     notifyDone("Unpack — copied to USB", g.name);
   } catch (err) {
     c.error = friendlyError(err);
+    showError(`${g.name}: ${c.error}`);
   } finally { off(); render(); }
 }
 function bindFolderConfirm() {
@@ -973,7 +1058,7 @@ async function xboxBrowse(path) {
       X.sends.filter((o) => !o.running && !o.edited && !X.drives.includes(o.drive)).forEach((o) => { o.drive = d; xboxDefaultDest(o); });
     }
     X.status = `Connected · ${path}`;
-  } catch (err) { X.error = xboxError(err); X.status = ""; } finally { X.busy = false; render(); }
+  } catch (err) { X.error = xboxError(err); X.status = ""; showError(X.error); } finally { X.busy = false; render(); }
 }
 function xboxSaveConsole() {
   if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(xboxView.con.host.trim())) { xboxView.error = "Enter the console's IP (like 192.168.1.50) before saving."; render(); return; }
@@ -1054,6 +1139,7 @@ async function xboxRun(s) {
     notifyDone("Unpack — sent to Xbox", s.name);
   } catch (err) {
     s.error = String(err).includes("CANCELLED") ? "Cancelled. Press Resume to continue where it stopped." : xboxError(err);
+    if (!String(err).includes("CANCELLED")) showError(`${s.name}: ${s.error}`);
   } finally { s.running = false; off(); render(); }
 }
 function renderXbox() {
@@ -1921,6 +2007,7 @@ async function runDlc(d) {
     d.phase = "failed";
     d.status = "DLC failed · file left where it is";
     d.error = friendlyError(err);
+    showError(`${d.name}: ${d.error}`);
   }
   render();
 }
@@ -1951,9 +2038,8 @@ function cancelJobGods(job) {
 }
 
 // ---------------------------------------------------------------------------
-// Batch queue: at most MAX_PARALLEL extractions at once, the rest wait their turn.
+// Batch queue: at most Settings > "Jobs at once" extractions at once, the rest wait their turn.
 // ---------------------------------------------------------------------------
-const MAX_PARALLEL = 2;
 const waiting = [];
 let running = 0;
 
@@ -1976,7 +2062,7 @@ async function enqueue(job, opts = {}) {
 }
 
 function pump() {
-  while (running < MAX_PARALLEL && waiting.length) {
+  while (running < N.settings.maxJobs && waiting.length) {
     const { job, opts } = waiting.shift();
     if (job.cancelled) continue;
     running += 1;
@@ -2186,6 +2272,7 @@ async function createArchive() {
     const code = N.errCode(err);
     c.status = code === "CANCELLED" ? "Cancelled" : "Failed";
     c.error = code === "CANCELLED" ? "" : friendlyError(err);
+    if (c.error) showError(c.error);
     c.progress = 0;
     onArchiveCreated?.(c, null, c.status);
   } finally {
@@ -2212,9 +2299,13 @@ async function openGod(infos = []) {
         item.titleId = r.title_id;
         item.kind = r.kind;
         item.parts = r.parts;
+        item.disc = r.disc_number || 1;
+        item.discs = r.disc_count || 1;
+        item.warning = r.known === false ? unknownTitleText(r.title_id) : "";
         if (!item.title) item.title = r.name || item.name.replace(/\.iso$/i, "");
         item.phase = "ready";
-        item.status = `${r.kind} · Title ID ${r.title_id} · ${formatBytes(r.data_size)} · ${r.parts} part${r.parts === 1 ? "" : "s"}`;
+        item.status = `${r.kind} · Title ID ${r.title_id}${item.discs > 1 || item.disc > 1 ? ` · Disc ${item.disc}${item.discs > 1 ? ` of ${item.discs}` : ""}` : ""} · ${formatBytes(r.data_size)} · ${r.parts} part${r.parts === 1 ? "" : "s"}`;
+        offerCompanions(item);
       })
       .catch((err) => {
         item.phase = "failed";
@@ -2223,6 +2314,27 @@ async function openGod(infos = []) {
       })
       .finally(() => godPanel && render());
   }
+  render();
+}
+
+const unknownTitleText = (tid) => `Title ID ${tid} is not in Unpack's game list. It is converted anyway; the folder is named after the file (or the title you type).`;
+
+/** " · Disc 2 of 2, added to the folder of disc 1" for a finished convert. */
+function discNote(r) {
+  if (!r) return "";
+  const multi = (r.disc_count || 1) > 1 || (r.disc_number || 1) > 1;
+  if (!multi && !r.merged) return "";
+  return ` · Disc ${r.disc_number || 1}${r.disc_count > 1 ? ` of ${r.disc_count}` : ""}${r.merged ? ", merged into the same game folder" : ""}`;
+}
+
+/** Other discs of the same game next to a picked ISO: offer them, never add them silently. */
+async function offerCompanions(item) {
+  const g = godPanel;
+  if (!g || item.auto) return;
+  const found = await N.invoke("iso_companions", { path: item.path }).catch(() => []);
+  const fresh = found.filter((p) => !g.items.some((x) => x.path === p) && !(g.declined || []).includes(p));
+  if (!fresh.length || godPanel !== g) return;
+  g.offer = [...new Set([...(g.offer || []), ...fresh])].filter((p) => !g.items.some((x) => x.path === p));
   render();
 }
 
@@ -2240,14 +2352,19 @@ function renderGod() {
       <label class="god-title">Game title <input data-god-title="${escapeHtml(i.id)}" value="${escapeHtml(i.title)}" ${i.phase === "ready" || i.phase === "failed" ? "" : "disabled"} placeholder="Shown on the Xbox dashboard" maxlength="63" /></label>
       <div class="qbar"><div data-job-bar="${escapeHtml(i.id)}" style="width:${i.progress}%"></div></div>
       <div class="qstatus" data-job-status="${escapeHtml(i.id)}">${escapeHtml(i.status)}</div>
+      ${i.warning && i.phase !== "failed" ? `<div class="error-box" data-god-warning>${escapeHtml(i.warning)}</div>` : ""}
+      ${i.merged ? `<div class="meta">This disc was added to the same game folder as the other disc, so the console shows one game.</div>` : ""}
       ${i.error ? `<div class="error-box danger">${escapeHtml(i.error)}</div>` : ""}
     </div>`
     )
     .join("");
+  const offer = g.offer?.length && !g.busy ? `<div class="error-box" data-god-offer>Other discs of this game were found next to it: ${g.offer.map((p) => `<code>${escapeHtml(N.baseName(p))}</code>`).join(", ")}. Convert them together so the console shows one game?
+      <div class="actions" style="margin-top:.5rem"><button class="btn btn-secondary btn-sm" data-god-offer-yes type="button">Add ${g.offer.length === 1 ? "it" : "them"}</button><button class="btn btn-quiet btn-sm" data-god-offer-no type="button">No thanks</button></div></div>` : "";
   return `<div class="overlay"><div class="dialog dialog-wide" data-god>
     <h3>Xbox 360 ISO → GOD / extracted folder</h3>
     <p>Turns Xbox 360 (and original Xbox) disc images into either Games on Demand (GOD) for HDD launch, or an extracted folder with <code>default.xex</code> and all game files (needed by many mods). Copy GOD Title-ID folders to <code>Content/0000000000000000/</code>, or extracted games to <code>Games\&lt;Name&gt;</code>. Only convert games you own.</p>
     <div class="cmp-list">${rows || `<div class="preview-empty">Add ISO files, or drop them onto the window.</div>`}</div>
+    ${offer}
     <div class="actions" style="margin:0.6rem 0 0.8rem">
       <button class="btn btn-secondary" data-god-add type="button">Add ISOs</button>
       <button class="btn btn-secondary" data-god-dest type="button" ${g.busy ? "disabled" : ""}>${dest ? "Change output folder" : "Choose output folder"}</button>
@@ -2280,6 +2397,14 @@ function bindGod() {
     for (const p of paths) infos.push(await N.invoke("file_info", { path: p }));
     openGod(infos);
   });
+  root.querySelector("[data-god-offer-yes]")?.addEventListener("click", async () => {
+    const paths = g.offer || [];
+    g.offer = [];
+    const infos = [];
+    for (const p of paths) infos.push(await N.invoke("file_info", { path: p }));
+    openGod(infos);
+  });
+  root.querySelector("[data-god-offer-no]")?.addEventListener("click", () => { g.declined = [...(g.declined || []), ...(g.offer || [])]; g.offer = []; render(); });
   root.querySelector("[data-god-go]")?.addEventListener("click", () => runGod(true, "god"));
   root.querySelector("[data-god-xex]")?.addEventListener("click", () => runGod(true, "xex"));
 }
@@ -2302,6 +2427,8 @@ async function runGod(manual = true, mode = "god") {
   if (!g || g.busy) return;
   if (manual) {
     if (!dest) return;
+    // Discs of one game go lowest disc first (the lowest disc keeps the playable default.xex).
+    g.items.sort((a, b) => (a.titleId || "").localeCompare(b.titleId || "") || (a.disc || 1) - (b.disc || 1));
     g.items.filter((i) => i.phase === "ready").forEach((i) => { i.phase = "queued"; i.auto = false; i.status = "Waiting…"; i.progress = 0; i.error = ""; i.outMode = mode; });
   }
   g.busy = true;
@@ -2324,7 +2451,9 @@ async function runGod(manual = true, mode = "god") {
       item.phase = "done";
       item.progress = 100;
       const detail = outMode === "xex" ? `${r.files} files` : `${r.parts} part${r.parts === 1 ? "" : "s"}`;
-      item.status = `Done · ${detail} → ${r.output}`;
+      item.status = `Done · ${detail} → ${r.output}${discNote(r)}`;
+      item.merged = !!r.merged;
+      if (r.warning) item.warning = r.warning;
       const lab = outMode === "xex" ? (item.auto ? "XEX auto-extracted" : "XEX extracted") : (item.auto ? "GOD auto-converted" : "GOD converted");
       addHistory({ name: item.title || item.name, source: item.path, output: r.output, result: "created", label: lab });
       if (item.auto) toast(`${item.title || item.name} → ${outMode === "xex" ? "extracted folder" : "GOD"}.`);
@@ -2333,6 +2462,7 @@ async function runGod(manual = true, mode = "god") {
       item.phase = code === "CANCELLED" ? "ready" : "failed";
       item.status = code === "CANCELLED" ? "Cancelled" : "Failed";
       item.error = code === "CANCELLED" ? "" : friendlyError(err);
+      if (item.error) showError(`${item.name}: ${item.error}`);
       item.progress = 0;
       addHistory({ name: item.title || item.name, source: item.path, output: "", result: code === "CANCELLED" ? "cancelled" : "failed", label: code === "CANCELLED" ? "ISO cancelled" : "ISO convert failed" });
     } finally {
@@ -2537,11 +2667,19 @@ function renderSettings() {
         <input type="number" min="1" max="500" step="1" data-set-dlmax value="${N.settings.dlMaxGb}" style="width:5rem" aria-label="Max download size in GB" /></div>
     </div>
     <div class="set-group"><h4>Extraction</h4>
+      <div class="set-row"><div class="txt"><strong>Open zips inside zips</strong><small>An archive found inside an extracted archive is opened too (a few levels deep, with size limits). Off leaves inner archives closed; the summary says how many.</small></div>
+        <label class="switch"><input type="checkbox" data-set-nested aria-label="Open zips inside zips" ${N.settings.nested ? "checked" : ""}/><span></span></label></div>
+      <div class="set-row"><div class="txt"><strong>Jobs at once</strong><small>How many extractions run side by side. 2 suits most PCs; use 1 if the PC or the USB drive struggles. Jobs aimed at the same folder always take turns.</small></div>
+        <select data-set-maxjobs aria-label="Jobs at once">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${N.settings.maxJobs === n ? "selected" : ""}>${n}${n === 2 ? " (recommended)" : n === 1 ? " (one at a time)" : ""}</option>`).join("")}</select></div>
       <div class="set-row"><div class="txt"><strong>Extract as soon as they open</strong><small>Same as the switch on the main screen.</small></div>
         <label class="switch"><input type="checkbox" data-set-autowrite aria-label="Extract as soon as they open" ${autoWrite ? "checked" : ""}/><span></span></label></div>
       <div class="set-row"><div class="txt"><strong>Skip junk files</strong><small>__MACOSX, .DS_Store, Thumbs.db and similar.</small></div>
         <label class="switch"><input type="checkbox" data-set-skipjunk aria-label="Skip junk files" ${skipJunk ? "checked" : ""}/><span></span></label></div>
     </div>
+    ${N.IS_DESKTOP ? `<div class="set-group"><h4>Discord</h4>
+      <div class="set-row"><div class="txt"><strong>Show Unpack on Discord (Rich Presence)</strong><small>Shows which screen you are on and how many jobs are running, never file names or folders. Talks only to the Discord app on this PC; Unpack makes no network connection for it. Off clears it right away.</small></div>
+        <label class="switch"><input type="checkbox" data-set-discord aria-label="Show Unpack on Discord" ${N.settings.discordPresence ? "checked" : ""}/><span></span></label></div>
+    </div>` : ""}
     <div class="actions" style="justify-content:flex-end"><button class="btn btn-primary" data-settings-close type="button">Done</button></div>
   </div></div>`;
 }
@@ -2570,6 +2708,14 @@ function bindSettings() {
   root.querySelector("[data-set-autowrite]")?.addEventListener("change", (e) => { const m = app.querySelector(".desk [data-setting=autoWrite]"); if (m) { m.checked = e.target.checked; m.dispatchEvent(new Event("change")); } });
   root.querySelector("[data-set-skipjunk]")?.addEventListener("change", (e) => { const m = app.querySelector(".desk [data-setting=skipJunk]"); if (m) { m.checked = e.target.checked; m.dispatchEvent(new Event("change")); } });
   root.querySelector("[data-set-dlmax]")?.addEventListener("change", (e) => { N.settings.dlMaxGb = e.target.value; });
+  root.querySelector("[data-set-nested]")?.addEventListener("change", (e) => { N.settings.nested = e.target.checked; });
+  root.querySelector("[data-set-maxjobs]")?.addEventListener("change", (e) => { N.settings.maxJobs = e.target.value; pump(); });
+  root.querySelector("[data-set-discord]")?.addEventListener("change", async (e) => {
+    N.settings.discordPresence = e.target.checked;
+    presenceKey = "";
+    await N.invoke("discord_set_enabled", { enabled: e.target.checked }).catch(() => {});
+    if (e.target.checked) updatePresence();
+  });
 }
 
 function renderTree(nodes, depth = 0) {
@@ -3197,7 +3343,7 @@ function renderQueueJobs() {
       </div>${(j.gods || []).map((g) => `<div class="qrow sub">
         <span class="qname" title="${escapeHtml(g.error || g.path)}"><span class="dot ${escapeHtml(g.phase)}"></span>${fileIcon(g.phase === "saved" ? "god" : g.name)}<span class="name">${escapeHtml(g.name)}</span></span>
         <div class="qbar"><div data-job-bar="${escapeHtml(g.id)}" style="width:${g.progress || 0}%"></div></div>
-        <span class="qstatus${g.phase === "failed" ? " danger" : ""}" data-job-status="${escapeHtml(g.id)}" title="${escapeHtml(g.error || g.status)}">${escapeHtml(g.error ? g.status + " — " + g.error : g.status)}</span>
+        <span class="qstatus${g.phase === "failed" ? " danger" : ""}" data-job-status="${escapeHtml(g.id)}" title="${escapeHtml(g.error || g.warning || g.status)}">${escapeHtml(g.error ? g.status + " — " + g.error : g.warning ? g.status + " — " + g.warning : g.status)}</span>
         ${g.phase === "saving" || g.phase === "queued" ? `<button class="btn btn-quiet" data-cancel-gods="${escapeHtml(j.id)}" type="button">Cancel</button>` : `<span></span>`}
       </div>`).join("")}${renderDlcRows(j.dlcRows)}`
       )
@@ -3287,6 +3433,7 @@ function render() {
     ${renderPassword()}
   `;
   bind();
+  updatePresence();
 }
 
 function renderTabs() {
@@ -3616,6 +3763,7 @@ async function initDesktop() {
     nativeOk = false;
   }
   await N.initNativeEvents();
+  await N.invoke("discord_set_enabled", { enabled: N.settings.discordPresence }).catch(() => {});
   // Archives passed on the command line, by double-click, or from the Explorer menu.
   // A second launch while we're open forwards its request here (single-instance).
   let draining = Promise.resolve();

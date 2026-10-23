@@ -57,6 +57,15 @@ export const settings = {
   get xboxDrives() { try { const v = JSON.parse(localStorage.getItem(LS + "xboxDrives") || "{}"); const o = {}; for (const [k, d] of Object.entries(v || {}).slice(0, 20)) if (/^\d{1,3}(\.\d{1,3}){3}:\d{1,5}$/.test(k) && +k.split(":")[1] >= 1 && +k.split(":")[1] <= 65535 && k.split(":")[0].split(".").every((x) => +x <= 255) && typeof d === "string" && /^[A-Za-z][A-Za-z0-9]{0,15}$/.test(d)) o[`${k.split(":")[0].split(".").map(Number).join(".")}:${+k.split(":")[1]}`] = d; return o; } catch { return {}; } },
   set xboxDrives(v) { localStorage.setItem(LS + "xboxDrives", JSON.stringify(v)); },
   set consoles(v) { localStorage.setItem(LS + "consoles", JSON.stringify(v)); },
+  // Jobs at once (extract queue). 1-4, default 2.
+  get maxJobs() { const n = Math.round(Number(localStorage.getItem(LS + "maxJobs"))); return n >= 1 && n <= 4 ? n : 2; },
+  set maxJobs(v) { localStorage.setItem(LS + "maxJobs", String(Math.min(4, Math.max(1, Math.round(Number(v)) || 2)))); },
+  // "Open zips inside zips" (extract archives found inside an archive too). On by default.
+  get nested() { return localStorage.getItem(LS + "nested") !== "0"; },
+  set nested(v) { localStorage.setItem(LS + "nested", v ? "1" : "0"); },
+  // Discord Rich Presence (local IPC to the Discord app). On by default; off clears it.
+  get discordPresence() { return localStorage.getItem(LS + "discord") !== "0"; },
+  set discordPresence(v) { localStorage.setItem(LS + "discord", v ? "1" : "0"); },
   get dlMaxGb() { const n = Number(localStorage.getItem(LS + "dlMaxGb")); return Number.isFinite(n) && n > 0 ? n : 20; },
   set dlMaxGb(v) { localStorage.setItem(LS + "dlMaxGb", String(Math.max(1, Math.min(500, Number(v) || 20)))); },
 };
