@@ -511,6 +511,14 @@ fn convert_god(
     let content_type = title_info.content_type;
     let info = iso_info(source, &exe_info, content_type, source_iso.get_max_used_prefix_size());
 
+    let needed = source_iso.volume_descriptor.root_offset + source_iso.get_max_used_prefix_size();
+    if source_iso_file_meta.len() < needed {
+        return Err(format!(
+            "The ISO ends early: {} should be at least {needed} bytes but is only {}. The file is incomplete or damaged, so nothing was written.",
+            file_name(source),
+            source_iso_file_meta.len()
+        ));
+    }
     let data_size = if trim {
         source_iso.get_max_used_prefix_size()
     } else {
@@ -699,7 +707,7 @@ pub fn merge_replace_allowed(dest: &Path) -> bool {
 
 /// Characters that would escape the folder or that Windows cannot store.
 fn is_unsafe_name_char(c: char) -> bool {
-    matches!(c, '/' | '\\' | '\0' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+    c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
 }
 
 fn truncated_message(name: &str, got: u64, expected: u64) -> String {
@@ -984,9 +992,12 @@ mod tests {
         file.set_len(full - 6_000).unwrap();
         drop(file);
 
-        let err = convert_isos(&[iso], &dest, "xex", false, true, false, |_, _, _| {})
+        let err = convert_isos(&[iso.clone()], &dest, "xex", false, true, false, |_, _, _| {})
             .unwrap_err();
         assert!(err.contains("ends early") && err.contains("big.bin"), "{err}");
+        let god_err = convert_isos(&[iso], &dest, "god", true, true, false, |_, _, _| {})
+            .unwrap_err();
+        assert!(god_err.contains("ends early"), "{god_err}");
         assert!(
             fs::read_dir(&dest).unwrap().next().is_none(),
             "a damaged ISO must not leave a half-extracted folder"
@@ -1323,6 +1334,37 @@ mod tests {
             let _ = fs::remove_file(&iso);
             let _ = fs::remove_dir_all(&dest);
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_complete_disc_converts_to_god_and_can_be_converted_again() {
+        let root = std::env::temp_dir().join(format!("unpack-god-ok-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let iso = root.join("Halo.iso");
+        let dest = root.join("out");
+        write_xsf_iso(
+            &iso,
+            &[
+                ("default.xex", minimal_xex(0x4D5307E6, 1, 1, 0x11111111, b"XEX")),
+                ("data.bin", vec![3u8; 40_000]),
+            ],
+        );
+        for _ in 0..2 {
+            let reports = convert_isos(&[iso.clone()], &dest, "god", true, true, false, |_, _, _| {}).unwrap();
+            assert_eq!(reports.len(), 1);
+            assert!(reports[0].verified);
+            let header = PathBuf::from(&reports[0].output);
+            assert!(header.is_file(), "{header:?}");
+            assert!(header.to_string_lossy().contains("4D5307E6"));
+        }
+        let litter: Vec<String> = fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(litter, vec!["4D5307E6".to_string()], "no staging or backup folders may remain");
         let _ = fs::remove_dir_all(&root);
     }
 }
