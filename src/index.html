@@ -70,6 +70,7 @@
           </label>
           <label class="check"><input type="checkbox" id="extract-auto" checked /> Extract as soon as they open</label>
           <label class="check"><input type="checkbox" id="extract-junk" checked /> Skip junk files</label>
+          <label class="check"><input type="checkbox" id="extract-nested" checked /> Open zips inside zips</label>
           <label class="tiny">Auto ISO
             <select id="auto-iso">
               <option value="god">GOD</option>
@@ -201,7 +202,6 @@
         <input id="xbox-pass" type="password" value="xboxftp" />
       </div>
       <div class="row">
-        <label class="check"><input type="checkbox" id="xbox-two" /> 2 at once</label>
         <button type="button" id="xbox-test" class="primary">Connect / Test</button>
         <button type="button" id="xbox-save" class="ghost">Save console</button>
       </div>
@@ -212,7 +212,7 @@
             <button type="button" id="pick-xbox-folder" class="ghost">Add folder…</button>
             <button type="button" id="xbox-from-library" class="text-link">From Library…</button>
           </div>
-          <p class="help">Nothing queued. Add files, or use Send to Xbox on a game in the Library or a mod in Mod Menus. Unpack detects GOD games, DLC, title updates and XEX games and picks the right folder. Uploads go to a .part file, are renamed when complete and their size is checked on the console. Existing files are never overwritten. Only local network addresses are allowed.</p>
+          <p class="help">Add files, or pick a game from Library / Mod Menus. Unpack sends to a leftover <code>.part</code> file first, then renames it when the whole file is on the Xbox. If Wi-Fi drops, Send again — it picks up the half-sent file instead of starting over. Same-size files already on the console are skipped. Only local network addresses are allowed.</p>
           <ul class="file-list" id="xbox-files"></ul>
           <div class="row">
             <label class="check tight"><input type="checkbox" id="xbox-launchini" /> Replace launch.ini (atomic rename)</label>
@@ -284,6 +284,15 @@
           <option value="system">System</option>
         </select>
       </label>
+      <label class="tiny">How many jobs at once
+        <select id="max-jobs">
+          <option value="1">1 — one at a time</option>
+          <option value="2" selected>2 — recommended</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
+      <p class="help">Extract, convert, and Send to Xbox can run at the same time. 2 is enough for most PCs. Turn it down to 1 if the PC or Xbox struggles.</p>
       <label class="check"><input type="checkbox" id="discord-presence" checked /> Show Unpack on Discord (Rich Presence)</label>
       <dl class="meta" id="settings-meta"></dl>
       <footer>

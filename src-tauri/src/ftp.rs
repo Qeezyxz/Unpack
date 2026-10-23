@@ -1,6 +1,6 @@
 use crate::paths;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::time::Duration;
@@ -136,25 +136,26 @@ impl FtpClient {
         let local_len = std::fs::metadata(local)
             .map_err(|e| format!("{}: {e}", local.display()))?
             .len();
-        // Store beside the destination, then RNFR/RNTO. Never DELE launch.ini
-        // (or any other file) before the new copy is complete.
+        // Store beside the destination as name.part. If Wi-Fi drops, the .part
+        // stays on the Xbox; the next send measures it with SIZE and appends
+        // the rest. The real file is only renamed into place when complete.
         let tmp_name = format!("{remote_name}.part");
-        if let Err(e) = self.stor_file(&tmp_name, local) {
-            let _ = self.command(&format!("DELE {tmp_name}"));
-            return Err(e);
+        let dest_len = self.size_of(remote_name)?;
+        let part_len = self.size_of(&tmp_name)?;
+        match resume_action(local_len, dest_len, part_len) {
+            ResumeAction::SkipFinished => return Ok(UploadOutcome::AlreadyPresent),
+            ResumeAction::FinishRename => {}
+            ResumeAction::ResumeFrom(offset) => {
+                self.send_remaining(&tmp_name, local, offset)?;
+            }
+            ResumeAction::Restart => {
+                if part_len.unwrap_or(0) > 0 {
+                    let _ = self.command(&format!("DELE {tmp_name}"));
+                }
+                self.stor_from(&tmp_name, local, 0, false)?;
+            }
         }
-        let (code, msg) = self.command(&format!("RNFR {tmp_name}"))?;
-        if code >= 400 {
-            let _ = self.command(&format!("DELE {tmp_name}"));
-            return Err(format!("RNFR {tmp_name} failed: {code} {msg}"));
-        }
-        let (code, msg) = self.command(&format!("RNTO {remote_name}"))?;
-        if code >= 400 {
-            let _ = self.command(&format!("DELE {tmp_name}"));
-            return Err(format!(
-                "could not replace {remote_name} via rename (left original in place): {code} {msg}"
-            ));
-        }
+        self.rename_part(&tmp_name, remote_name)?;
         if let Some(remote_len) = self.size_of(remote_name)? {
             if remote_len != local_len {
                 return Err(format!(
@@ -164,8 +165,39 @@ impl FtpClient {
         }
         if paths::is_protected_filename(remote_name) {
             Ok(UploadOutcome::UploadedAtomic)
+        } else if matches!(resume_action(local_len, dest_len, part_len), ResumeAction::ResumeFrom(_))
+        {
+            Ok(UploadOutcome::Resumed)
         } else {
             Ok(UploadOutcome::Uploaded)
+        }
+    }
+
+    fn send_remaining(&mut self, tmp_name: &str, local: &Path, offset: u64) -> Result<(), String> {
+        // Prefer REST+STOR (resume at byte offset). If the console FTP does
+        // not support REST, APPE the remainder. Last resort: send .part again.
+        match self.stor_from(tmp_name, local, offset, true) {
+            Ok(()) => Ok(()),
+            Err(e) if e.contains("REST") => match self.appe_from(tmp_name, local, offset) {
+                Ok(()) => Ok(()),
+                Err(_) => self.stor_from(tmp_name, local, 0, false),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    fn rename_part(&mut self, tmp_name: &str, remote_name: &str) -> Result<(), String> {
+        let (code, msg) = self.command(&format!("RNFR {tmp_name}"))?;
+        if code >= 400 {
+            return Err(format!("RNFR {tmp_name} failed: {code} {msg}"));
+        }
+        let (code, msg) = self.command(&format!("RNTO {remote_name}"))?;
+        if code >= 400 {
+            Err(format!(
+                "could not replace {remote_name} via rename (left original in place): {code} {msg}"
+            ))
+        } else {
+            Ok(())
         }
     }
 
@@ -183,16 +215,48 @@ impl FtpClient {
         }
     }
 
-    fn stor_file(&mut self, name: &str, local: &Path) -> Result<(), String> {
+    fn stor_from(
+        &mut self,
+        name: &str,
+        local: &Path,
+        offset: u64,
+        use_rest: bool,
+    ) -> Result<(), String> {
+        self.transfer("STOR", name, local, offset, use_rest && offset > 0)
+    }
+
+    fn appe_from(&mut self, name: &str, local: &Path, offset: u64) -> Result<(), String> {
+        self.transfer("APPE", name, local, offset, false)
+    }
+
+    fn transfer(
+        &mut self,
+        cmd: &str,
+        name: &str,
+        local: &Path,
+        offset: u64,
+        use_rest: bool,
+    ) -> Result<(), String> {
         let mut file = File::open(local).map_err(|e| format!("{}: {e}", local.display()))?;
+        if offset > 0 {
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| format!("seek {}: {e}", local.display()))?;
+        }
         let mut data_stream = self.pasv_stream()?;
+        if use_rest {
+            let (code, msg) = self.command(&format!("REST {offset}"))?;
+            if code >= 400 {
+                drop(data_stream);
+                return Err(format!("REST {offset} rejected: {code} {msg}"));
+            }
+        }
         self.writer
-            .write_all(format!("STOR {name}\r\n").as_bytes())
+            .write_all(format!("{cmd} {name}\r\n").as_bytes())
             .map_err(|e| e.to_string())?;
         self.writer.flush().map_err(|e| e.to_string())?;
         let (code, msg) = self.read_response()?;
         if code >= 400 {
-            return Err(format!("STOR {name} rejected: {code} {msg}"));
+            return Err(format!("{cmd} {name} rejected: {code} {msg}"));
         }
         let mut buf = [0u8; 64 * 1024];
         loop {
@@ -210,7 +274,7 @@ impl FtpClient {
         drop(data_stream);
         let (code, msg) = self.read_response()?;
         if code >= 400 {
-            Err(format!("STOR {name} failed: {code} {msg}"))
+            Err(format!("{cmd} {name} failed: {code} {msg}"))
         } else {
             Ok(())
         }
@@ -231,7 +295,41 @@ impl Drop for FtpClient {
 pub enum UploadOutcome {
     Uploaded,
     UploadedAtomic,
+    Resumed,
+    AlreadyPresent,
     SkippedProtected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeAction {
+    SkipFinished,
+    FinishRename,
+    ResumeFrom(u64),
+    Restart,
+}
+
+/// Decide whether a half-sent `.part` on the Xbox can be continued.
+pub fn resume_action(local_len: u64, dest_len: Option<u64>, part_len: Option<u64>) -> ResumeAction {
+    if dest_len == Some(local_len) {
+        return ResumeAction::SkipFinished;
+    }
+    match part_len {
+        Some(n) if n == local_len && local_len > 0 => ResumeAction::FinishRename,
+        Some(n) if n > 0 && n < local_len => ResumeAction::ResumeFrom(n),
+        _ => ResumeAction::Restart,
+    }
+}
+
+pub fn looks_like_drop(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("connection closed")
+        || e.contains("dropped")
+        || e.contains("timed out")
+        || e.contains("timeout")
+        || e.contains("broken pipe")
+        || e.contains("connection reset")
+        || e.contains("os error 10054")
+        || e.contains("os error 104")
 }
 
 fn connect_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
@@ -324,6 +422,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(addr, "10.0.0.5:5200");
+    }
+
+    #[test]
+    fn resume_picks_up_a_partial_part_file() {
+        assert_eq!(
+            resume_action(1000, None, Some(400)),
+            ResumeAction::ResumeFrom(400)
+        );
+        assert_eq!(
+            resume_action(1000, Some(1000), Some(400)),
+            ResumeAction::SkipFinished
+        );
+        assert_eq!(
+            resume_action(1000, None, Some(1000)),
+            ResumeAction::FinishRename
+        );
+        assert_eq!(resume_action(1000, None, None), ResumeAction::Restart);
+        assert_eq!(resume_action(1000, None, Some(0)), ResumeAction::Restart);
+        assert!(looks_like_drop("transfer dropped while sending game.xex: reset"));
+        assert!(!looks_like_drop("CWD /Hdd1 failed: 550"));
     }
 
     #[test]

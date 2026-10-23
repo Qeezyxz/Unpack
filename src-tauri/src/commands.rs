@@ -161,6 +161,7 @@ pub async fn extract_archives(
     dest: String,
     skip_junk: Option<bool>,
     existing: Option<String>,
+    nested: Option<bool>,
 ) -> Result<Vec<archive::ArchiveResult>, String> {
     if dest.trim().is_empty() {
         return Err("choose a destination folder".into());
@@ -170,6 +171,7 @@ pub async fn extract_archives(
     let opts = archive::ExtractOptions {
         skip_junk: skip_junk.unwrap_or(true),
         existing: existing.unwrap_or_else(|| "number".into()),
+        nested: nested.unwrap_or(true),
     };
     let result = tauri::async_runtime::spawn_blocking(move || {
         let paths: Vec<PathBuf> = archives.into_iter().map(PathBuf::from).collect();

@@ -26,8 +26,10 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
-let busy = false;
 let currentView = "extract";
+const runningJobs = [];
+const jobWaiters = [];
+let jobSeq = 0;
 
 function native() {
   return Boolean(window.__TAURI__?.core?.invoke);
@@ -57,24 +59,44 @@ async function remember() {
   try { await invoke("save_settings", { settings: collectSettings() }); } catch (_) { /* ignore */ }
 }
 
-async function job(label, fn) {
-  if (busy) {
-    log("Wait for the current job to finish.");
+function maxJobs() {
+  const n = Number($("max-jobs")?.value || 2);
+  return Math.min(4, Math.max(1, Number.isFinite(n) ? n : 2));
+}
+
+function showJobs() {
+  const bar = $("job-progress");
+  if (!runningJobs.length) {
+    bar.hidden = true;
+    setPresence(currentView, null);
     return;
   }
-  busy = true;
-  log(label);
-  $("job-progress").hidden = false;
-  setPresence(currentView, label);
+  bar.hidden = false;
+  const labels = runningJobs.map((j) => j.label);
+  const extra = jobWaiters.length ? ` · ${jobWaiters.length} waiting` : "";
+  log(`${labels.join(" · ")}${extra}`);
+  setPresence(currentView, labels[labels.length - 1]);
+}
+
+async function job(label, fn) {
+  if (runningJobs.length >= maxJobs()) {
+    log(`${label} waiting (${runningJobs.length} already running)…`);
+    await new Promise((resolve) => jobWaiters.push(resolve));
+  }
+  const id = ++jobSeq;
+  runningJobs.push({ id, label });
+  showJobs();
   try {
     await fn();
     await remember();
   } catch (e) {
     log(String(e));
   } finally {
-    busy = false;
-    $("job-progress").hidden = true;
-    setPresence(currentView, null);
+    const i = runningJobs.findIndex((j) => j.id === id);
+    if (i >= 0) runningJobs.splice(i, 1);
+    const next = jobWaiters.shift();
+    if (next) next();
+    showJobs();
   }
 }
 
@@ -113,7 +135,9 @@ function collectSettings() {
     autoIso: $("auto-iso").value,
     extractAuto: $("extract-auto").checked,
     skipJunk: $("extract-junk").checked,
+    extractNested: $("extract-nested").checked,
     existing: $("extract-existing").value,
+    maxJobs: maxJobs(),
   };
 }
 
@@ -133,7 +157,9 @@ function applySettings(s) {
   if (s.autoIso) $("auto-iso").value = s.autoIso;
   if (typeof s.extractAuto === "boolean") $("extract-auto").checked = s.extractAuto;
   if (typeof s.skipJunk === "boolean") $("extract-junk").checked = s.skipJunk;
+  if (typeof s.extractNested === "boolean") $("extract-nested").checked = s.extractNested;
   if (s.existing) $("extract-existing").value = s.existing;
+  if (s.maxJobs) $("max-jobs").value = String(Math.min(4, Math.max(1, Number(s.maxJobs) || 2)));
   syncIsoBadge();
 }
 
@@ -163,11 +189,31 @@ function setList(id, paths) {
   });
 }
 
+async function convertIsos(isos, dest) {
+  if (!isos?.length || $("auto-iso").value === "off") return;
+  await job("Converting ISO…", async () => {
+    const reports = await invoke("convert_iso", {
+      paths: isos,
+      dest,
+      mode: $("auto-iso").value,
+      trim: true,
+      verify: true,
+      autoCompanions: true,
+    });
+    const list = Array.isArray(reports) ? reports : [reports];
+    for (const report of list) {
+      const discs = report.merged ? ` (${report.discs?.length || 0} discs)` : "";
+      log(`Converted ${report.info?.name || "ISO"}${discs} → ${report.output}`);
+    }
+  });
+}
+
 async function handlePaths(paths) {
   if (!paths?.length) return;
   const dest = $("extract-dest").value.trim();
   const isos = paths.filter(isIso);
   const archives = paths.filter((p) => !isIso(p));
+  const tasks = [];
   if (archives.length) {
     setList("recent-files", archives.slice());
     if ($("extract-auto").checked) {
@@ -175,16 +221,23 @@ async function handlePaths(paths) {
         log("Choose a destination folder first.");
         return;
       }
-      await job("Extracting…", async () => {
-        const result = await invoke("extract_archives", {
-          archives,
-          dest,
-          skipJunk: $("extract-junk").checked,
-          existing: $("extract-existing").value,
+      tasks.push((async () => {
+        let found = [];
+        await job("Extracting…", async () => {
+          const result = await invoke("extract_archives", {
+            archives,
+            dest,
+            skipJunk: $("extract-junk").checked,
+            existing: $("extract-existing").value,
+            nested: $("extract-nested").checked,
+          });
+          const inner = result.reduce((n, r) => n + (r.nested || 0), 0);
+          log(inner ? `Extracted ${result.length} archive(s) and opened ${inner} inside.` : `Extracted ${result.length} archive(s).`);
+          await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` });
+          found = result.flatMap((r) => r.isos || []);
         });
-        log(`Extracted ${result.length} archive(s).`);
-        await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` });
-      });
+        if (found.length) await convertIsos(found, dest);
+      })());
     }
   }
   if (isos.length && $("auto-iso").value !== "off") {
@@ -192,22 +245,9 @@ async function handlePaths(paths) {
       log("Choose a destination folder first.");
       return;
     }
-    await job("Converting ISO…", async () => {
-      const reports = await invoke("convert_iso", {
-        paths: isos,
-        dest,
-        mode: $("auto-iso").value,
-        trim: true,
-        verify: true,
-        autoCompanions: true,
-      });
-      const list = Array.isArray(reports) ? reports : [reports];
-      for (const report of list) {
-        const discs = report.merged ? ` (${report.discs?.length || 0} discs)` : "";
-        log(`Converted ${report.info?.name || "ISO"}${discs} → ${report.output}`);
-      }
-    });
+    tasks.push(convertIsos(isos, dest));
   }
+  await Promise.all(tasks);
 }
 
 function renderHomebrew() {
@@ -451,7 +491,8 @@ async function init() {
       paths: state.xboxFiles,
       includeLaunchIni: $("xbox-launchini").checked,
     });
-    log(`Sent ${report.uploaded} file(s) to ${report.host}.`);
+    const extra = report.resumed ? ` ${report.resumed} picked up after a drop.` : "";
+    log(`Sent ${report.uploaded} file(s) to ${report.host}.${extra}`);
     (report.warnings || []).forEach(log);
   });
 
@@ -489,6 +530,8 @@ async function init() {
     }
   });
 
+  $("max-jobs").onchange = remember;
+  $("extract-nested").onchange = remember;
   $("discord-presence").onchange = async () => {
     if (!native()) return;
     const enabled = $("discord-presence").checked;

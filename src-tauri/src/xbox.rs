@@ -1,4 +1,4 @@
-use crate::ftp::{FtpClient, UploadOutcome};
+use crate::ftp::{self, FtpClient, UploadOutcome};
 use crate::net;
 use crate::paths;
 use serde::Serialize;
@@ -19,6 +19,7 @@ pub struct SendReport {
     pub host: String,
     pub uploaded: u32,
     pub skipped_protected: u32,
+    pub resumed: u32,
     pub files: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -117,6 +118,7 @@ pub fn send_paths(
         host: format!("{host}:{port}"),
         uploaded: 0,
         skipped_protected: 0,
+        resumed: 0,
         files: Vec::new(),
         warnings: Vec::new(),
     };
@@ -140,36 +142,97 @@ pub fn send_paths(
             continue;
         }
         let relative = relative_to_batch(paths_in, file);
-        if let Some(parent) = Path::new(&relative).parent() {
+        let remote_dir = if let Some(parent) = Path::new(&relative).parent() {
             if parent != Path::new("") {
-                let remote_dir = format!(
+                Some(format!(
                     "{}/{}",
                     dest_root.trim_end_matches(['/', '\\']),
                     parent.to_string_lossy().replace('\\', "/")
-                );
-                ftp.mkdir_p(&remote_dir)?;
+                ))
             } else {
-                ftp.cwd(dest_root)?;
+                None
             }
         } else {
-            ftp.cwd(dest_root)?;
-        }
-        match ftp.upload_file(file, &name, include_launch_ini)? {
-            UploadOutcome::SkippedProtected => {
-                report.skipped_protected += 1;
-                report.warnings.push(format!(
-                    "left existing {name} in place instead of deleting it mid-transfer"
-                ));
+            None
+        };
+        let mut attempts = 0u32;
+        loop {
+            let dir_ok = if let Some(dir) = &remote_dir {
+                ftp.mkdir_p(dir)
+            } else {
+                ftp.cwd(dest_root)
+            };
+            if let Err(e) = dir_ok {
+                if ftp::looks_like_drop(&e) && attempts < 3 {
+                    attempts += 1;
+                    progress(
+                        format!("Connection dropped. Reconnecting ({attempts}/3)…"),
+                        i as u64,
+                        total.max(1),
+                    );
+                    ftp = reconnect(host, port, user, pass, dest_root, attempts)?;
+                    continue;
+                }
+                return Err(e);
             }
-            UploadOutcome::Uploaded | UploadOutcome::UploadedAtomic => {
-                report.uploaded += 1;
-                report.files.push(file.display().to_string());
+            match ftp.upload_file(file, &name, include_launch_ini) {
+                Ok(UploadOutcome::SkippedProtected) => {
+                    report.skipped_protected += 1;
+                    report.warnings.push(format!(
+                        "left existing {name} in place instead of deleting it mid-transfer"
+                    ));
+                    break;
+                }
+                Ok(UploadOutcome::AlreadyPresent) => {
+                    report.uploaded += 1;
+                    report.files.push(file.display().to_string());
+                    report
+                        .warnings
+                        .push(format!("{name} was already on the Xbox (same size)"));
+                    break;
+                }
+                Ok(UploadOutcome::Resumed) => {
+                    report.uploaded += 1;
+                    report.resumed += 1;
+                    report.files.push(file.display().to_string());
+                    break;
+                }
+                Ok(UploadOutcome::Uploaded | UploadOutcome::UploadedAtomic) => {
+                    report.uploaded += 1;
+                    report.files.push(file.display().to_string());
+                    break;
+                }
+                Err(e) if ftp::looks_like_drop(&e) && attempts < 3 => {
+                    attempts += 1;
+                    progress(
+                        format!("Wi-Fi dropped on {name}. Reconnecting ({attempts}/3)…"),
+                        i as u64,
+                        total.max(1),
+                    );
+                    ftp = reconnect(host, port, user, pass, dest_root, attempts)?;
+                }
+                Err(e) => return Err(e),
             }
         }
     }
     ftp.close();
     progress("Done".into(), 1, 1);
     Ok(report)
+}
+
+fn reconnect(
+    host: &str,
+    port: u16,
+    user: &str,
+    pass: &str,
+    dest_root: &str,
+    attempt: u32,
+) -> Result<FtpClient, String> {
+    std::thread::sleep(Duration::from_secs(u64::from(attempt).min(4)));
+    let mut ftp = FtpClient::connect(host, port, user, pass)
+        .map_err(|e| format!("reconnect failed after a drop: {e}"))?;
+    ftp.mkdir_p(dest_root)?;
+    Ok(ftp)
 }
 
 fn expand_files(paths_in: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
