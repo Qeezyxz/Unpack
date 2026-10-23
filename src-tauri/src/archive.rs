@@ -124,7 +124,9 @@ pub fn extract_archives_with(
                 let mut nested = 0u32;
                 let mut inner_left = 0u32;
                 if opts.nested {
-                    nested = extract_nested(&seven, &out, opts, 1, &mut progress)?;
+                    let (opened, failed) = extract_nested(&seven, &out, opts, 1, &mut progress)?;
+                    nested = opened;
+                    inner_left = failed;
                 } else {
                     inner_left = find_archives(&out).len() as u32;
                 }
@@ -197,13 +199,13 @@ fn extract_nested(
     opts: &ExtractOptions,
     depth: u32,
     progress: &mut Option<&mut dyn FnMut(String, u64, u64)>,
-) -> Result<u32, String> {
+) -> Result<(u32, u32), String> {
     if depth > MAX_NESTED_DEPTH {
-        return Ok(0);
+        return Ok((0, 0));
     }
     let nested = find_archives(root);
     if nested.is_empty() {
-        return Ok(0);
+        return Ok((0, 0));
     }
     if nested.len() > MAX_NESTED_ARCHIVES {
         return Err(format!(
@@ -213,6 +215,7 @@ fn extract_nested(
         ));
     }
     let mut opened = 0u32;
+    let mut left = 0u32;
     for (i, archive) in nested.iter().enumerate() {
         emit_progress(
             progress,
@@ -225,11 +228,18 @@ fn extract_nested(
         let Some(out) = unique_dir(parent, &stem, "number")? else {
             continue;
         };
-        extract_one(seven, archive, &out, opts, true)?;
+        // A broken or locked inner archive must not undo the outer one that
+        // already came out fine; it just stays where it is.
+        if extract_one(seven, archive, &out, opts, true).is_err() {
+            left += 1;
+            continue;
+        }
         opened += 1;
-        opened += extract_nested(seven, &out, opts, depth + 1, progress)?;
+        let (deeper, deeper_left) = extract_nested(seven, &out, opts, depth + 1, progress)?;
+        opened += deeper;
+        left += deeper_left;
     }
-    Ok(opened)
+    Ok((opened, left))
 }
 
 /// `game.part2.rar` and later volumes open together with `game.part1.rar`.
@@ -543,6 +553,41 @@ mod tests {
             "turning nested off must still report the inner zip it left closed"
         );
         assert!(!dest2.join("outer").join("inner").is_dir(), "inner zip must stay closed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_broken_inner_archive_does_not_undo_the_outer_one() {
+        let Some(bin) = find_seven_zip() else {
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("unpack-badinner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let stage = root.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(stage.join("broken.zip"), b"this is not a zip at all").unwrap();
+        let outer = root.join("outer.zip");
+        run_7z(
+            &bin,
+            &[
+                OsString::from("a"),
+                OsString::from("-y"),
+                outer.as_os_str().to_os_string(),
+                stage.join("keep.txt").as_os_str().to_os_string(),
+                stage.join("broken.zip").as_os_str().to_os_string(),
+            ],
+        )
+        .unwrap();
+        let dest = root.join("out");
+        let done = extract_archives_with(&[outer], &dest, &ExtractOptions::default(), None)
+            .expect("the outer archive came out fine, so this is not an error");
+        assert_eq!(std::fs::read_to_string(dest.join("outer").join("keep.txt")).unwrap(), "keep");
+        assert!(dest.join("outer").join("broken.zip").is_file(), "the bad inner file stays");
+        assert_eq!(done[0].nested, 0);
+        assert_eq!(done[0].inner_left, 1);
+        let litter: Vec<_> = std::fs::read_dir(dest.join("outer")).unwrap().flatten().collect();
+        assert_eq!(litter.len(), 2, "no half-made folder for the bad inner archive");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -232,7 +232,9 @@ function extractSummary(result) {
   const left = result.reduce((n, r) => n + (r.inner_left || 0), 0);
   let text = opened ? `Extracted ${count} archive(s) and opened ${opened} inside.` : `Extracted ${count} archive(s).`;
   if (left) {
-    text += ` ${left} zip/rar/7z file(s) inside were left closed. Turn on "Open zips inside zips" to open them.`;
+    text += $("extract-nested").checked
+      ? ` ${left} zip/rar/7z file(s) inside could not be opened and were left as they are.`
+      : ` ${left} zip/rar/7z file(s) inside were left closed. Turn on "Open zips inside zips" to open them.`;
   }
   return text;
 }
