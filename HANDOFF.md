@@ -29,9 +29,12 @@ src-tauri/src/lib.rs  — Tauri commands, path grants check, job registry, event
       ├─ library.rs    scan game libraries, Copy to USB (GOD + DLC + TU, or extracted folder)
       ├─ mods.rs       identify mod files (XEX/STFS/folder) + copy to Plugins/Content/as-is
       ├─ modnames.rs   user-learned mod name → TitleID (normalize, validate, lookup)
-      ├─ gamedb.rs     offline TitleID → name (iso2god list ~4,900) + alias table + fuzzy guess
+      ├─ gamedb.rs     offline TitleID → name (iso2god list, merged with the full Xbox/360 CSVs in `src-tauri/vendor/iso2god/src/game_list/`: 5,908 titles) + alias table + fuzzy guess
       ├─ download.rs   SSRF-hardened http(s) download, pinned DNS, resume, SHA-256, sanitizer
       ├─ ftp.rs        Send to Xbox: LAN-only FTP client (Aurora/XeXMenu/DashLaunch), upload/resume/verify
+      ├─ discs.rs      disc-number parsing ("Disc 2", "CD1"...), multi-disc grouping and notes
+      ├─ destlock.rs   per-destination wait locks (jobs writing the same folder queue up)
+      ├─ discord.rs    Discord Rich Presence worker thread (local IPC, off toggle, no network from the page)
       └─ safecopy.rs   grants registry, no-link writes, .partial + hash verify, FAT32 4 GiB check
 src-tauri/vendor/iso2god   MIT iso2god-rs (patched: directory depth 64 + cycle detection)
 src-tauri/examples/bridge.rs  TEST ONLY HTTP bridge exposing the same commands to headless Chrome
@@ -62,6 +65,9 @@ cancellable through the `Jobs` registry (`cancel_job`).
 | `mods.rs` built-in menus | `load_builtin(dir)` reads `<resource_dir>/menus/menus.json` at startup (lib.rs `setup`, managed as `BuiltinSet`, files granted session-only); `merge_learned` adds built-in name keys after the user's (user keys win). Commands: `builtin_menus`; `mod_identify` merges the seed. |
 | `catalog.rs` (+`catalog/{ini,target,install,tests}.rs`) | Mod catalog. `catalog.rs`: schema types (`deny_unknown_fields`), `verify` (Ed25519 `verify_strict` over the exact bytes, before any parsing), `check_entry` validation, `dest_segments` (per-handler allowed folders), `Store` (app data `catalog/`: `config.json`, `seen.json` rollback map, `journal.json`, `backups/`, `lkg/`, `stage/`), `refresh` (remote via `download_with`, or grant-checked local file + `.sig`), `activate` (aliases → `gamedb::set_extra_aliases`, mod names → learned keys), `call` dispatcher (one `catalog` Tauri command; same in the bridge). `ini.rs`: lossless launch.ini parser, `choose_slot`, `validate_change`. `target.rs`: `Target::Local` (granted root, no links) / `Target::Console` (FTP: `send`, `retr`, `dele`, `.new` + rename for launch.ini). `install.rs`: `preflight`, `download_all`, `stage`, `install`, `uninstall`, `states`, journal types. |
 | `bin/catalog_sign.rs` | `unpack-catalog-sign` CLI: keygen / pubkey / sign / verify / check. Not in the installer; shipped as a separate exe in `dist/`. |
+| `discs.rs` | `stem_without_disc`, disc number from header or file name, `companions()`, session registry so discs of one game share one output folder. |
+| `destlock.rs` | `acquire(path, progress)` returns a guard; a second job for the same canonical destination waits (emits `WAIT_MESSAGE`) inside its `spawn_blocking` job. Used by `copy_to_usb`, `mod_copy`, `create_archive`. |
+| `discord.rs` | Presence worker (`discord-rich-presence`, MIT). Commands `discord_set_enabled` / `discord_set_activity`: the page sends only a view name plus a count label, Rust builds the text via `activity_for`. Setting `unpack.discord` (default on) switches it off. |
 | `safecopy.rs` | `Grants` (session-only path allow-list), `is_link`, `plain` (path display), partial + verify copy. |
 
 ### Frontend (`src`)
@@ -69,7 +75,7 @@ cancellable through the `Jobs` registry (`cancel_job`).
 |---|---|
 | `index.html` | Shell; loads fonts, `theme.js`, `app.js`. No remote URLs. |
 | `theme.js` | Light/dark/system theme before first paint. |
-| `native.js` | Tauri bridge, `settings` (all `localStorage` keys `unpack.*`, validated on read), pickers (Rust `pick_path`/`pick_save` so picks are granted), event helpers. |
+| `native.js` | Tauri bridge, `settings` (incl. `maxJobs` 1-4 default 2, `nested` default on, `discordPresence` default on; all `localStorage` keys `unpack.*`, validated on read), pickers (Rust `pick_path`/`pick_save` so picks are granted), event helpers. |
 | `app.js` | The whole UI (one render function + bind functions): desk/queue/history, preview, create archive, ISO → GOD/XEX dialog, Auto ISO mode (Off/GOD/XEX), DLC rows, Library, Mod Menus (Your files / Download from link / Known names / Catalog: `catalogView`, `renderCatalog`, `bindCatalog`), Homebrew Tools, Settings. Send to Xbox (`xboxView`: per-item editable destination pre-filled by `ftp_dest`, Browse / Reset to default / Last-folder chip (`unpack.xboxLastDest` per type) / Send all to this folder; console form + saved consoles `unpack.consoles`, remote browser, send queue; Library/Mods buttons call `sendGameToXbox`/`sendModToXbox`). All dynamic text goes through `escapeHtml`. Browser-only fallbacks: fflate, 7z-wasm, unrar wasm (only when 7za is missing). |
 
 ## Security model
@@ -204,14 +210,16 @@ Disk: a full `target/` is ~10–15 GB. Reuse one target dir; delete `src-tauri/t
 
 ## Tests
 Rust (from `src-tauri`):
-- `cargo test --lib` — or `--release`; must pass in default parallel mode (env-var tests share a poison-tolerant `env_lock()`). Currently 180 (+1 ignored benchmark). Retry classification (`install::is_permanent`) ignores URLs: a random test port like 40407 once made a 503 look like a permanent 404 (the R14 LOW-4 flake in `cancel_stops_downloads`); 24 runs × 4 in parallel passed after the fix. Temp folders use `testutil::TmpDir` (removed on drop); archive fixtures live in `target/test-fixtures`, so nothing is left in `/tmp`.
+- `cargo test --lib` — or `--release`; must pass in default parallel mode (env-var tests share a poison-tolerant `env_lock()`). Currently 222 (+1 ignored benchmark). Archive fixtures are generated first with `python3 tests/make_testdata.py [dir]` (`/workspace/testdata` or `UNPACK_TESTDATA`). Retry classification (`install::is_permanent`) ignores URLs: a random test port like 40407 once made a 503 look like a permanent 404 (the R14 LOW-4 flake in `cancel_stops_downloads`); 24 runs × 4 in parallel passed after the fix. Temp folders use `testutil::TmpDir` (removed on drop); archive fixtures live in `target/test-fixtures`, so nothing is left in `/tmp`.
 - Wine: `cargo test --lib --target x86_64-pc-windows-gnu --features download-test-loopback --no-run`, then
   `WINEDEBUG=-all UNPACK_7ZA='Z:\…\src-tauri\binaries\7za-x86_64-pc-windows-gnu.exe' wine target/x86_64-pc-windows-gnu/debug/deps/unpack_lib-*.exe` (173; unix-only symlink cases are skipped there; copy `WebView2Loader.dll` from `target/x86_64-pc-windows-gnu/debug/build/webview2-com-sys-*/out/x64/` and `7za.exe` next to the test exe first).
 
 UI e2e (headless Chrome + `/workspace/testenv` puppeteer-core, real Rust via the bridge):
 1. `cargo build --example bridge --features download-test-loopback`
 2. From `src-tauri`: `UNPACK_TEST_ALLOW_LOOPBACK=1 UNPACK_TEST_DRIVES=/tmp/unpack-dlc-e2e/usb ./target/debug/examples/bridge ../src &` (port 18790, `UNPACK_BRIDGE_PORT` to change)
-3. From the repo root: `node tests/e2e.mjs` (42), `tests/autogod.mjs` (15), `tests/dlc.mjs` (16), `tests/download.mjs` (27), `tests/mods.mjs` (39), `tests/builtin.mjs` (9; own bridge on a random port with `UNPACK_TEST_MENUS` dummy fixtures), `tests/catalog.mjs` (36; own bridge + local HTTP + fake_aurora.py; keys from `target/debug/unpack-catalog-sign`, so `cargo build --bin unpack-catalog-sign` first), `tests/xbox.mjs` (52, incl. the pyftpdlib LIST-425 overwrite repro and a Usb0+Usb1 console (`fake_aurora.py --drives`); needs `pip install pyftpdlib`, starts `tests/fake_aurora.py`). Fixtures are generated (`make_iso.py`, `make_stfs.py`, big.7z). Screenshots go to /tmp unless `UPDATE_SHOTS=1`. Download tests use local servers only.
+3. From the repo root: `node tests/e2e.mjs` (42), `tests/autogod.mjs` (15), `tests/dlc.mjs` (16), `tests/download.mjs` (27), `tests/mods.mjs` (39), `tests/builtin.mjs` (9; own bridge on a random port with `UNPACK_TEST_MENUS` dummy fixtures), `tests/catalog.mjs` (36; own bridge + local HTTP + fake_aurora.py; keys from `target/debug/unpack-catalog-sign`, so `cargo build --bin unpack-catalog-sign` first), `tests/v160.mjs` (37: jobs-at-once, nested archives, Discord toggle/presence via the bridge's `__discord_calls` recorder, error banner, unknown-TitleID warning, multi-disc notes, companion prompt), `tests/xbox.mjs` (52, incl. the pyftpdlib LIST-425 overwrite repro and a Usb0+Usb1 console (`fake_aurora.py --drives`); needs `pip install pyftpdlib`, starts `tests/fake_aurora.py`). Fixtures are generated (`make_iso.py`, `make_stfs.py`, big.7z). Screenshots go to /tmp unless `UPDATE_SHOTS=1`. Download tests use local servers only.
+
+Other checks: `npm test` (`tests/theme.test.mjs`, node:test), `python3 tests/gamelists.py` (game-list merge script consistency). CI: `.github/workflows/test.yml` runs all of the above; `.github/workflows/release.yml` is a manual Windows build (installer + portable zip) that never tags or publishes.
 
 FTP benchmark: `tests/fake_aurora.py ROOT PORT [--limit MBPS] [--cons N] [--no-size]` (pyftpdlib that mimics Aurora: no MLSD/MLST/EPSV, one connection; note pyftpdlib counts its listen socket and data sockets in `--cons`), then `BENCH_PORT=PORT BENCH_SRC=/dir [BENCH_PAR=1] cargo test --release --lib ftp::tests::bench -- --ignored --nocapture`.
 
