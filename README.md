@@ -15,9 +15,10 @@ Unpack is a Windows desktop tool for extracting archives (ZIP, RAR, 7Z, and more
 
 ## VirusTotal
 
-Installer scan: [VirusTotal report](https://www.virustotal.com/gui/file/06d10c80350857f733c4a1bf864e799c68f0d5e4d6423410dc4264934fd0f2f8)
+- Installer: [VirusTotal report](https://www.virustotal.com/gui/file/06d10c80350857f733c4a1bf864e799c68f0d5e4d6423410dc4264934fd0f2f8)
+- Portable: [VirusTotal report](https://www.virustotal.com/gui/file/1d6a4c0551bef9fc413fce2a773cd2a4752ee7ba86f754fa57af420691571b84)
 
-Currently flagged only by Trapmine (`Malicious.high.ml.score`). This is a common machine-learning false positive on unsigned NSIS/Tauri installers. All other engines report clean.
+Currently flagged only by Trapmine (`Malicious.high.ml.score`). This is a common machine-learning false positive on unsigned NSIS/Tauri builds. All other engines report clean.
 
 ## Install (when ready)
 
