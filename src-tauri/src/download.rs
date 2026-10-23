@@ -44,6 +44,11 @@ pub fn download_url(
     let response = request.call().map_err(|e| format!("download failed: {e}"))?;
     let status = response.status();
     let resumed = status == 206 && existing > 0;
+    if resumed && !range_starts_at(response.header("Content-Range"), existing) {
+        return Err(format!(
+            "the server sent a different part of the file than the {existing} bytes already saved. Delete the partial download and try again."
+        ));
+    }
     let total = content_length(&response).map(|n| if resumed { existing + n } else { n });
     let mut reader = response.into_reader();
     let tmp = fileops::sibling(dest, "unpack-tmp");
@@ -108,6 +113,14 @@ pub fn download_url(
     })
 }
 
+fn range_starts_at(header: Option<&str>, offset: u64) -> bool {
+    header
+        .and_then(|h| h.trim().strip_prefix("bytes "))
+        .and_then(|h| h.split('-').next())
+        .and_then(|start| start.trim().parse::<u64>().ok())
+        == Some(offset)
+}
+
 fn content_length(response: &ureq::Response) -> Option<u64> {
     response
         .header("Content-Length")
@@ -139,8 +152,24 @@ pub fn default_download_name(url: &str) -> String {
                 .and_then(|mut s| s.next_back())
                 .map(|s| s.to_string())
         })
+        .map(|s| safe_file_name(&s))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "download.bin".into())
+}
+
+/// The last part of a URL becomes a file name, so keep it to one plain name
+/// that Windows can store.
+fn safe_file_name(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_end_matches(['.', ' ']);
+    trimmed.chars().take(120).collect()
 }
 
 pub fn dest_for_url(dir: &Path, url: &str) -> PathBuf {
@@ -149,6 +178,24 @@ pub fn dest_for_url(dir: &Path, url: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn url_names_become_plain_file_names() {
+        assert_eq!(super::default_download_name("https://h/a/Halo%203.zip"), "Halo%203.zip");
+        assert_eq!(super::default_download_name("https://h/a/evil.txt:payload.exe"), "evil.txt_payload.exe");
+        assert_eq!(super::default_download_name("https://h/a/name.."), "name");
+        assert_eq!(super::default_download_name("https://h/"), "download.bin");
+        assert_eq!(super::default_download_name("https://h/%2e%2e"), "download.bin");
+        assert!(super::default_download_name(&format!("https://h/{}", "a".repeat(400))).len() <= 120);
+    }
+
+    #[test]
+    fn resume_needs_the_matching_range() {
+        assert!(super::range_starts_at(Some("bytes 100-999/1000"), 100));
+        assert!(!super::range_starts_at(Some("bytes 0-999/1000"), 100));
+        assert!(!super::range_starts_at(Some("items 100-999/1000"), 100));
+        assert!(!super::range_starts_at(None, 100));
+    }
+
     use super::*;
     use std::io::Cursor;
     use tiny_http::{Header, Response, Server, StatusCode};
@@ -179,8 +226,15 @@ mod tests {
                         .respond(
                             Response::new(
                                 StatusCode(206),
-                                vec![Header::from_bytes(&b"Content-Length"[..], len.to_string())
-                                    .unwrap()],
+                                vec![
+                                    Header::from_bytes(&b"Content-Length"[..], len.to_string())
+                                        .unwrap(),
+                                    Header::from_bytes(
+                                        &b"Content-Range"[..],
+                                        format!("bytes {start}-{}/{}", body.len() - 1, body.len()),
+                                    )
+                                    .unwrap(),
+                                ],
                                 Cursor::new(slice),
                                 Some(len),
                                 None,
@@ -210,6 +264,39 @@ mod tests {
         assert!(second.resumed);
         assert_eq!(second.bytes, payload.len() as u64);
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_to_append_the_wrong_part_of_a_file() {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        let handle = std::thread::spawn(move || {
+            let request = server.recv().unwrap();
+            let slice = vec![9u8; 500];
+            request
+                .respond(Response::new(
+                    StatusCode(206),
+                    vec![
+                        Header::from_bytes(&b"Content-Length"[..], "500").unwrap(),
+                        Header::from_bytes(&b"Content-Range"[..], "bytes 0-499/500").unwrap(),
+                    ],
+                    Cursor::new(slice),
+                    Some(500),
+                    None,
+                ))
+                .unwrap();
+        });
+        let dir = std::env::temp_dir().join(format!("unpack-dl-wrong-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("blob.bin");
+        std::fs::write(&dest, vec![1u8; 100]).unwrap();
+        let err = download_url(&format!("http://{addr}/blob.bin"), &dest, None, |_, _, _| {})
+            .unwrap_err();
+        assert!(err.contains("different part"), "{err}");
+        assert_eq!(std::fs::read(&dest).unwrap(), vec![1u8; 100], "partial file must be untouched");
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
