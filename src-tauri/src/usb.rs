@@ -1,0 +1,285 @@
+use crate::hashutil;
+use crate::paths;
+use serde::Serialize;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+const FAT32_MAX_FILE: u64 = 0xFFFF_FFFF;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VolumeInfo {
+    pub path: String,
+    pub filesystem: String,
+    pub is_fat32: bool,
+    pub fat32_limit: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CopyReport {
+    pub copied: u32,
+    pub skipped_protected: u32,
+    pub bytes: u64,
+    pub verified: bool,
+    pub warnings: Vec<String>,
+}
+
+pub fn filesystem_for(path: &Path) -> Result<VolumeInfo, String> {
+    let canon = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let filesystem = detect_filesystem(&canon)?;
+    let is_fat32 = filesystem.eq_ignore_ascii_case("fat32")
+        || filesystem.eq_ignore_ascii_case("vfat")
+        || filesystem.eq_ignore_ascii_case("msdos");
+    Ok(VolumeInfo {
+        path: canon.display().to_string(),
+        filesystem,
+        is_fat32,
+        fat32_limit: FAT32_MAX_FILE,
+    })
+}
+
+pub fn exceeds_fat32(size: u64) -> bool {
+    size > FAT32_MAX_FILE
+}
+
+pub fn copy_tree(
+    src: &Path,
+    dest_dir: &Path,
+    verify: bool,
+    overwrite_protected: bool,
+) -> Result<CopyReport, String> {
+    let mut report = CopyReport {
+        copied: 0,
+        skipped_protected: 0,
+        bytes: 0,
+        verified: verify,
+        warnings: Vec::new(),
+    };
+    fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+    if src.is_file() {
+        copy_one(src, &dest_dir.join(file_name(src)), verify, overwrite_protected, &mut report)?;
+    } else {
+        copy_dir(src, dest_dir, verify, overwrite_protected, &mut report)?;
+    }
+    Ok(report)
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into())
+}
+
+fn copy_dir(
+    src: &Path,
+    dest: &Path,
+    verify: bool,
+    overwrite_protected: bool,
+    report: &mut CopyReport,
+) -> Result<(), String> {
+    fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to, verify, overwrite_protected, report)?;
+        } else {
+            copy_one(&from, &to, verify, overwrite_protected, report)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_one(
+    src: &Path,
+    dest: &Path,
+    verify: bool,
+    overwrite_protected: bool,
+    report: &mut CopyReport,
+) -> Result<(), String> {
+    let name = file_name(src);
+    if paths::is_protected_filename(&name) && dest.exists() && !overwrite_protected {
+        report.skipped_protected += 1;
+        report.warnings.push(format!(
+            "left existing {} in place (interrupted copies must not delete DashLaunch config)",
+            dest.display()
+        ));
+        return Ok(());
+    }
+    let meta = fs::metadata(src).map_err(|e| e.to_string())?;
+    if exceeds_fat32(meta.len()) {
+        if let Ok(vol) = filesystem_for(dest.parent().unwrap_or(dest)) {
+            if vol.is_fat32 {
+                return Err(format!(
+                    "{} is {} bytes, over the FAT32 4 GiB file limit",
+                    src.display(),
+                    meta.len()
+                ));
+            }
+        }
+        report.warnings.push(format!(
+            "{} is larger than 4 GiB; copy will fail on FAT32 USB drives",
+            src.display()
+        ));
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // Copy to a sibling temp name, then rename, so a crash never leaves a truncated launch.ini.
+    let tmp = dest.with_extension(format!(
+        "{}.unpack-tmp",
+        dest.extension().and_then(|e| e.to_str()).unwrap_or("tmp")
+    ));
+    fs::copy(src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
+    if verify {
+        let a = hashutil::sha256_file(src)?;
+        let b = hashutil::sha256_file(&tmp)?;
+        if a != b {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("verify failed for {}", src.display()));
+        }
+    }
+    if dest.exists() {
+        fs::remove_file(dest).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&tmp, dest).or_else(|_| {
+        fs::copy(&tmp, dest).map(|_| ())?;
+        fs::remove_file(&tmp).map_err(|e| io::Error::other(e.to_string()))
+    }).map_err(|e| e.to_string())?;
+    report.copied += 1;
+    report.bytes += meta.len();
+    Ok(())
+}
+
+#[cfg(windows)]
+fn detect_filesystem(path: &Path) -> Result<String, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
+    let root = volume_root(path)?;
+    let mut root_w: Vec<u16> = root.as_os_str().encode_wide().collect();
+    if !root_w.ends_with(&[0]) {
+        root_w.push(0);
+    }
+    let mut fs_name = [0u16; 32];
+    let ok = unsafe {
+        GetVolumeInformationW(
+            root_w.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            fs_name.as_mut_ptr(),
+            fs_name.len() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err("GetVolumeInformationW failed".into());
+    }
+    let len = fs_name.iter().position(|c| *c == 0).unwrap_or(fs_name.len());
+    Ok(String::from_utf16_lossy(&fs_name[..len]))
+}
+
+#[cfg(windows)]
+fn volume_root(path: &Path) -> Result<PathBuf, String> {
+    let s = path.to_string_lossy();
+    if s.len() >= 2 && s.as_bytes()[1] == b':' {
+        Ok(PathBuf::from(format!("{}:\\", s.chars().next().unwrap())))
+    } else {
+        Ok(path.to_path_buf())
+    }
+}
+
+#[cfg(not(windows))]
+fn detect_filesystem(path: &Path) -> Result<String, String> {
+    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let mut best: Option<(usize, String)> = None;
+    for line in mounts.lines() {
+        let mut parts = line.split_whitespace();
+        let _dev = parts.next();
+        let Some(mp) = parts.next() else { continue };
+        let Some(fs) = parts.next() else { continue };
+        if path.starts_with(mp) {
+            let len = mp.len();
+            if best.as_ref().map(|(l, _)| len > *l).unwrap_or(true) {
+                best = Some((len, fs.to_string()));
+            }
+        }
+    }
+    Ok(best.map(|(_, fs)| fs).unwrap_or_else(|| "unknown".into()))
+}
+
+#[allow(dead_code)]
+pub fn list_fat32_warnings(paths: &[PathBuf], dest: &Path) -> Result<Vec<String>, String> {
+    let vol = filesystem_for(dest)?;
+    let mut warnings = Vec::new();
+    if vol.is_fat32 {
+        warnings.push(format!("{} is {}", dest.display(), vol.filesystem));
+    }
+    for p in paths {
+        if p.is_file() {
+            if let Ok(meta) = fs::metadata(p) {
+                if vol.is_fat32 && exceeds_fat32(meta.len()) {
+                    warnings.push(format!(
+                        "{} exceeds the FAT32 4 GiB file size limit",
+                        p.display()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(warnings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn fat32_limit() {
+        assert!(!exceeds_fat32(4 * 1024 * 1024 * 1024 - 1));
+        assert!(exceeds_fat32(4 * 1024 * 1024 * 1024));
+        let _ = list_fat32_warnings(&[], Path::new("/"));
+        let _ = crate::paths::arcade_content_type();
+        let _ = crate::paths::theme_content_type();
+        let _ = crate::paths::title_update_content_type();
+        assert_eq!(crate::paths::dlc_content_type(), 0x00000002);
+    }
+
+    #[test]
+    fn does_not_clobber_launch_ini() {
+        let root = std::env::temp_dir().join(format!("unpack-usb-{}", std::process::id()));
+        let src_dir = root.join("src");
+        let dest_dir = root.join("dest");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        fs::write(src_dir.join("game.xex"), b"new").unwrap();
+        fs::write(src_dir.join("launch.ini"), b"new-ini").unwrap();
+        fs::write(dest_dir.join("launch.ini"), b"keep-me").unwrap();
+        let report = copy_tree(&src_dir, &dest_dir, true, false).unwrap();
+        assert_eq!(fs::read_to_string(dest_dir.join("launch.ini")).unwrap(), "keep-me");
+        assert_eq!(fs::read_to_string(dest_dir.join("game.xex")).unwrap(), "new");
+        assert_eq!(report.skipped_protected, 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn verifies_copied_bytes() {
+        let root = std::env::temp_dir().join(format!("unpack-usb-v-{}", std::process::id()));
+        let src = root.join("a.bin");
+        let dest = root.join("out");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&dest).unwrap();
+        let mut f = fs::File::create(&src).unwrap();
+        f.write_all(&(0..8000u32).map(|x| (x % 251) as u8).collect::<Vec<_>>())
+            .unwrap();
+        drop(f);
+        let report = copy_tree(&src, &dest, true, false).unwrap();
+        assert_eq!(report.copied, 1);
+        assert!(report.verified);
+        let _ = fs::remove_dir_all(&root);
+    }
+}

@@ -6,6 +6,18 @@
 
 Unpack is a Windows desktop tool for extracting archives (ZIP, RAR, 7Z, and more), converting Xbox 360 ISOs to Games on Demand or extracted XEX folders, managing a game library, installing DLC/title updates, handling mod menus, and sending files to a modded Xbox 360 over the local network.
 
+## Build from source
+
+```bash
+npm install
+npx tauri dev      # development window
+npx tauri build    # installer / portable (on Windows)
+```
+
+Needs Node 22, Rust 1.90+ (`rust-toolchain.toml`), and the WebView2 runtime on Windows. On Linux, install the Tauri WebKitGTK packages (`libwebkit2gtk-4.1-dev`, `librsvg2-dev`). Put `7za.exe` next to `Unpack.exe` on Windows, or install p7zip / 7-Zip and optionally set `UNPACK_7ZA`.
+
+ISO conversion uses a vendored copy of [iso2god-rs](https://github.com/iliazeus/iso2god-rs) (MIT). The TitleID library is that crate’s ~4,900-name list.
+
 ## Status
 
 - **WIP / Testing** — Newest features are still being reviewed and tested.
@@ -15,7 +27,7 @@ Unpack is a Windows desktop tool for extracting archives (ZIP, RAR, 7Z, and more
 
 ## Known Bugs
 
-- **Send to Xbox:** If the connection is interrupted mid-transfer, it can delete the `launch.ini` file on the console. Keep a backup of your `launch.ini` before using Send to Xbox.
+- **Send to Xbox:** Older builds could delete `launch.ini` if a transfer was interrupted. Current source skips `launch.ini` unless you opt in, and even then replaces it with a rename instead of delete-then-upload. Keep a backup anyway.
 
 ## VirusTotal
 
