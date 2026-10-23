@@ -358,7 +358,9 @@ pub fn run_with_progress(
 /// True when 7-Zip's only errors were hard links it refused to create.
 fn tolerable_errors(err: &str) -> bool {
     let errors: Vec<&str> = err.lines().filter(|l| l.trim_start().starts_with("ERROR:")).collect();
-    !errors.is_empty() && errors.iter().all(|l| l.contains("Cannot create hard link"))
+    // Older 7-Zip builds (23.x) follow a refused hard link with "Cannot set file attribute" for the same entry.
+    errors.iter().any(|l| l.contains("Cannot create hard link"))
+        && errors.iter().all(|l| l.contains("Cannot create hard link") || l.contains("Cannot set file attribute"))
 }
 
 /// Parse a 7-Zip progress line such as " 44% 3 - folder/file.bin".
