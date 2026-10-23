@@ -27,6 +27,10 @@ pub fn download_url(
         return Err("only http and https URLs are allowed".into());
     }
     deny_non_loopback_if_testing(&parsed)?;
+    // A hash typo should fail now, not after a multi-gigabyte download.
+    if let Some(expected) = expected_hash {
+        hashutil::normalize_hash(expected)?;
+    }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
