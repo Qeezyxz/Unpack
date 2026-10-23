@@ -47,7 +47,7 @@ pub fn app_meta(app: AppHandle) -> Result<AppMeta, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_settings(app: AppHandle) -> Result<serde_json::Value, String> {
     let path = settings_path(&app)?;
     if !path.exists() {
@@ -57,7 +57,7 @@ pub fn load_settings(app: AppHandle) -> Result<serde_json::Value, String> {
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
     let path = settings_path(&app)?;
     let body = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
@@ -87,7 +87,7 @@ pub fn discord_set_enabled(app: AppHandle, enabled: bool) -> Result<(), String> 
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pick_files(app: AppHandle, title: Option<String>, extensions: Option<Vec<String>>) -> Result<Vec<String>, String> {
     let mut dialog = app.dialog().file();
     if let Some(title) = title {
@@ -105,7 +105,7 @@ pub fn pick_files(app: AppHandle, title: Option<String>, extensions: Option<Vec<
         .collect())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pick_folder(app: AppHandle, title: Option<String>) -> Result<Option<String>, String> {
     let mut dialog = app.dialog().file();
     if let Some(title) = title {
@@ -114,7 +114,7 @@ pub fn pick_folder(app: AppHandle, title: Option<String>) -> Result<Option<Strin
     Ok(dialog.blocking_pick_folder().and_then(dialog_path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pick_save(app: AppHandle, title: Option<String>, default_name: Option<String>) -> Result<Option<String>, String> {
     let mut dialog = app.dialog().file();
     if let Some(title) = title {
@@ -149,7 +149,7 @@ pub fn open_path(app: AppHandle, path: String) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn xbox_test(host: String, port: u16, user: String, pass: String) -> Result<String, String> {
     xbox::test_login(&host, port, &user, &pass)
 }
@@ -274,17 +274,17 @@ pub async fn scan_library(root: String) -> Result<Vec<library::LibraryItem>, Str
         .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn parse_package(path: String) -> Result<stfs::StfsInfo, String> {
     stfs::parse_stfs_file(&PathBuf::from(path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn place_content(path: String, library_root: String) -> Result<library::LibraryItem, String> {
     library::place_content(&PathBuf::from(path), &PathBuf::from(library_root))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn volume_info(path: String) -> Result<usb::VolumeInfo, String> {
     usb::filesystem_for(&PathBuf::from(path))
 }
@@ -321,7 +321,7 @@ pub async fn copy_to_usb(
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn hash_file(path: String) -> Result<serde_json::Value, String> {
     let p = PathBuf::from(path);
     Ok(serde_json::json!({
@@ -393,7 +393,7 @@ pub async fn send_to_xbox(
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_dir(path: String) -> Result<Vec<String>, String> {
     library::list_dir(&PathBuf::from(path))
 }
