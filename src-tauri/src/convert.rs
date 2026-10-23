@@ -65,6 +65,16 @@ fn require_known_title(title_id: u32) -> Result<String, String> {
     })
 }
 
+fn missing_executable_message(source: &Path) -> String {
+    let name = file_name(source);
+    match disc_hint_from_name(source) {
+        Some(n) if n > 1 => format!(
+            "{name} is Disc {n} and has no default.xex. Convert Disc 1 first, or pick both discs together."
+        ),
+        _ => format!("{name} has no default.xex or default.xbe, so it does not look like a game disc."),
+    }
+}
+
 fn iso_info(path: &Path, exe: &TitleExecutionInfo, content_type: ContentType, used_bytes: u64) -> IsoInfo {
     let mut info = IsoInfo {
         path: path.display().to_string(),
@@ -630,7 +640,7 @@ fn extract_iso_into(
     let mut iso = iso::IsoReader::read(file).map_err(|e| format!("{}: {e}", source.display()))?;
     let title_info = TitleInfo::from_image(&mut iso).ok();
     if title_info.is_none() && !merge {
-        return Err(format!("no default.xex/xbe in {}", source.display()));
+        return Err(missing_executable_message(source));
     }
     if let Some(t) = &title_info {
         require_known_title(t.execution_info.title_id)?;
@@ -918,6 +928,43 @@ mod tests {
             "GOD convert must not write a TitleID folder"
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lone_disc_two_gets_a_plain_message() {
+        let msg = missing_executable_message(Path::new("Halo 3 (Disc 2).iso"));
+        assert!(msg.contains("Disc 2"), "{msg}");
+        assert!(msg.contains("Convert Disc 1 first"), "{msg}");
+        let other = missing_executable_message(Path::new("Photos.iso"));
+        assert!(other.contains("does not look like a game disc"), "{other}");
+        assert!(!other.contains("Disc"), "{other}");
+    }
+
+    #[test]
+    fn lone_disc_two_without_xex_stops_and_writes_nothing() {
+        let root = std::env::temp_dir().join(format!(
+            "unpack-lone-disc2-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let disc2 = root.join("Sample (Disc 2).iso");
+        let dest = root.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        write_xsf_iso(&disc2, &[("extra.bin", b"only-on-disc-2".to_vec())]);
+
+        let err = convert_isos(&[disc2], &dest, "xex", false, true, false, |_, _, _| {})
+            .unwrap_err();
+        assert!(err.contains("Disc 2"), "{err}");
+        assert!(err.contains("Convert Disc 1 first"), "{err}");
+        assert!(
+            fs::read_dir(&dest).unwrap().next().is_none(),
+            "a lone disc 2 must not leave a folder behind"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
