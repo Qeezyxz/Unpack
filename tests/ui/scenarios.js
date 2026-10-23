@@ -125,6 +125,18 @@ const calls = (cmd) => window.__calls.filter((c) => c.cmd === cmd);
   check("mods remove hits the right file", document.querySelectorAll("#mods-list li").length === 2 && !/Plugin/.test($$("mods-list").textContent), $$("mods-list").textContent);
   check("mods empty hint hidden when list has files", $$("mods-empty").classList.contains("hidden"), "");
 
+  // sample zip must not wait on itself when only one job may run
+  $$("max-jobs").value = "1";
+  window.__behaviour.pick_files = () => Promise.resolve(["/m/sample.txt"]);
+  window.__behaviour.create_archive = () => Promise.resolve({ archive: "/out/Unpack-sample.zip" });
+  window.__behaviour.extract_archives = () => Promise.resolve([{ archive: "a", isos: [], nested: 0, inner_left: 0 }]);
+  const x0 = calls("extract_archives").length;
+  $$("sample-zip").click();
+  await sleep(300);
+  check("sample zip works with one job at a time", calls("extract_archives").length === x0 + 1, "stuck waiting for itself");
+  check("final status is the extract summary", /Extracted 1 archive/.test($$("job-status").textContent), $$("job-status").textContent);
+  $$("max-jobs").value = "3";
+
   // 11. Send to Xbox with nothing selected
   window.__behaviour.send_to_xbox = () => Promise.reject("choose files or folders to send");
   $$("run-send").click();

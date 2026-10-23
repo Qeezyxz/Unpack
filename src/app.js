@@ -449,15 +449,21 @@ async function init() {
     const d = await pickDir("Extract to");
     if (d) $("extract-dest").value = d;
   };
-  $("sample-zip").onclick = () => job("Creating sample ZIP…", async () => {
-    const dest = $("extract-dest").value.trim();
-    if (!dest) throw new Error("Choose a destination folder first.");
-    const inputs = await pickMany("Pick any small file to pack as a sample");
-    if (!inputs.length) throw new Error("Pick a file to wrap in a sample ZIP, or drop a real archive.");
-    const out = `${dest.replace(/[\\/]+$/, "")}/Unpack-sample.zip`;
-    await invoke("create_archive", { inputs, dest: out });
-    await handlePaths([out]);
-  });
+  $("sample-zip").onclick = async () => {
+    let sample = null;
+    await job("Creating sample ZIP…", async () => {
+      const dest = $("extract-dest").value.trim();
+      if (!dest) throw new Error("Choose a destination folder first.");
+      const inputs = await pickMany("Pick any small file to pack as a sample");
+      if (!inputs.length) throw new Error("Pick a file to wrap in a sample ZIP, or drop a real archive.");
+      const out = `${dest.replace(/[\\/]+$/, "")}/Unpack-sample.zip`;
+      await invoke("create_archive", { inputs, dest: out });
+      sample = out;
+    });
+    // Extracting is its own job. Starting it from inside this one would wait
+    // for a slot this job is still holding, and hang when only one job may run.
+    if (sample) await handlePaths([sample]);
+  };
 
   $("pick-library").onclick = async () => {
     const d = await pickDir("Game library folder");
