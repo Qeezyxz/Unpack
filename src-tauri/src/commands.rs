@@ -1,4 +1,4 @@
-use crate::{archive, convert, discord, download, fileops, hashutil, library, progress, stfs, usb, xbox};
+use crate::{archive, convert, destlock, discord, download, fileops, hashutil, library, progress, stfs, usb, xbox};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -175,14 +175,19 @@ pub async fn extract_archives(
     };
     let result = tauri::async_runtime::spawn_blocking(move || {
         let paths: Vec<PathBuf> = archives.into_iter().map(PathBuf::from).collect();
+        let dest = PathBuf::from(dest);
+        let _folder = destlock::acquire(&dest, || {
+            progress::emit(&app_job, "extract", destlock::WAIT_MESSAGE, 0, 1);
+        });
         archive::extract_archives_with(
             &paths,
-            &PathBuf::from(dest),
+            &dest,
             &opts,
             Some(&mut |message, current, total| {
                 progress::emit(&app_job, "extract", message, current, total);
             }),
         )
+        .map_err(|e| usb::with_fat32_hint(e, &dest))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -231,9 +236,13 @@ pub async fn convert_iso(
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let bufs: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+        let dest = PathBuf::from(dest);
+        let _folder = destlock::acquire(&dest, || {
+            progress::emit(&app2, "convert", destlock::WAIT_MESSAGE, 0, 1);
+        });
         convert::convert_isos(
             &bufs,
-            &PathBuf::from(dest),
+            &dest,
             &mode,
             trim,
             verify,

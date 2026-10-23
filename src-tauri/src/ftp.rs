@@ -11,6 +11,8 @@ pub struct FtpClient {
     /// Address of the Xbox from the control connection. Used when PASV
     /// returns 0.0.0.0 or a non-LAN IP (common on FSD / Aurora).
     control_ip: IpAddr,
+    /// Bytes written to the data socket by the most recent transfer.
+    sent_last: u64,
 }
 
 impl FtpClient {
@@ -32,6 +34,7 @@ impl FtpClient {
             reader: BufReader::new(stream),
             writer,
             control_ip,
+            sent_last: 0,
         };
         client.read_response()?; // greeting
         let user = if user.trim().is_empty() { "anonymous" } else { user };
@@ -242,6 +245,7 @@ impl FtpClient {
             file.seek(SeekFrom::Start(offset))
                 .map_err(|e| format!("seek {}: {e}", local.display()))?;
         }
+        self.sent_last = 0;
         let mut data_stream = self.pasv_stream()?;
         if use_rest {
             let (code, msg) = self.command(&format!("REST {offset}"))?;
@@ -256,6 +260,9 @@ impl FtpClient {
         self.writer.flush().map_err(|e| e.to_string())?;
         let (code, msg) = self.read_response()?;
         if code >= 400 {
+            if reply_means_full(code, &msg) {
+                return Err(storage_full_message(name));
+            }
             return Err(format!("{cmd} {name} rejected: {code} {msg}"));
         }
         let mut buf = [0u8; 64 * 1024];
@@ -269,12 +276,17 @@ impl FtpClient {
             data_stream.write_all(&buf[..n]).map_err(|e| {
                 format!("transfer dropped while sending {name}: {e}")
             })?;
+            self.sent_last += n as u64;
         }
         data_stream.flush().map_err(|e| e.to_string())?;
         drop(data_stream);
         let (code, msg) = self.read_response()?;
         if code >= 400 {
-            Err(format!("{cmd} {name} failed: {code} {msg}"))
+            if reply_means_full(code, &msg) {
+                Err(storage_full_message(name))
+            } else {
+                Err(format!("{cmd} {name} failed: {code} {msg}"))
+            }
         } else {
             Ok(())
         }
@@ -282,6 +294,10 @@ impl FtpClient {
 
     pub fn close(self) {
         drop(self);
+    }
+
+    pub fn sent_last(&self) -> u64 {
+        self.sent_last
     }
 }
 
@@ -318,6 +334,33 @@ pub fn resume_action(local_len: u64, dest_len: Option<u64>, part_len: Option<u64
         Some(n) if n > 0 && n < local_len => ResumeAction::ResumeFrom(n),
         _ => ResumeAction::Restart,
     }
+}
+
+/// A retry that moved less than this made no real progress.
+pub const STALL_BYTES: u64 = 256 * 1024;
+
+pub fn stalled(sent: u64) -> bool {
+    sent < STALL_BYTES
+}
+
+pub fn reply_means_full(code: u16, msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    code == 552
+        || code == 452
+        || m.contains("no space")
+        || m.contains("disk full")
+        || m.contains("not enough space")
+        || m.contains("insufficient")
+}
+
+pub fn storage_full_message(name: &str) -> String {
+    format!("The Xbox drive is full, so {name} was not finished. Free some space on the console and send again; the partial .part file is kept.")
+}
+
+pub fn stalled_message(name: &str, tries: u32) -> String {
+    format!(
+        "The Xbox stopped taking {name} (no progress after {tries} tries). Its drive may be full, or the Wi-Fi keeps dropping. Free some space or move closer to the router, then send again; the partial .part file is kept."
+    )
 }
 
 pub fn looks_like_drop(err: &str) -> bool {
@@ -442,6 +485,22 @@ mod tests {
         assert_eq!(resume_action(1000, None, Some(0)), ResumeAction::Restart);
         assert!(looks_like_drop("transfer dropped while sending game.xex: reset"));
         assert!(!looks_like_drop("CWD /Hdd1 failed: 550"));
+    }
+
+    #[test]
+    fn full_drive_is_not_treated_as_a_wifi_drop() {
+        assert!(reply_means_full(552, "Requested file action aborted"));
+        assert!(reply_means_full(452, "Insufficient storage space"));
+        assert!(reply_means_full(550, "No space left on device"));
+        assert!(!reply_means_full(550, "File unavailable"));
+        let full = storage_full_message("game.xex");
+        assert!(full.contains("drive is full"), "{full}");
+        assert!(!looks_like_drop(&full), "{full}");
+        let stall = stalled_message("game.xex", 2);
+        assert!(!looks_like_drop(&stall), "{stall}");
+        assert!(stalled(0));
+        assert!(stalled(STALL_BYTES - 1));
+        assert!(!stalled(STALL_BYTES));
     }
 
     #[test]

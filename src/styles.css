@@ -224,7 +224,7 @@ h1 {
   gap: 8px;
   margin-bottom: 6px;
 }
-.status { color: var(--muted); min-height: 1.2em; margin: 10px 0 0; }
+.status { color: var(--muted); min-height: 1.2em; margin: 10px 0 0; max-width: 720px; overflow-wrap: anywhere; }
 progress { width: 220px; height: 6px; margin-top: 8px; }
 .overlay {
   position: fixed; inset: 0;

@@ -208,6 +208,17 @@ async function convertIsos(isos, dest) {
   });
 }
 
+function extractSummary(result) {
+  const count = result.length;
+  const opened = result.reduce((n, r) => n + (r.nested || 0), 0);
+  const left = result.reduce((n, r) => n + (r.inner_left || 0), 0);
+  let text = opened ? `Extracted ${count} archive(s) and opened ${opened} inside.` : `Extracted ${count} archive(s).`;
+  if (left) {
+    text += ` ${left} zip/rar/7z file(s) inside were left closed. Turn on "Open zips inside zips" to open them.`;
+  }
+  return text;
+}
+
 async function handlePaths(paths) {
   if (!paths?.length) return;
   const dest = $("extract-dest").value.trim();
@@ -231,8 +242,7 @@ async function handlePaths(paths) {
             existing: $("extract-existing").value,
             nested: $("extract-nested").checked,
           });
-          const inner = result.reduce((n, r) => n + (r.nested || 0), 0);
-          log(inner ? `Extracted ${result.length} archive(s) and opened ${inner} inside.` : `Extracted ${result.length} archive(s).`);
+          log(extractSummary(result));
           await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` });
           found = result.flatMap((r) => r.isos || []);
         });
