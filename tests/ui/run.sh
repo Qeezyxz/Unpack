@@ -10,7 +10,7 @@ port=$((20000 + RANDOM % 20000))
 cp "$src"/app.js "$src"/styles.css "$src"/theme.js "$src"/logo.png "$work"/
 cp "$here"/mock.js "$here"/scenarios.js "$work"/
 sed 's#<script src="app.js"></script>#<script src="mock.js"></script><script src="app.js"></script><script src="scenarios.js"></script>#' "$src/index.html" > "$work/index.html"
-(cd "$work" && python3 -m http.server "$port" >/dev/null 2>&1) &
+(cd "$work" && exec python3 -m http.server "$port" >/dev/null 2>&1) &
 server=$!
 trap 'kill $server 2>/dev/null; rm -rf "$work"' EXIT
 sleep 1
