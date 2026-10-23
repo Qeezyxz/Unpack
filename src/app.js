@@ -111,6 +111,14 @@ function saveButton(id) {
   };
 }
 
+function xboxPort() {
+  const text = $("xbox-port").value.trim();
+  if (!text) return 21;
+  const n = Number(text);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error("The port must be a number from 1 to 65535 (the usual one is 21).");
+  return n;
+}
+
 function maxJobs() {
   const n = Number($("max-jobs")?.value || 2);
   return Math.min(4, Math.max(1, Number.isFinite(n) ? n : 2));
@@ -180,7 +188,7 @@ function collectSettings() {
     usbRoot: $("usb-dest").value,
     downloadDir: $("dl-dest").value,
     xboxHost: $("xbox-host").value,
-    xboxPort: Number($("xbox-port").value || 21),
+    xboxPort: Number($("xbox-port").value) || 21,
     xboxUser: $("xbox-user").value,
     xboxPass: $("xbox-pass").value,
     xboxName: $("xbox-name").value,
@@ -586,7 +594,7 @@ async function init() {
   $("xbox-test").onclick = () => job("Connecting…", async () => {
     const msg = await invoke("xbox_test", {
       host: $("xbox-host").value,
-      port: Number($("xbox-port").value || 21),
+      port: xboxPort(),
       user: $("xbox-user").value,
       pass: $("xbox-pass").value,
     });
@@ -596,7 +604,7 @@ async function init() {
   $("run-send").onclick = () => job("Sending to Xbox…", async () => {
     const report = await invoke("send_to_xbox", {
       host: $("xbox-host").value,
-      port: Number($("xbox-port").value || 21),
+      port: xboxPort(),
       user: $("xbox-user").value,
       pass: $("xbox-pass").value,
       dest: "/Hdd1/Games",

@@ -195,6 +195,22 @@ const calls = (cmd) => window.__calls.filter((c) => c.cmd === cmd);
   await sleep(80);
   check("no toast when no dialog is open", $$("job-toast").hidden, "");
 
+  // A typo in the port gives a plain message instead of a bridge error
+  $$("xbox-port").value = "twenty";
+  const t0 = calls("xbox_test").length;
+  $$("xbox-test").click();
+  await sleep(80);
+  check("bad port is explained", /port must be a number/.test($$("job-error-text").textContent) && calls("xbox_test").length === t0, $$("job-error-text").textContent);
+  $$("xbox-port").value = "99999";
+  $$("xbox-test").click();
+  await sleep(80);
+  check("out of range port is explained", /1 to 65535/.test($$("job-error-text").textContent), $$("job-error-text").textContent);
+  $$("xbox-port").value = "";
+  $$("xbox-test").click();
+  await sleep(80);
+  check("empty port means 21", calls("xbox_test").length === t0 + 1 && calls("xbox_test")[t0].args.port === 21, JSON.stringify(calls("xbox_test").slice(-1)));
+  $$("xbox-port").value = "21";
+
   document.title = "DONE";
   const pre = document.createElement("pre");
   pre.id = "results";
