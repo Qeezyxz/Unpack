@@ -542,6 +542,27 @@ mod tests {
     }
 
     #[test]
+    fn odd_pasv_replies_never_panic() {
+        let fallback = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
+        for msg in [
+            "",
+            "227",
+            "227 ()",
+            "227 )(",
+            "227 (1,2,3)",
+            "227 (999,999,999,999,999,999)",
+            "227 (a,b,c,d,e,f)",
+            "227 (192,168,1,5,255,255)",
+            "227 (192,168,1,5,-1,2)",
+            "227 Entering (1,2,3,4,5,6,7,8)",
+            "227 \u{e9}\u{e9} (1,2,3,4,5,6)",
+        ] {
+            let _ = parse_pasv(msg, fallback);
+        }
+        assert!(parse_pasv("227 )(", fallback).is_err());
+    }
+
+    #[test]
     fn size_reply_is_the_number_after_the_code() {
         assert_eq!(parse_size_reply("213 1048576\r\n").unwrap(), 1_048_576);
         assert_eq!(parse_size_reply("213 0\r\n").unwrap(), 0);

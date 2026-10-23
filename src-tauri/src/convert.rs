@@ -1240,4 +1240,89 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn damaged_discs_never_panic_hang_or_leave_litter() {
+        let root = std::env::temp_dir().join(format!("unpack-fuzz-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let good = root.join("good.iso");
+        write_xsf_iso(
+            &good,
+            &[
+                ("default.xex", minimal_xex(0x4D5307E6, 1, 1, 0x11111111, b"XEX")),
+                ("a.bin", vec![1u8; 5000]),
+                ("b.bin", vec![2u8; 3000]),
+            ],
+        );
+        let original = fs::read(&good).unwrap();
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..400 {
+            let mut bytes = original.clone();
+            match round % 4 {
+                0 => {
+                    let cut = (next() as usize) % bytes.len();
+                    bytes.truncate(cut);
+                }
+                1 => {
+                    for _ in 0..4 {
+                        let at = 0x10000 + (next() as usize) % 0x40;
+                        bytes[at] = next() as u8;
+                    }
+                }
+                2 => {
+                    for _ in 0..6 {
+                        let at = 0x10800 + (next() as usize) % 0x60;
+                        bytes[at] = next() as u8;
+                    }
+                }
+                _ => {
+                    for _ in 0..8 {
+                        let at = (next() as usize) % bytes.len();
+                        bytes[at] = next() as u8;
+                    }
+                }
+            }
+            let iso = root.join(format!("fuzz{round}.iso"));
+            fs::write(&iso, &bytes).unwrap();
+            let dest = root.join(format!("out{round}"));
+            fs::create_dir_all(&dest).unwrap();
+            for mode in ["xex", "god"] {
+                let (iso_in, dest_in) = (iso.clone(), dest.clone());
+                let handle = std::thread::spawn(move || {
+                    let _ = inspect_iso(&iso_in);
+                    convert_isos(&[iso_in], &dest_in, mode, false, true, false, |_, _, _| {})
+                });
+                let start = std::time::Instant::now();
+                while !handle.is_finished() {
+                    assert!(
+                        start.elapsed() < std::time::Duration::from_secs(20),
+                        "round {round} {mode} hung"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                let result = handle.join();
+                assert!(result.is_ok(), "round {round} {mode} panicked");
+                if result.unwrap().is_err() {
+                    let litter: Vec<String> = fs::read_dir(&dest)
+                        .unwrap()
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    assert!(litter.is_empty(), "round {round} {mode} left {litter:?}");
+                }
+                let _ = fs::remove_dir_all(&dest);
+                fs::create_dir_all(&dest).unwrap();
+            }
+            let _ = fs::remove_file(&iso);
+            let _ = fs::remove_dir_all(&dest);
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
 }
