@@ -111,6 +111,20 @@ const calls = (cmd) => window.__calls.filter((c) => c.cmd === cmd);
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
   check("escape closes", $$("overlay").classList.contains("hidden"), "");
 
+  // mods list and search
+  window.__behaviour.pick_files = () => Promise.resolve(["/m/Aurora.xex", "/m/<b>Plugin</b>.xex", "/m/Other.bin"]);
+  $$("pick-mod-files").click();
+  await sleep(50);
+  check("mods listed", document.querySelectorAll("#mods-list li").length === 3 && !document.querySelector("#mods-list b"), "");
+  $$("mods-search").value = "plugin";
+  $$("mods-search").oninput();
+  check("mods search filters", document.querySelectorAll("#mods-list li").length === 1, String(document.querySelectorAll("#mods-list li").length));
+  document.querySelector("#mods-list li button").click();
+  $$("mods-search").value = "";
+  $$("mods-search").oninput();
+  check("mods remove hits the right file", document.querySelectorAll("#mods-list li").length === 2 && !/Plugin/.test($$("mods-list").textContent), $$("mods-list").textContent);
+  check("mods empty hint hidden when list has files", $$("mods-empty").classList.contains("hidden"), "");
+
   // 11. Send to Xbox with nothing selected
   window.__behaviour.send_to_xbox = () => Promise.reject("choose files or folders to send");
   $$("run-send").click();

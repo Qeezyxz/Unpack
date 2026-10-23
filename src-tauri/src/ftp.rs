@@ -85,8 +85,10 @@ impl FtpClient {
         }
         let addr = parse_pasv(&msg, self.control_ip)?;
         let stream = connect_timeout(&addr, Duration::from_secs(8))?;
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(600)));
+        // A single 64 KB write that makes no progress for this long means the
+        // console is gone; fail so Send can reconnect instead of hanging.
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(90)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
         Ok(stream)
     }
 

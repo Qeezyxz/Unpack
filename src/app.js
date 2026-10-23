@@ -465,18 +465,33 @@ async function init() {
   };
   $("scan-library").onclick = () => job("Scanning library…", refreshLibrary);
 
+  const renderMods = () => {
+    const q = $("mods-search").value.trim().toLowerCase();
+    const list = $("mods-list");
+    list.innerHTML = "";
+    state.modFiles.forEach((p, i) => {
+      if (q && !p.toLowerCase().includes(q)) return;
+      const li = document.createElement("li");
+      li.innerHTML = `<span>${esc(p)}</span><button type="button">remove</button>`;
+      li.querySelector("button").onclick = () => {
+        state.modFiles.splice(i, 1);
+        renderMods();
+      };
+      list.appendChild(li);
+    });
+    $("mods-empty").classList.toggle("hidden", state.modFiles.length > 0);
+  };
+  $("mods-search").oninput = renderMods;
   $("pick-mod-files").onclick = async () => {
     const files = await pickMany("Mod files");
     state.modFiles.push(...files);
-    $("mods-empty").classList.toggle("hidden", state.modFiles.length > 0);
-    setList("mods-list", state.modFiles);
+    renderMods();
   };
   $("pick-mod-folder").onclick = async () => {
     const d = await pickDir("Mods folder");
     if (d) {
       state.modFiles.push(d);
-      $("mods-empty").classList.toggle("hidden", true);
-      setList("mods-list", state.modFiles);
+      renderMods();
     }
   };
   $("pick-dl-dest").onclick = async () => {
