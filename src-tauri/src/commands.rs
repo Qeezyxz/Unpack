@@ -359,6 +359,9 @@ pub async fn download_url(
     let dest = download::dest_for_url(&PathBuf::from(dest_dir), &url);
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _file = destlock::acquire(&dest, || {
+            progress::emit(&app2, "download", destlock::WAIT_MESSAGE, 0, 1);
+        });
         download::download_url(
             &url,
             &dest,
