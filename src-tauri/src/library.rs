@@ -221,12 +221,20 @@ mod tests {
 
     #[test]
     fn title_database_has_about_4900_entries() {
-        assert!(title_count() > 4500, "got {}", title_count());
+        assert!(title_count() > 5500, "got {}", title_count());
         let aurora = lookup_title("00000166").expect("Aurora");
         assert!(aurora.name.to_lowercase().contains("aurora"));
         assert_eq!(lookup_title_u32(0x00000166).unwrap().to_lowercase(), aurora.name.to_lowercase());
         let halo = search_titles("halo 3", 10);
         assert!(halo.iter().any(|t| t.name.to_lowercase().contains("halo")));
+        let hawk = lookup_title("41560810").expect("Tony Hawk Project 8 from 360 list");
+        assert!(hawk.name.to_lowercase().contains("project 8"));
+        let afl = lookup_title("4143000D").expect("AFL Live 2003 from original Xbox list");
+        assert!(afl.name.to_lowercase().contains("afl live"));
+        assert_eq!(
+            lookup_title_u32(0x41560810).unwrap().to_lowercase(),
+            hawk.name.to_lowercase()
+        );
     }
 
     #[test]
