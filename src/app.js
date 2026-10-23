@@ -16,6 +16,11 @@ const HOMEBREW = [
   { name: "WillowTree (Borderlands)", cat: "Save Editors", blurb: "Borderlands save editor for Xbox 360 (characters, items, stats).", url: "https://github.com/mattweidner/WillowTreeSharp" },
 ];
 
+const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ESCAPES[c]);
+}
+
 const state = {
   packFiles: [],
   xboxFiles: [],
@@ -193,7 +198,7 @@ function setList(id, paths) {
   el.innerHTML = "";
   paths.forEach((p, i) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span>${p}</span><button type="button">remove</button>`;
+    li.innerHTML = `<span>${esc(p)}</span><button type="button">remove</button>`;
     li.querySelector("button").onclick = () => {
       paths.splice(i, 1);
       setList(id, paths);
@@ -283,7 +288,7 @@ function renderHomebrew() {
       const card = document.createElement("article");
       card.className = "card";
       const save = t.cat === "Save Editors";
-      card.innerHTML = `<div><h3>${t.name}</h3><span class="tag${save ? " save" : ""}">${t.cat}</span></div><p>${t.blurb}</p><button type="button">Open source page</button>`;
+      card.innerHTML = `<div><h3>${esc(t.name)}</h3><span class="tag${save ? " save" : ""}">${esc(t.cat)}</span></div><p>${esc(t.blurb)}</p><button type="button">Open source page</button>`;
       card.querySelector("button").onclick = async () => {
         try { await invoke("open_path", { path: t.url }); }
         catch (e) { showError(e); window.open(t.url, "_blank"); }
@@ -310,7 +315,7 @@ async function refreshLibrary() {
     empty.classList.add("hidden");
     items.forEach((item) => {
       const li = document.createElement("li");
-      li.innerHTML = `<span>${item.name}</span><span class="muted">${item.kind} ${item.title_id || ""}</span>`;
+      li.innerHTML = `<span>${esc(item.name)}</span><span class="muted">${esc(item.kind)} ${esc(item.title_id || "")}</span>`;
       li.onclick = () => {
         state.xboxFiles = [item.path].filter(Boolean);
         if (state.xboxFiles.length) {
@@ -375,10 +380,10 @@ async function init() {
     if (native()) {
       const meta = await invoke("app_meta");
       $("settings-meta").innerHTML = `
-        <dt>Version</dt><dd>${meta.version}</dd>
+        <dt>Version</dt><dd>${esc(meta.version)}</dd>
         <dt>TitleIDs</dt><dd>${meta.title_count.toLocaleString()}</dd>
-        <dt>7-Zip</dt><dd>${meta.seven_zip || "not found (put 7za.exe next to Unpack.exe)"}</dd>
-        <dt>Config</dt><dd>${meta.config_dir}</dd>`;
+        <dt>7-Zip</dt><dd>${esc(meta.seven_zip || "not found (put 7za.exe next to Unpack.exe)")}</dd>
+        <dt>Config</dt><dd>${esc(meta.config_dir)}</dd>`;
       state.settings = await invoke("load_settings");
       applySettings(state.settings);
       const presenceOn = state.settings?.discordPresence !== false;
@@ -491,7 +496,7 @@ async function init() {
         el.innerHTML = "";
         rows.forEach((r) => {
           const li = document.createElement("li");
-          li.innerHTML = `<span>${r.name}</span><span>${r.title_id}</span>`;
+          li.innerHTML = `<span>${esc(r.name)}</span><span>${esc(r.title_id)}</span>`;
           el.appendChild(li);
         });
       } catch (e) { showError(e); }
@@ -565,7 +570,7 @@ async function init() {
     for (const path of state.packageFiles) {
       const item = await invoke("place_content", { path, libraryRoot: $("content-root").value });
       const li = document.createElement("li");
-      li.innerHTML = `<span>${item.name || path}</span><span>${item.detail}</span>`;
+      li.innerHTML = `<span>${esc(item.name || path)}</span><span>${esc(item.detail)}</span>`;
       el.appendChild(li);
     }
   });
