@@ -183,20 +183,32 @@ pub fn is_fat(t: &str) -> bool {
 
 const FAT32_HINT: &str = "The destination is a FAT32 drive, which cannot hold a file over 4 GB. Pick an NTFS or exFAT folder, or convert to Games on Demand (GOD) instead.";
 
-/// Add the FAT32 explanation to a failed write. Error codes the page matches on
-/// (`CANCELLED`, `PASSWORD_REQUIRED`, ...) are left exactly as they are.
-pub fn fat32_hint_text(err: String, dest_is_fat: bool) -> String {
+/// Does this error say a file was too large for the file system (EFBIG / ERROR_FILE_TOO_LARGE)?
+pub fn looks_file_too_large(err: &str) -> bool {
+    let l = err.to_ascii_lowercase();
+    l.contains("file too large") || l.contains("efbig") || l.contains("os error 27)") || l.contains("os error 223)")
+        || l.contains("file size exceeds") || l.contains("too large for the destination")
+}
+
+/// Add the FAT32 explanation to a failed write, but only when the FAT32 4 GB limit is the likely
+/// cause (R15 L4): the error says "file too large", or the job had a file of 4 GiB or more.
+/// Error codes the page matches on (`CANCELLED`, `PASSWORD_REQUIRED`, ...) are left exactly as they are.
+pub fn fat32_hint_text(err: String, dest_is_fat: bool, has_big_file: bool) -> String {
     let is_code = !err.is_empty() && err.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c == ':' || c.is_ascii_digit());
-    if dest_is_fat && !is_code && !err.starts_with("SLOT_OCCUPIED") && !err.contains("FAT32") {
+    let cause = looks_file_too_large(&err) || has_big_file;
+    if dest_is_fat && cause && !is_code && !err.starts_with("SLOT_OCCUPIED") && !err.contains("FAT32") {
         format!("{err} {FAT32_HINT}")
     } else {
         err
     }
 }
 
-/// `fat32_hint_text` for a destination folder on disk.
-pub fn with_fat32_hint(err: String, dest: &Path) -> String {
-    fat32_hint_text(err, fs_type(dest).map(|t| is_fat(&t)).unwrap_or(false))
+/// `fat32_hint_text` for a destination folder on disk. `big_file` is only asked on a FAT drive
+/// when the error itself doesn't say "too large" (e.g. it lists the archive).
+pub fn with_fat32_hint(err: String, dest: &Path, big_file: impl FnOnce() -> bool) -> String {
+    let fat = fs_type(dest).map(|t| is_fat(&t)).unwrap_or(false);
+    let big = fat && !looks_file_too_large(&err) && big_file();
+    fat32_hint_text(err, fat, big)
 }
 
 /// Refuse up front if the target is FAT and any file is 4 GiB or larger.
@@ -333,13 +345,19 @@ mod tests {
     #[test]
     fn r5_fat_limit() {
         assert!(is_fat("FAT32") && is_fat("vfat") && is_fat("msdos") && !is_fat("exFAT") && !is_fat("NTFS"));
-        let hinted = fat32_hint_text("7-Zip failed on big.iso".into(), true);
+        let hinted = fat32_hint_text("7-Zip failed on big.iso".into(), true, true);
         assert!(hinted.starts_with("7-Zip failed on big.iso") && hinted.contains("FAT32") && hinted.contains("4 GB"), "{hinted}");
-        assert_eq!(fat32_hint_text("7-Zip failed".into(), false), "7-Zip failed");
+        assert_eq!(fat32_hint_text("7-Zip failed".into(), false, true), "7-Zip failed");
         for code in ["CANCELLED", "PASSWORD_REQUIRED", "WRONG_PASSWORD", "SLOT_OCCUPIED:2:x"] {
-            assert_eq!(fat32_hint_text(code.into(), true), code, "codes the page matches on are never decorated");
+            assert_eq!(fat32_hint_text(code.into(), true, true), code, "codes the page matches on are never decorated");
         }
-        assert_eq!(fat32_hint_text(hinted.clone(), true), hinted, "no double hint");
+        assert_eq!(fat32_hint_text(hinted.clone(), true, true), hinted, "no double hint");
+        // R15 L4: unrelated failures on a FAT drive get no hint
+        for e in ["The archive is damaged (CRC failed).", "There is not enough space on the disk.", "Cannot write to E:\\x: path not found"] {
+            assert_eq!(fat32_hint_text(e.into(), true, false), e);
+        }
+        assert!(fat32_hint_text("Write failed: File too large (os error 27)".into(), true, false).contains("FAT32"));
+        assert!(fat32_hint_text("Could not write: (os error 223)".into(), true, false).contains("FAT32"));
         let big = || vec![(PathBuf::from("a"), 10), (PathBuf::from("game.iso"), 5_000_000_000u64)].into_iter();
         assert!(fat_check_type(Some("FAT32"), big()).unwrap_err().contains("4 GB"));
         assert!(fat_check_type(Some("NTFS"), big()).is_ok());

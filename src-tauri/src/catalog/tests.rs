@@ -1399,3 +1399,97 @@ fn r14_low4_retry_classification_ignores_urls() {
     assert!(is_permanent("SHA-256 mismatch"));
     assert!(is_permanent("Address 10.0.0.1 is blocked (private network)."));
 }
+
+// ---------------- Round 15 regressions ----------------
+
+/// R15 M1: parallel installs to one LOCAL target must not lose launch.ini lines or damage journal.json.
+fn r15_parallel_local(n: usize, rounds: usize) {
+    let _e = env();
+    let h = Http::start();
+    let mut entries = Vec::new();
+    for i in 0..n {
+        let id = format!("par{i}");
+        let body = dummy_xex(&id);
+        let u = h.put(&format!("/p/{id}.xex"), body.clone());
+        entries.push(plugin_entry(&id, "1", &u, &body));
+    }
+    let l = load(&manifest(entries, 1));
+    *super::LOADED.lock().unwrap_or_else(|p| p.into_inner()) = Some(l);
+    for round in 0..rounds {
+        let d = tmp(&format!("par{n}-{round}"));
+        let usb = d.join("usb"); std::fs::create_dir_all(&usb).unwrap();
+        let base = INI.replace("plugin2 = Usb:\\Plugins\\other.xex\r\n", "");
+        std::fs::write(usb.join("launch.ini"), &base).unwrap();
+        let c = ctx(&d.join("store"));
+        let usb_s = usb.display().to_string();
+        let grant = |x: &str| if x == usb_s { Ok(usb.clone()) } else { Err(format!("{x} wasn't picked")) };
+        let target = serde_json::json!({"kind": "local", "path": usb_s});
+        let results: Vec<Result<serde_json::Value, String>> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..n).map(|i| {
+                let (c, grant, target) = (&c, &grant, target.clone());
+                sc.spawn(move || super::call(c, "install", serde_json::json!({"id": format!("par{i}"), "target": target}), grant, &mut |_, _| {}, &|| false))
+            }).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for r in &results { assert!(r.is_ok(), "round {round}: {r:?}"); }
+        let ini = std::fs::read_to_string(usb.join("launch.ini")).unwrap();
+        for i in 0..n { assert!(ini.contains(&format!("Usb:\\Plugins\\par{i}.xex")), "round {round}: line for par{i} lost:\n{ini}"); }
+        let j = c.store.journal().unwrap();
+        assert_eq!(j.installs.len(), n, "round {round}");
+        // And they all uninstall cleanly back to the original.
+        std::thread::scope(|sc| {
+            for i in 0..n { let (c, grant, target) = (&c, &grant, target.clone()); sc.spawn(move || super::call(c, "uninstall", serde_json::json!({"id": format!("par{i}"), "target": target}), grant, &mut |_, _| {}, &|| false).unwrap()); }
+        });
+        assert_eq!(std::fs::read_to_string(usb.join("launch.ini")).unwrap(), base, "round {round}");
+        assert!(c.store.journal().unwrap().installs.is_empty());
+    }
+    *super::LOADED.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+#[test]
+fn r15_m1_two_parallel_local_installs_x30() { r15_parallel_local(2, 30); }
+
+#[test]
+fn r15_m1_four_parallel_local_installs_x30() { r15_parallel_local(4, 30); }
+
+/// R15 L2: an install whose launch.ini write can't be confirmed still journals the line (marked
+/// unconfirmed), so Uninstall takes it out of the live launch.ini.
+#[test]
+fn r15_l2_unconfirmed_ini_line_is_journaled_and_uninstalled() {
+    let _e = env();
+    let mut sz = Fault::new("SIZE", "/Hdd1/launch.ini", true, 1);
+    sz.after = Some("RNFR /Hdd1/launch.ini.new.part".into());
+    let (r, f, c, t, l, _d, _h) = console_with_faults("afternew_dead", vec![sz, usr_dead_after("RNFR /Hdd1/launch.ini.new.part")]);
+    assert!(r.is_err());
+    assert!(String::from_utf8_lossy(&f.fs.lock().unwrap().files["/Hdd1/launch.ini"]).contains("afternew_dead.xex"));
+    let rec = c.store.journal().unwrap().find(&t.key(), &l.entries[0].id).cloned().unwrap();
+    assert!(rec.ini.len() == 1 && rec.ini[0].unconfirmed, "{rec:?}");
+    f.fs.lock().unwrap().faults.clear();
+    let u = uninstall(&c, Some(&l), &l.entries[0].id, &t, false).unwrap();
+    assert!(u.ini.as_deref().unwrap_or("").contains("removed"), "{u:?}");
+    assert_eq!(f.fs.lock().unwrap().files["/Hdd1/launch.ini"], INI.as_bytes());
+}
+
+/// R15 L2: an unconfirmed line that never reached launch.ini is skipped quietly.
+#[test]
+fn r15_l2_unconfirmed_line_not_in_file_is_skipped() {
+    let _e = env();
+    let h = Http::start();
+    let body = dummy_xex("unc");
+    let url = h.put("/dl/unc.xex", body.clone());
+    let l = load(&manifest(vec![plugin_entry("unc", "1.0", &url, &body)], 1));
+    let d = tmp("unc");
+    let usb = d.join("usb"); std::fs::create_dir_all(&usb).unwrap();
+    std::fs::write(usb.join("launch.ini"), INI).unwrap();
+    let c = ctx(&d.join("store"));
+    let t = local(&usb);
+    install(&c, &l, "unc", &t, &InstallOpts::default(), &mut |_, _| {}, &|| false).unwrap();
+    // Simulate "write never happened": put the original back and mark the journal line unconfirmed.
+    std::fs::write(usb.join("launch.ini"), INI).unwrap();
+    let mut j = c.store.journal().unwrap();
+    j.installs[0].ini[0].unconfirmed = true;
+    c.store.save_journal(&j).unwrap();
+    let u = uninstall(&c, Some(&l), "unc", &t, false).unwrap();
+    assert!(u.ini.as_deref().unwrap_or("").contains("never added"), "{u:?}");
+    assert_eq!(std::fs::read_to_string(usb.join("launch.ini")).unwrap(), INI);
+}

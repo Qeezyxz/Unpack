@@ -37,6 +37,8 @@ pub struct ExtractResult {
 struct Merge {
     /// May default.xex / default.xbe be replaced? Only by a lower-numbered disc (Disc 1 over a Disc 2 that arrived first).
     replace_exe: bool,
+    /// This disc's number, used to name a file that differs from the earlier disc's copy.
+    disc: u8,
 }
 
 /// A later disc never replaces the playable executable of an earlier one.
@@ -207,7 +209,7 @@ fn extract_inner(
     }
     let need: u64 = planned.iter().map(|p| p.size).sum();
     fs::create_dir_all(dest_dir).map_err(ioerr("Cannot create output folder"))?;
-    let _dest_lock = crate::destlock::acquire(dest_dir, || progress(0, crate::destlock::WAIT_MESSAGE));
+    let _dest_lock = crate::destlock::acquire(dest_dir, || progress(0, crate::destlock::WAIT_MESSAGE), &|| jobs.is_cancelled(job_id))?;
     crate::safecopy::fat_check(dest_dir, planned.iter().map(|p| (p.rel.clone(), p.size)))?;
     if let Some(free) = free_space(dest_dir) {
         if free < need + 64 * 1024 * 1024 {
@@ -276,6 +278,7 @@ fn extract_inner(
         return Err(ERR_CANCELLED.into());
     }
     let mut kept_files: Vec<PathBuf> = Vec::new();
+    let mut renamed: Vec<(PathBuf, PathBuf)> = Vec::new();
     match merge {
         None => {
             // Move children into dest_dir (already claimed empty).
@@ -287,12 +290,13 @@ fn extract_inner(
             verify_tree(dest_dir, &planned)?;
         }
         Some(m) => {
-            overlay(&tmp, dest_dir, Path::new(""), m, job_id, &mut kept_files)?;
+            overlay(&tmp, dest_dir, Path::new(""), m, job_id, &mut kept_files, &mut renamed)?;
             for p in &planned {
                 if kept_files.contains(&p.rel) {
                     continue;
                 }
-                let meta = fs::symlink_metadata(dest_dir.join(&p.rel)).map_err(|_| format!("Missing merged file: {}", p.rel.display()))?;
+                let at = renamed.iter().find(|(a, _)| *a == p.rel).map(|(_, b)| b.clone()).unwrap_or_else(|| p.rel.clone());
+                let meta = fs::symlink_metadata(dest_dir.join(&at)).map_err(|_| format!("Missing merged file: {}", p.rel.display()))?;
                 if crate::safecopy::is_link(&meta) || !meta.is_file() || meta.len() != p.size {
                     return Err(format!("Merged file {} does not match the ISO.", p.rel.display()));
                 }
@@ -307,7 +311,14 @@ fn extract_inner(
     let catalog = exe_info.as_ref().and_then(|e| game_list::find_title_by_id(e.title_id)).filter(|n| !n.trim().is_empty());
     let title_hex = exe_info.as_ref().map(|e| format!("{:08X}", e.title_id)).unwrap_or_default();
     let typed = title_override.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-    let warning = (exe_info.is_some() && catalog.is_none() && typed.is_none()).then(|| god::unknown_title_warning(&title_hex));
+    let mut warning = (exe_info.is_some() && catalog.is_none() && typed.is_none()).then(|| god::unknown_title_warning(&title_hex));
+    if !renamed.is_empty() {
+        // R15 M3: never replace a different file from another disc without saying so.
+        let list: Vec<String> = renamed.iter().take(5).map(|(a, b)| format!("{} → {}", a.display(), b.display())).collect();
+        let more = if renamed.len() > 5 { format!(" and {} more", renamed.len() - 5) } else { String::new() };
+        let w = format!("{} file(s) on this disc differ from the copy already in the folder. The earlier copy was kept and this disc's was saved next to it: {}{more}.", renamed.len(), list.join(", "));
+        warning = Some(match warning { Some(x) => format!("{x} {w}"), None => w });
+    }
     let name = typed.map(|t| clamp_title(&t)).or(catalog);
     Ok(ExtractResult {
         output: dest_dir.display().to_string(),
@@ -326,7 +337,7 @@ fn extract_inner(
 /// Lay the finished temp tree over `dest` (a folder Unpack made earlier in this run). Existing files
 /// are replaced by set-aside-and-rename, never written through; links in the way are refused.
 /// Playable executables that were left alone are listed in `kept`.
-fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &mut Vec<PathBuf>) -> Result<(), String> {
+fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &mut Vec<PathBuf>, renamed: &mut Vec<(PathBuf, PathBuf)>) -> Result<(), String> {
     for e in fs::read_dir(src).map_err(|e| format!("Cannot read temp: {e}"))? {
         let e = e.map_err(|e| format!("Cannot read temp: {e}"))?;
         let name = e.file_name();
@@ -345,7 +356,7 @@ fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &m
                 Some(_) => {}
                 None => fs::create_dir(&to).map_err(|e| format!("Cannot create {}: {e}", rel2.display()))?,
             }
-            overlay(&e.path(), &to, &rel2, m, job_id, kept)?;
+            overlay(&e.path(), &to, &rel2, m, job_id, kept, renamed)?;
             continue;
         }
         match &to_meta {
@@ -354,6 +365,23 @@ fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &m
                 continue;
             }
             Some(t) if t.is_dir() => return Err(format!("{} is a folder where the disc has a file.", rel2.display())),
+            Some(_) if !is_playable_exe(&rel2) => {
+                // Same bytes: nothing to do. Different: keep the earlier disc's file and save this one beside it.
+                if same_content(&e.path(), &to) {
+                    let _ = fs::remove_file(e.path());
+                    continue;
+                }
+                let name_s = name.to_string_lossy();
+                let (stem, ext) = match name_s.rfind('.') { Some(i) if i > 0 => (&name_s[..i], &name_s[i..]), _ => (&name_s[..], "") };
+                let mut n = 1;
+                let alt = loop {
+                    let cand = if n == 1 { format!("{stem} (Disc {}){ext}", m.disc) } else { format!("{stem} (Disc {})-{n}{ext}", m.disc) };
+                    if fs::symlink_metadata(dest.join(&cand)).is_err() { break cand; }
+                    n += 1;
+                };
+                move_entry(&e.path(), &dest.join(&alt)).map_err(|err| format!("Could not place {}: {err}", rel2.display()))?;
+                renamed.push((rel2.clone(), rel.join(&alt)));
+            }
             Some(_) => {
                 let old = to.with_file_name(format!(".unpack-old-{}-{}", crate::archive::safe_segment(job_id), name.to_string_lossy()));
                 let _ = fs::remove_file(&old);
@@ -369,6 +397,20 @@ fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &m
         }
     }
     Ok(())
+}
+
+/// Byte-for-byte equal regular files?
+fn same_content(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
+    let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b)) else { return false };
+    if ma.len() != mb.len() { return false; }
+    let (Ok(mut fa), Ok(mut fb)) = (fs::File::open(a), fs::File::open(b)) else { return false };
+    let (mut ba, mut bb) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
+    loop {
+        let na = match fa.read(&mut ba) { Ok(n) => n, Err(_) => return false };
+        if na == 0 { return true; }
+        if fb.read_exact(&mut bb[..na]).is_err() || ba[..na] != bb[..na] { return false; }
+    }
 }
 
 fn move_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -454,7 +496,7 @@ pub fn extract_named(
     }
     let merge = claim.joined.then(|| {
         let have = discs::exe_disc(parent, Kind::Xex, &keys);
-        Merge { replace_exe: have == 0 || disc < have }
+        Merge { replace_exe: have == 0 || disc < have, disc }
     });
     let r = extract_inner(iso_path, &claim.dir, title_override, jobs, job_id, progress, merge);
     match &r {
@@ -903,8 +945,46 @@ pub mod tests {
         let a = extract_named(&one, &out, None, &Jobs::default(), "s1", &mut |_, _| {}).unwrap();
         extract_named(&two, &out, None, &Jobs::default(), "s2", &mut |_, _| {}).unwrap();
         let game = Path::new(&a.output);
-        assert_eq!(fs::read(game.join("shared.bin")).unwrap(), b"FROM-TWO", "a later disc's other files overlay");
+        // R15 M3: a differing file is never silently replaced; the later disc's copy sits beside it.
+        assert_eq!(fs::read(game.join("shared.bin")).unwrap(), b"FROM-ONE");
+        assert_eq!(fs::read(game.join("shared (Disc 2).bin")).unwrap(), b"FROM-TWO");
         assert!(xex_names(game).iter().all(|n| !n.starts_with(".unpack-old")), "{:?}", xex_names(game));
+    }
+
+    #[test]
+    fn r15_m3_differing_pad_is_kept_and_warned_identical_is_quiet() {
+        let d = tmp("xex-pad");
+        let out = d.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let one = xex_disc(&d, "Pad (Disc 1).iso", 1, 1, &[("pad.bin", &[1u8; 4096]), ("same.bin", b"SAME")]);
+        let two = xex_disc(&d, "Pad (Disc 2).iso", 2, 2, &[("pad.bin", &[2u8; 8192]), ("same.bin", b"SAME")]);
+        let a = extract_named(&one, &out, None, &Jobs::default(), "p1", &mut |_, _| {}).unwrap();
+        let b = extract_named(&two, &out, None, &Jobs::default(), "p2", &mut |_, _| {}).unwrap();
+        assert!(b.merged && a.output == b.output);
+        let game = Path::new(&a.output);
+        assert_eq!(fs::metadata(game.join("pad.bin")).unwrap().len(), 4096, "disc 1's pad.bin kept");
+        assert_eq!(fs::metadata(game.join("pad (Disc 2).bin")).unwrap().len(), 8192);
+        assert!(!game.join("same (Disc 2).bin").exists(), "identical files are not duplicated");
+        let w = b.warning.expect("warning about the differing file");
+        assert!(w.contains("pad.bin") && w.contains("differ"), "{w}");
+    }
+
+    #[test]
+    fn r15_m3_halo3_and_quake4_with_one_name_are_not_merged() {
+        let d = tmp("xex-mix");
+        let out = d.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let halo = d.join("Mix (Disc 1).iso");
+        make_iso_files(&halo, 0x4D53_07E6, 11, (1, 2), &[("default.xex", b"HALO"), ("maps.bin", b"H")]);
+        let quake = d.join("Mix (Disc 2).iso");
+        make_iso_files(&quake, 0x4156_07D2, 12, (2, 2), &[("default.xex", b"QUAKE"), ("maps.bin", b"Q")]);
+        let a = extract_named(&halo, &out, None, &Jobs::default(), "m1", &mut |_, _| {}).unwrap();
+        let b = extract_named(&quake, &out, None, &Jobs::default(), "m2", &mut |_, _| {}).unwrap();
+        assert!(!b.merged, "different TitleIDs must not merge");
+        assert_ne!(a.output, b.output);
+        assert_eq!(fs::read(Path::new(&a.output).join("maps.bin")).unwrap(), b"H");
+        assert_eq!(fs::read(Path::new(&b.output).join("maps.bin")).unwrap(), b"Q");
+        assert!(!crate::discs::companions(&halo).unwrap().contains(&quake));
     }
 
     #[test]

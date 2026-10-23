@@ -649,12 +649,22 @@ fn entry_of<'a>(l: &'a Loaded, id: &str) -> Result<&'a Entry, String> {
     l.entries.iter().find(|e| e.id == id).ok_or_else(|| "That entry isn't in the loaded catalog. Refresh the catalog.".to_string())
 }
 
+static CATALOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) fn catalog_lock() -> std::sync::MutexGuard<'static, ()> { CATALOG_LOCK.lock().unwrap_or_else(|p| p.into_inner()) }
+
 /// `cmd`: config_get | config_set | refresh | current | states | preflight | install | uninstall | journal
 pub fn call(ctx: &install::Ctx, cmd: &str, a: serde_json::Value, check_grant: &dyn Fn(&str) -> Result<PathBuf, String>, progress: &mut dyn FnMut(u32, &str), cancelled: &dyn Fn() -> bool) -> Result<serde_json::Value, String> {
     use serde_json::{json, to_value};
     let s = |k: &str| a[k].as_str().unwrap_or("").to_string();
     let loaded = || current().ok_or_else(|| "Load the catalog first (Refresh).".to_string());
-    let console_lock = |t: &target::Target| -> Result<Option<std::sync::MutexGuard<'static, ()>>, String> { if t.is_console() { crate::ftp_lock().map(Some) } else { Ok(None) } };
+    // One catalog-wide lock for every target (R15 M1): install/uninstall/preflight do a
+    // read-modify-write of launch.ini and journal.json, so local targets need it too.
+    // Order: CATALOG_LOCK first, then the FTP lock for console targets.
+    let console_lock = |t: &target::Target| -> Result<(std::sync::MutexGuard<'static, ()>, Option<std::sync::MutexGuard<'static, ()>>), String> {
+        let g = catalog_lock();
+        let f = if t.is_console() { Some(crate::ftp_lock()?) } else { None };
+        Ok((g, f))
+    };
     match cmd {
         "config_get" => Ok(to_value(ctx.store.config()).unwrap()),
         "config_set" => {

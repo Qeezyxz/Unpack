@@ -64,7 +64,7 @@ export const settings = {
   get nested() { return localStorage.getItem(LS + "nested") !== "0"; },
   set nested(v) { localStorage.setItem(LS + "nested", v ? "1" : "0"); },
   // Discord Rich Presence (local IPC to the Discord app). On by default; off clears it.
-  get discordPresence() { return localStorage.getItem(LS + "discord") !== "0"; },
+  get discordPresence() { return localStorage.getItem(LS + "discord") === "1"; }, // off unless turned on
   set discordPresence(v) { localStorage.setItem(LS + "discord", v ? "1" : "0"); },
   get dlMaxGb() { const n = Number(localStorage.getItem(LS + "dlMaxGb")); return Number.isFinite(n) && n > 0 ? n : 20; },
   set dlMaxGb(v) { localStorage.setItem(LS + "dlMaxGb", String(Math.max(1, Math.min(500, Number(v) || 20)))); },

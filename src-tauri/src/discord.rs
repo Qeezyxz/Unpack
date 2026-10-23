@@ -26,9 +26,9 @@ impl PresenceHandle {
         let _ = std::thread::Builder::new()
             .name("unpack-discord".into())
             .spawn(move || worker(rx));
-        let handle = PresenceHandle { tx: worker_tx };
-        handle.update("Xbox 360 toolkit", "Idle");
-        handle
+        // Starts disabled (R15 L1): nothing touches the Discord pipe until the page has loaded the
+        // saved setting and sent `discord_set_enabled(true)`.
+        PresenceHandle { tx: worker_tx }
     }
 
     pub fn update(&self, details: &str, state: &str) {
@@ -89,7 +89,7 @@ fn worker(rx: Receiver<Cmd>) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let mut enabled = true;
+    let mut enabled = false;
     let mut client: Option<DiscordIpcClient> = None;
     let mut last = ActivityText {
         details: "Xbox 360 toolkit".into(),

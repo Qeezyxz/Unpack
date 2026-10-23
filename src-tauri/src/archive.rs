@@ -720,6 +720,21 @@ fn remove_junk(root: &Path) -> usize {
     removed
 }
 
+/// Bytes of regular files under `root` (links are not followed).
+fn tree_bytes(root: &Path) -> u64 {
+    let mut n = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(rd) = fs::read_dir(&d) {
+            for e in rd.flatten() {
+                let Ok(m) = fs::symlink_metadata(e.path()) else { continue };
+                if m.is_dir() { stack.push(e.path()) } else if m.is_file() { n = n.saturating_add(m.len()) }
+            }
+        }
+    }
+    n
+}
+
 fn count_files(root: &Path) -> usize {
     let mut n = 0;
     let mut stack = vec![root.to_path_buf()];
@@ -826,13 +841,13 @@ pub fn extract(
     // stalls unrelated extractions.
     let wait = || progress(100, crate::destlock::WAIT_MESSAGE);
     let _dest_lock = match (opts.layout, opts.collision) {
-        (Layout::Here, _) => Some(crate::destlock::acquire(parent, wait)),
+        (Layout::Here, _) => Some(crate::destlock::acquire(parent, wait, &|| jobs.is_cancelled(job_id))?),
         (Layout::Folder, Collision::Replace) => {
             let name = match &single_root_dir {
                 Some(top) if staging.join(top).is_dir() => safe_segment(top),
                 _ => stem.clone(),
             };
-            Some(crate::destlock::acquire(&parent.join(name), wait))
+            Some(crate::destlock::acquire(&parent.join(name), wait, &|| jobs.is_cancelled(job_id))?)
         }
         _ => None,
     };
@@ -908,6 +923,41 @@ struct Inner {
 const MAX_NESTED_DEPTH: u32 = 3;
 /// Across the whole extraction, so a pack of packs (or a bomb) cannot make Unpack open thousands.
 const MAX_NESTED_ARCHIVES: u32 = 40;
+/// Everything opened from inner archives may add up to this many times what the outer archive
+/// unpacked to (but at least NESTED_TOTAL_FLOOR), so a tiny bomb cannot fill the drive (R15 M2).
+const NESTED_TOTAL_FACTOR: u64 = 4;
+const NESTED_TOTAL_FLOOR: u64 = 512 << 20;
+/// An inner archive whose unpacked size is more than this many times its own size (and over
+/// NESTED_RATIO_MIN_BYTES) is treated as a bomb and left closed.
+const NESTED_MAX_RATIO: u64 = 100;
+const NESTED_RATIO_MIN_BYTES: u64 = 16 << 20;
+/// Space left free on the drive after opening an inner archive.
+const NESTED_FREE_MARGIN: u64 = 256 << 20;
+
+/// Why an inner archive must stay closed, judged from its listing before anything is written.
+fn nested_refusal(packed: u64, listing: &Listing, used: u64, budget: u64, free: Option<u64>) -> Result<u64, String> {
+    let files: Vec<&Entry> = listing.entries.iter().filter(|e| !e.dir).collect();
+    let unpacked = files.iter().fold(0u64, |a, e| a.saturating_add(e.size));
+    if unpacked == 0 && !files.is_empty() && packed > 4096 {
+        return Err("its unpacked size can't be read".into());
+    }
+    if unpacked > NESTED_RATIO_MIN_BYTES && unpacked / packed.max(1) > NESTED_MAX_RATIO {
+        return Err(format!("it would unpack to {} from {} (looks like a zip bomb)", human(unpacked), human(packed)));
+    }
+    if used.saturating_add(unpacked) > budget {
+        return Err(format!("inner archives would unpack to more than {} in total", human(budget)));
+    }
+    if let Some(f) = free {
+        if f < unpacked.saturating_add(NESTED_FREE_MARGIN) {
+            return Err(format!("there isn't enough free space ({} needed, {} free)", human(unpacked), human(f)));
+        }
+    }
+    Ok(unpacked)
+}
+
+fn human(b: u64) -> String {
+    if b >= 1 << 30 { format!("{:.1} GB", b as f64 / (1u64 << 30) as f64) } else if b >= 1 << 20 { format!("{:.1} MB", b as f64 / (1u64 << 20) as f64) } else { format!("{} KB", (b + 1023) / 1024) }
+}
 
 /// Archive files Unpack opens on its own inside an extracted tree (a narrower list than
 /// `is_archive_name`: no `.cab`/`.wim`/... that games ship as data).
@@ -937,7 +987,9 @@ fn find_nested(root: &Path) -> Vec<PathBuf> {
 
 /// Open the archives found in `root` (the staging folder) in place: each `x/inner.zip` becomes a
 /// sibling folder `x/inner`, then that folder is searched in turn (depth <= 3, <= 40 archives in
-/// all). The inner archive stays where it is. Inner extraction uses the same rules as the outer
+/// all). Each one is listed first and left closed if it would unpack to more than 100x its size,
+/// push the inner total past 4x the outer archive's unpacked size (512 MB minimum), or not fit in
+/// the free space; what was really written is checked again afterwards. The inner archive stays where it is. Inner extraction uses the same rules as the outer
 /// one (no links, sanitised, junk skipped) and runs inside the staging folder, so a cancel or a
 /// failure leaves nothing behind. An inner archive that needs a password or is damaged is left closed.
 fn open_inner(
@@ -950,6 +1002,8 @@ fn open_inner(
     warnings: &mut Vec<String>,
 ) -> Result<Inner, String> {
     let mut inner = Inner { opened: 0, left: 0 };
+    let budget = tree_bytes(root).saturating_mul(NESTED_TOTAL_FACTOR).max(NESTED_TOTAL_FLOOR);
+    let mut used = 0u64;
     let mut level = vec![root.to_path_buf()];
     for depth in 1..=MAX_NESTED_DEPTH + 1 {
         let mut next = Vec::new();
@@ -964,6 +1018,20 @@ fn open_inner(
                     return Err(ERR_CANCELLED.into());
                 }
                 let parent = archive.parent().unwrap_or(root);
+                let packed = fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
+                let listed = match list(exe, &archive, None) {
+                    Ok(l) => nested_refusal(packed, &l, used, budget, crate::god::free_space(parent)),
+                    Err(e) if e == ERR_PASSWORD_REQUIRED || e == ERR_WRONG_PASSWORD => Err("it needs a password".into()),
+                    Err(e) => Err(format!("it could not be read ({e})")),
+                };
+                let expected = match listed {
+                    Ok(n) => n,
+                    Err(why) => {
+                        inner.left += 1;
+                        warnings.push(format!("{rel} was left closed: {why}."));
+                        continue;
+                    }
+                };
                 let out = claim_dir(parent, &archive_stem(&archive)).map_err(|e| format!("Could not open {rel}: {e}"))?;
                 let mut out_arg = std::ffi::OsString::from("-o");
                 out_arg.push(out.as_os_str());
@@ -974,6 +1042,15 @@ fn open_inner(
                 progress(99, &format!("Opening inner archive {rel}"));
                 match run_with_progress(exe, &args, jobs, job_id, false, &mut |_, f| progress(99, &format!("{rel}: {f}"))) {
                     Ok(tolerated) => {
+                        // The listing can understate (e.g. a forged header): check what was really written.
+                        let actual = tree_bytes(&out);
+                        if actual > expected.saturating_mul(2).saturating_add(1 << 20) || used.saturating_add(actual) > budget {
+                            let _ = fs::remove_dir_all(&out);
+                            inner.left += 1;
+                            warnings.push(format!("{rel} was left closed: it unpacked to {}, more than its listing or the size limit allows.", human(actual)));
+                            continue;
+                        }
+                        used = used.saturating_add(actual);
                         warnings.extend(tolerated);
                         warnings.extend(sanitize_tree(&out));
                         remove_junk(&out);

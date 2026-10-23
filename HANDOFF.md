@@ -75,7 +75,7 @@ cancellable through the `Jobs` registry (`cancel_job`).
 |---|---|
 | `index.html` | Shell; loads fonts, `theme.js`, `app.js`. No remote URLs. |
 | `theme.js` | Light/dark/system theme before first paint. |
-| `native.js` | Tauri bridge, `settings` (incl. `maxJobs` 1-4 default 2, `nested` default on, `discordPresence` default on; all `localStorage` keys `unpack.*`, validated on read), pickers (Rust `pick_path`/`pick_save` so picks are granted), event helpers. |
+| `native.js` | Tauri bridge, `settings` (incl. `maxJobs` 1-4 default 2, `nested` default on, `discordPresence` default off (R15); all `localStorage` keys `unpack.*`, validated on read), pickers (Rust `pick_path`/`pick_save` so picks are granted), event helpers. |
 | `app.js` | The whole UI (one render function + bind functions): desk/queue/history, preview, create archive, ISO → GOD/XEX dialog, Auto ISO mode (Off/GOD/XEX), DLC rows, Library, Mod Menus (Your files / Download from link / Known names / Catalog: `catalogView`, `renderCatalog`, `bindCatalog`), Homebrew Tools, Settings. Send to Xbox (`xboxView`: per-item editable destination pre-filled by `ftp_dest`, Browse / Reset to default / Last-folder chip (`unpack.xboxLastDest` per type) / Send all to this folder; console form + saved consoles `unpack.consoles`, remote browser, send queue; Library/Mods buttons call `sendGameToXbox`/`sendModToXbox`). All dynamic text goes through `escapeHtml`. Browser-only fallbacks: fflate, 7z-wasm, unrar wasm (only when 7za is missing). |
 
 ## Security model

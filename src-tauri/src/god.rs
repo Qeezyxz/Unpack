@@ -251,7 +251,7 @@ pub fn convert(
 
     fs::create_dir_all(dest_dir).map_err(ioerr("Cannot create output folder"))?;
     // One writer per destination folder: a second job aimed at it waits (Disc 1 + Disc 2 into the same game folder, two converts into one picked folder).
-    let _dest_lock = crate::destlock::acquire(dest_dir, || progress(0, crate::destlock::WAIT_MESSAGE));
+    let _dest_lock = crate::destlock::acquire(dest_dir, || progress(0, crate::destlock::WAIT_MESSAGE), &|| jobs.is_cancelled(job_id))?;
     let need = estimated_output(iso_len, root_offset, part_count);
     if let Some(free) = free_space(dest_dir) {
         if free < need + 64 * 1024 * 1024 {

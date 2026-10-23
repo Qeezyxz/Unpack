@@ -119,7 +119,9 @@ pub fn companions(path: &Path) -> Result<Vec<PathBuf>, String> {
             (Some(a), Some(b)) => a.title_id == b.title_id && (looks_multi_disc(path, a.disc_number, a.disc_count) || looks_multi_disc(&sib, b.disc_number, b.disc_count)),
             _ => false,
         };
-        if same_stem || same_title {
+        // A name match only counts when the title IDs don't contradict it (R15 M3).
+        let titles_differ = matches!((&me, &info), (Some(a), Some(b)) if a.title_id != b.title_id);
+        if (same_stem && !titles_differ) || same_title {
             let n = disc_number_of(&sib, info.map(|i| i.disc_number).unwrap_or(0));
             found.push((n, sib));
         }
@@ -137,6 +139,9 @@ struct Set {
     discs: Vec<u8>,
     /// Disc whose default.xex/xbe is in the folder (0 = none yet). Lower disc numbers may replace it.
     exe_disc: u8,
+    /// Title ID of the discs in this folder, when one was readable. A disc with a different title
+    /// ID never joins, even if its file name matches (R15 M3).
+    title: Option<String>,
     born: Instant,
 }
 
@@ -168,6 +173,10 @@ pub fn keys_for(title_id: Option<&str>, path: &Path) -> Vec<String> {
     k
 }
 
+fn title_of(keys: &[String]) -> Option<String> {
+    keys.iter().find_map(|k| k.strip_prefix("id:")).map(|t| t.to_ascii_uppercase())
+}
+
 /// What `claim` decided.
 pub struct Claim {
     pub dir: PathBuf,
@@ -189,13 +198,18 @@ pub fn claim(
     let pk = parent_key(parent);
     let mut reg = lock();
     reg.retain(|_, s| s.born.elapsed() < TTL);
+    let title = title_of(keys);
     for k in keys {
         let id = (pk.clone(), kind, k.clone());
-        let usable = reg.get(&id).map(|s| s.dir.is_dir() && !s.discs.contains(&disc)).unwrap_or(false);
+        let usable = reg
+            .get(&id)
+            .map(|s| s.dir.is_dir() && !s.discs.contains(&disc) && !matches!((&s.title, &title), (Some(a), Some(b)) if a != b))
+            .unwrap_or(false);
         if usable {
             let dir = {
                 let s = reg.get_mut(&id).unwrap();
                 s.discs.push(disc);
+                if s.title.is_none() { s.title = title.clone(); }
                 s.dir.clone()
             };
             for other in keys {
@@ -213,7 +227,7 @@ pub fn claim(
     }
     let dir = make_dir()?;
     for k in keys {
-        reg.insert((pk.clone(), kind, k.clone()), Set { dir: dir.clone(), discs: vec![disc], exe_disc: 0, born: Instant::now() });
+        reg.insert((pk.clone(), kind, k.clone()), Set { dir: dir.clone(), discs: vec![disc], exe_disc: 0, title: title.clone(), born: Instant::now() });
     }
     Ok(Claim { dir, joined: false })
 }
@@ -322,6 +336,21 @@ mod tests {
         assert!(b.joined && a.dir == b.dir);
         set_exe_disc(&parent, Kind::Xex, &first, 1);
         assert_eq!(exe_disc(&parent, Kind::Xex, &second), 1);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn r15_m3_different_title_ids_never_join_by_name() {
+        let parent = fresh("mix");
+        let halo = keys_for(Some("4D5307E6"), Path::new("Mix (Disc 1).iso"));
+        let quake = keys_for(Some("415607D2"), Path::new("Mix (Disc 2).iso"));
+        let mk = |n: &str| { let d = parent.join(n); std::fs::create_dir_all(&d).map(|_| d).map_err(|e| e.to_string()) };
+        let a = claim(&parent, Kind::Xex, &halo, 1, || mk("Halo 3")).unwrap();
+        let b = claim(&parent, Kind::Xex, &quake, 2, || mk("Quake 4")).unwrap();
+        assert!(!b.joined && a.dir != b.dir);
+        // a disc with no readable title ID may still join by name
+        let none = keys_for(None, Path::new("Mix (Disc 3).iso"));
+        assert!(claim(&parent, Kind::Xex, &none, 3, || panic!("joins")).unwrap().joined);
         let _ = std::fs::remove_dir_all(&parent);
     }
 

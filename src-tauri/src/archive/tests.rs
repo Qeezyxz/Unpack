@@ -758,3 +758,52 @@ fn replacing_a_file_keeps_the_old_one_when_the_swap_fails() {
         assert_eq!(fs::read_to_string(&link).unwrap(), "fresh");
     }
 }
+
+// ---------------- Round 15 regressions ----------------
+
+/// R15 M2: a few-KB zip holding a 7z of 2 GiB of zeros must not be opened (Overseer wrote 2.15 GB).
+#[test]
+fn r15_m2_nested_zip_bomb_is_left_closed() {
+    use std::io::Write;
+    let d = tmp("bomb");
+    let inner = d.join("zeros.7z");
+    let mut c = std::process::Command::new(exe())
+        .args(["a", "-t7z", "-mx=1", "-mmt=1", "-md=1m", "-sizeros.bin"]).arg(&inner)
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .spawn().unwrap();
+    {
+        let mut si = c.stdin.take().unwrap();
+        let z = vec![0u8; 1 << 20];
+        for _ in 0..2048 { si.write_all(&z).unwrap(); }
+    }
+    assert!(c.wait().unwrap().success());
+    let inner_bytes = fs::read(&inner).unwrap();
+    fs::remove_file(&inner).unwrap();
+    let outer = d.join("bomb.zip");
+    write_zip(&outer, &[("zeros.7z", &inner_bytes, 0)]);
+    assert!(fs::metadata(&outer).unwrap().len() < 1 << 20, "bomb outer is small");
+    let dest = d.join("out");
+    fs::create_dir_all(&dest).unwrap();
+    let opts = ExtractOptions { archive: &outer, dest_parent: &dest, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: true };
+    let r = extract(&exe(), &opts, &Jobs::default(), "bomb", &mut |_, _| {}).unwrap();
+    assert_eq!((r.nested, r.inner_left), (0, 1), "{r:?}");
+    assert!(r.warnings.iter().any(|w| w.contains("zeros.7z was left closed") && w.contains("zip bomb")), "{:?}", r.warnings);
+    assert!(super::tree_bytes(&dest) < 2 << 20, "nothing big written");
+    assert!(no_staging_left(&dest));
+}
+
+#[test]
+fn r15_m2_nested_limits_budget_free_space_unknown() {
+    let e = |size: u64| Entry { path: "f".into(), size, dir: false, encrypted: false };
+    let l = |v: Vec<Entry>| Listing { entries: v, format: "zip".into(), encrypted: false };
+    // fine: 10 MB from 5 MB
+    assert_eq!(super::nested_refusal(5 << 20, &l(vec![e(10 << 20)]), 0, 1 << 30, Some(1 << 40)), Ok(10 << 20));
+    // ratio
+    assert!(super::nested_refusal(100 << 10, &l(vec![e(100 << 20)]), 0, 1 << 40, None).unwrap_err().contains("zip bomb"));
+    // total budget across inners
+    assert!(super::nested_refusal(400 << 20, &l(vec![e(400 << 20)]), 200 << 20, 512 << 20, None).unwrap_err().contains("in total"));
+    // free space
+    assert!(super::nested_refusal(100 << 20, &l(vec![e(100 << 20)]), 0, 1 << 40, Some(200 << 20)).unwrap_err().contains("free space"));
+    // unknown size
+    assert!(super::nested_refusal(1 << 20, &l(vec![e(0)]), 0, 1 << 40, None).unwrap_err().contains("can't be read"));
+}

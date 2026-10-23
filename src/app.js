@@ -2667,7 +2667,7 @@ function renderSettings() {
         <input type="number" min="1" max="500" step="1" data-set-dlmax value="${N.settings.dlMaxGb}" style="width:5rem" aria-label="Max download size in GB" /></div>
     </div>
     <div class="set-group"><h4>Extraction</h4>
-      <div class="set-row"><div class="txt"><strong>Open zips inside zips</strong><small>An archive found inside an extracted archive is opened too (a few levels deep, with size limits). Off leaves inner archives closed; the summary says how many.</small></div>
+      <div class="set-row"><div class="txt"><strong>Open zips inside zips</strong><small>An archive found inside an extracted archive is opened too (up to 3 levels deep). One that would unpack to a suspicious size or more than the drive can hold is left closed with a warning. Off leaves inner archives closed; the summary says how many.</small></div>
         <label class="switch"><input type="checkbox" data-set-nested aria-label="Open zips inside zips" ${N.settings.nested ? "checked" : ""}/><span></span></label></div>
       <div class="set-row"><div class="txt"><strong>Jobs at once</strong><small>How many extractions run side by side. 2 suits most PCs; use 1 if the PC or the USB drive struggles. Jobs aimed at the same folder always take turns.</small></div>
         <select data-set-maxjobs aria-label="Jobs at once">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${N.settings.maxJobs === n ? "selected" : ""}>${n}${n === 2 ? " (recommended)" : n === 1 ? " (one at a time)" : ""}</option>`).join("")}</select></div>
@@ -2677,7 +2677,7 @@ function renderSettings() {
         <label class="switch"><input type="checkbox" data-set-skipjunk aria-label="Skip junk files" ${skipJunk ? "checked" : ""}/><span></span></label></div>
     </div>
     ${N.IS_DESKTOP ? `<div class="set-group"><h4>Discord</h4>
-      <div class="set-row"><div class="txt"><strong>Show Unpack on Discord (Rich Presence)</strong><small>Shows which screen you are on and how many jobs are running, never file names or folders. Talks only to the Discord app on this PC; Unpack makes no network connection for it. Off clears it right away.</small></div>
+      <div class="set-row"><div class="txt"><strong>Show Unpack on Discord (Rich Presence)</strong><small>Shows which screen you are on and how many jobs are running, never file names or folders. Talks only to the Discord app on this PC; Unpack makes no network connection for it. Off by default; off clears it right away.</small></div>
         <label class="switch"><input type="checkbox" data-set-discord aria-label="Show Unpack on Discord" ${N.settings.discordPresence ? "checked" : ""}/><span></span></label></div>
     </div>` : ""}
     <div class="actions" style="justify-content:flex-end"><button class="btn btn-primary" data-settings-close type="button">Done</button></div>

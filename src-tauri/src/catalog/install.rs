@@ -27,6 +27,10 @@ pub struct IniChange {
     pub previous: Option<String>,
     /// Backup written on the target before the edit.
     pub backup: String,
+    /// Journaled before the launch.ini write and cleared once it is read back (R15 L2). Still true
+    /// means the write's outcome is unknown: uninstall/update look for the line in the live file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfirmed: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -693,9 +697,16 @@ pub fn install(ctx: &Ctx, l: &Loaded, id: &str, t: &Target, opts: &InstallOpts, 
                     report.ini = Some(format!("{key} already points at the plugin"));
                 } else {
                     after.set(ini::PLUGIN_SECTION, &key, &value);
+                    // Journal the intended line first, so an install whose write can't be confirmed
+                    // (connection lost after the swap) still lets Uninstall take the line out.
+                    let previous = prev.filter(|p| !old.iter().any(|o| o.value.eq_ignore_ascii_case(p)));
+                    rec.ini.push(IniChange { key: key.clone(), value: value.clone(), previous, backup: String::new(), unconfirmed: true });
+                    let mut j = ctx.store.journal()?;
+                    j.put(rec.clone());
+                    ctx.store.save_journal(&j)?;
                     let backup = write_ini(ctx, t, &b, &before, &after, &key, Some(&value))?;
                     rec.backups.push(backup.clone());
-                    rec.ini.push(IniChange { key: key.clone(), value: value.clone(), previous: prev.filter(|p| !old.iter().any(|o| o.value.eq_ignore_ascii_case(p))), backup });
+                    if let Some(c) = rec.ini.last_mut() { c.backup = backup; c.unconfirmed = false; }
                     report.ini = Some(format!("{key} = {value}"));
                 }
             }
@@ -767,6 +778,8 @@ pub fn uninstall(ctx: &Ctx, l: Option<&Loaded>, id: &str, t: &Target, for_update
                 if after.get(ini::PLUGIN_SECTION, &c.key).as_deref().map_or(false, |v| v.eq_ignore_ascii_case(&c.value)) {
                     match &c.previous { Some(p) => after.set(ini::PLUGIN_SECTION, &c.key, p), None => after.remove(ini::PLUGIN_SECTION, &c.key) }
                     changed.push(c);
+                } else if c.unconfirmed {
+                    r.ini = Some(format!("{} was never added; nothing to remove", c.key));
                 } else {
                     r.ini = Some(format!("{} was changed since; left as is", c.key));
                 }

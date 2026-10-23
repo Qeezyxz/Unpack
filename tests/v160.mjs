@@ -59,10 +59,20 @@ await wait(900);
 // ---- Discord ----
 {
   const calls = (await discordCalls()).slice(calls0);
-  check("discord: presence is switched on at startup (default on)", calls.some((c) => c.call === "enabled" && c.enabled === true), JSON.stringify(calls));
+  check("discord: off by default, nothing is sent at startup (R15 L1)", !calls.some((c) => c.call === "activity" || (c.call === "enabled" && c.enabled === true)), JSON.stringify(calls));
   await click("[data-action=settings]");
   await wait(400);
-  check("discord: toggle is in Settings and on by default", await p.evaluate(() => document.querySelector("[data-set-discord]")?.checked === true));
+  check("discord: toggle is in Settings and off by default", await p.evaluate(() => document.querySelector("[data-set-discord]")?.checked === false));
+  check("discord: no activity while off", !(await discordCalls()).slice(calls0).some((c) => c.call === "activity"));
+  await click("[data-set-discord]");
+  await wait(300);
+  const on1 = (await discordCalls()).slice(calls0);
+  check("discord: turning it on enables and publishes", on1.some((c) => c.call === "enabled" && c.enabled === true) && on1.at(-1)?.call === "activity", JSON.stringify(on1));
+  check("discord: on is remembered", (await ls("unpack.discord")) === "1");
+  await click("[data-settings-close]");
+  await wait(300);
+  await click("[data-action=settings]");
+  await wait(300);
   const after = (await discordCalls()).slice(calls0);
   const settingsCall = after.filter((c) => c.call === "activity").pop();
   check("discord: Settings view is reported with an idle state", settingsCall?.details === "Settings" && settingsCall?.state === "Idle", JSON.stringify(settingsCall));

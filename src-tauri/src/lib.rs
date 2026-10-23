@@ -13,6 +13,7 @@ pub mod catalog;
 pub mod discord;
 pub mod destlock;
 pub mod discs;
+pub mod migrate;
 #[cfg(test)]
 pub mod testutil;
 
@@ -162,6 +163,7 @@ async fn extract_archive(
     };
     let exe = seven_zip()?;
     let fat_dest = dest_path.clone();
+    let (fat_exe, fat_arch, fat_pw) = (exe.clone(), PathBuf::from(&path), password.clone());
     let registry = jobs.inner().clone();
     registry.register(&id);
     let jobs = registry.clone();
@@ -191,7 +193,9 @@ async fn extract_archive(
     .map_err(|e| e.to_string());
     // Unregister on every exit path (success, error, panic in the worker).
     registry.finish(&id);
-    let r = res?.map_err(|e| safecopy::with_fat32_hint(e, &fat_dest))?;
+    let r = res?.map_err(|e| safecopy::with_fat32_hint(e, &fat_dest, || {
+        archive::list(&fat_exe, &fat_arch, opt_pw(&fat_pw)).map(|l| l.entries.iter().any(|e| !e.dir && e.size > safecopy::FAT_MAX)).unwrap_or(false)
+    }))?;
     // Overseer R5 addendum: only session-grant folders we actually created this run.
     // Skip / Replace-merge / Extract-here never create a new claim_dir folder.
     if r.created && !r.skipped {
@@ -257,7 +261,7 @@ async fn create_archive(
             let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
         };
         let out_file = PathBuf::from(out_file);
-        let _dest_lock = out_file.parent().map(|p| destlock::acquire(p, || cb(0, destlock::WAIT_MESSAGE)));
+        let _dest_lock = match out_file.parent() { Some(p) => Some(destlock::acquire(p, || cb(0, destlock::WAIT_MESSAGE), &|| j.is_cancelled(&jid))?), None => None };
         archive::create(&exe, &srcs, &out_file, &format, opt_pw(&password), level, &j, &jid, &mut cb)
     })
     .await
@@ -314,7 +318,7 @@ async fn copy_to_usb(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, sa
         let mut cb = |percent: u32, file: &str| {
             let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
         };
-        let _dest_lock = destlock::acquire(&target, || cb(0, destlock::WAIT_MESSAGE));
+        let _dest_lock = destlock::acquire(&target, || cb(0, destlock::WAIT_MESSAGE), &|| j.is_cancelled(&jid))?;
         library::copy_to_usb(&game, &target, &mut cb, &|| j.is_cancelled(&jid))
     })
     .await
@@ -481,7 +485,7 @@ async fn mod_copy(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safec
         let mut cb = |percent: u32, file: &str| {
             let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
         };
-        let _dest_lock = destlock::acquire(&target, || cb(0, destlock::WAIT_MESSAGE));
+        let _dest_lock = destlock::acquire(&target, || cb(0, destlock::WAIT_MESSAGE), &|| j.is_cancelled(&jid))?;
         mods::copy_mod(&path, &target, &mode, &mut cb, &|| j.is_cancelled(&jid))
     })
     .await
@@ -691,6 +695,8 @@ fn cancel_job(jobs: State<'_, Jobs>, id: String) -> bool {
 }
 
 pub fn run() {
+    // Before Tauri or the WebView touch their folders: carry data over from the old identifier.
+    for d in migrate::run_startup() { eprintln!("migrated app data into {}", d.display()); }
     let cwd = std::env::current_dir().unwrap_or_default();
     let first: Vec<String> = std::env::args().skip(1).collect();
     let pending = PendingLaunch::default();

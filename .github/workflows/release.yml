@@ -18,15 +18,15 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri -> target
 
@@ -36,7 +36,7 @@ jobs:
           Copy-Item src-tauri/binaries/7za-x86_64-pc-windows-gnu.exe src-tauri/binaries/7za-x86_64-pc-windows-msvc.exe -Force
 
       - name: Install npm dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build NSIS installer
         run: npx tauri build --bundles nsis
@@ -79,14 +79,14 @@ jobs:
           Get-Item "Unpack-portable.zip" | Format-List Name, Length
 
       - name: Upload installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: unpack-nsis
           if-no-files-found: error
           path: src-tauri/target/release/bundle/nsis/*.exe
 
       - name: Upload portable zip and tools
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: unpack-portable
           if-no-files-found: error

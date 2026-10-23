@@ -903,3 +903,118 @@ These were not exercised, so I make no PASS claim for them:
 - the Round 13 repro for the m2,m1,m3 order
 
 **Checked by reading only:** the handoff code (`ini_user`), `free_old_name` (never refuses; time-based names don't sort by recency), the pruning rule (only .old files identical to a backup or to the current launch.ini), and that a local repair has no lock.
+
+## Round 15 — v1.6.0 merge — 2026-10-23 (CDT)
+
+Reviewed: branch v1.6.0-merge @ 6121427 (local 527083b plus the ported v1.5.0 additions). Source was not modified. GitHub was not touched.
+
+**Suite results (all run this round):**
+- `cargo test --release --lib`: 20 runs, in 4 batches of 5 in parallel. All 20 passed 222/222 (1 ignored).
+- Wine (x86_64-pc-windows-gnu, fresh prefix): 215/215 (1 ignored).
+- Node suites, all pass: e2e 42, autogod 15, dlc 16, download 27, mods 39, builtin 9, catalog 36, xbox 52, v160 37.
+- `npm test` (theme) 7/7. `tests/gamelists.py` passes.
+
+**Verdict: FAIL**
+
+### R14 findings re-checked (all run)
+| R14 finding | Result |
+|---|---|
+| MEDIUM-1: case-insensitive repair | FIXED. `LAUNCH.INI` plus `launch.ini.old`: no blocker and nothing touched. `Launch.ini.OLD-3` alone is restored. |
+| LOW-1: .old validated before restore | FIXED. An empty, random 3 KB or 20 MB .old is refused with a clear blocker. With `.old-5` empty and `.old-2` valid, `.old-2` is chosen. |
+| LOW-2: false "failed" after a live swap | Message FIXED: it now says "couldn't confirm… checks next time". Follow-up bug: see LOW-2 below. |
+| LOW-3: wrong ".old safe" message | FIXED: "most likely not moved; if it was…". |
+| LOW-4: flaky test | Identified as `cancel_stops_downloads`: the digits of a random port (40407) made `is_permanent` treat a 503 as a 404. Fixed at catalog/install.rs:276, with regression test `r14_low4_retry_classification_ignores_urls`. All 20 parallel runs here passed. |
+
+### R14 skipped items (now run)
+- **Ownership handoff:** 3 and 4 mods sharing one file, every uninstall order (including m2, m1, m3), with no slot hint and with different slots (2–5). 60 cases, 0 failures. While any user is left, the file and exactly one launch.ini line stay. After the last uninstall, launch.ini is byte-identical to the original.
+- **Pruning when deletes are refused (550):** 3 preflights. launch.ini is untouched, the .old files stay, and there is no error and no loop. PASS.
+- **Repair racing a write:** see MEDIUM-1. Repair itself is serialized by `ini_lock`, but parallel installs lose launch.ini lines with or without a repair running.
+
+### Bugs (ranked)
+
+**MEDIUM-1: two catalog installs to a local drive at once lose a launch.ini line (and can corrupt journal.json)**
+- **Where:** catalog.rs:657. Only console targets take a lock; local targets do read-modify-write of launch.ini and journal.json with no lock.
+- **Impact:** if you click Install on two mods for a USB drive quickly (the UI allows it, app.js:1689), both report "Installed… launch.ini: plugin2 = …". Only one line ends up in launch.ini, so one mod is silently never loaded. With 4 at once, I also saw "Cannot save journal.json" and "journal is damaged".
+- **Repro:** 2 parallel `install` calls to the same `{kind:"local"}` target. 28 of 30 runs lost a line. 4 in parallel: 30 of 30 bad, some with journal errors.
+- **Fix:** take one catalog-wide mutex (or a per-target-key lock) around install, uninstall and preflight for local targets too.
+
+**MEDIUM-2: nested archives have no size, ratio or free-space cap**
+- **Where:** archive.rs:908-990 (`open_inner`, called at :819).
+- **Impact:** a 4.8 KB zip holding a 7z of zeros wrote 2,147,797,003 bytes in 9 s with "Open zips inside zips" on (the default). With nesting off, it wrote 313 KB. The 40-archive limit only counts archives, so 40 such inners could fill about 80 GB. PORT-NOTES says "same size/ratio limits as the outer extract", but no such limits exist (the outer has none either). Nothing escaped the folder: see the zip-slip check below.
+- **Fix:** before opening an inner archive, `7z l` it and add up unpacked sizes. Refuse when the total across all inners exceeds a cap (for example 4× the outer's unpacked size, or free space minus a margin), or the ratio is extreme; leave such archives closed with a warning.
+
+**MEDIUM-3: a multi-disc merge silently overwrites files that differ, and merges different games that share a file name**
+- **Where:** iso_extract.rs:357 (overlay replaces any existing non-executable file), discs.rs:159 (`keys_for` matches on title ID OR file name stem).
+- **Impact:**
+  - Disc 1's `pad.bin` (4096 bytes) was replaced by Disc 2's (8192 bytes) with no warning.
+  - `Mix (Disc 1).iso` (Halo 3, 4D5307E6) and `Mix (Disc 2).iso` (Quake 4, 415607D2, a different media ID) were merged into one folder, "Halo 3-2", and Quake 4 overwrote Halo 3's files. Result: "merged: true", no warning.
+- **Repro:** `tests/make_iso.py` with pads 4096/8192, then `iso_to_xex` for both discs into one granted folder.
+- **Fix:** join only when the title ID matches (and the media set matches, when both are readable). Use the name stem only when no title ID is readable. In overlay, when a file differs, keep both (rename the later one) or refuse with a message; never replace without saying so.
+
+**LOW-1: Discord presence is on by default and pings Discord at every launch, even when it is turned off**
+- **Where:** lib.rs:730 → discord.rs `PresenceHandle::start` sends an "Xbox 360 toolkit / Idle" update. The worker starts with `enabled = true`, so it connects and publishes before the page's `discord_set_enabled(false)` arrives (app.js:3766). It also retries every 20 s while enabled.
+- **Data sent:** app ID 1562281261504929922, a view label, a count-only job label, the start time, the "unpack" image and a GitHub button. No file names or paths: the page sends only fixed strings (app.js:127-150) and Rust maps the view to fixed text.
+- **Status:** confirmed by reading only. I could not run the desktop app with a Discord pipe.
+- **Fix:** pass the stored setting to Rust at startup (or start disabled and let the page enable it), and consider defaulting to off.
+
+**LOW-2: an install that can't be confirmed is journaled without its launch.ini line, so uninstall leaves a dangling line**
+- **Repro:** the swap rename succeeds, then the connection drops and reconnects fail (afternew_dead). The install reports failure, but launch.ini (with `plugin2 = …afternew_dead.xex`) is live and the mod is in the journal. A later uninstall says `ini: None`, removes the file, and leaves the plugin line pointing at a deleted file.
+- **Fix:** journal the intended ini line, marked "unconfirmed". At the next repair or uninstall, look for it in the live launch.ini.
+
+**LOW-3: destlock**
+- **Where:** destlock.rs:46-58.
+- **Problems:**
+  - A job waiting for a folder can't be cancelled (the wait has no cancel check or timeout).
+  - Keys are exact paths, so "Extract here" into X and a convert into X/Game run at the same time.
+  - The key is canonicalized only if the folder exists. Folder+Replace locks a not-yet-existing `parent/name`, while god/iso lock the canonical path, so through a symlinked parent the two keys differ.
+- No deadlock found: each job takes one lock, and PLACE_LOCK is always taken after it.
+- **Status:** confirmed by reading only.
+- **Fix:** wait with a timeout and check cancel in the loop, compare by ancestor/descendant, and canonicalize the existing parent then append the name.
+
+**LOW-4: the FAT32 hint is added to every failure on a FAT drive**
+- **Where:** safecopy.rs:188 via lib.rs:194.
+- **Impact:** a damaged archive, a full disk or a bad path all get "cannot hold a file over 4 GB…".
+- **Status:** confirmed by reading only. This box can't mount vfat.
+- **Fix:** add the hint only when the error is EFBIG/"File too large" or a file in the archive is ≥ 4 GiB.
+
+**LOW-5: the identifier change drops all app data with no migration**
+- **Where:** tauri.conf.json:5 (`com.justin.unpack` → `com.qeezyxz.unpack`).
+- **What is lost:**
+  - App data (lib.rs:440/531/720): catalog journal.json (uninstall can no longer remove installed mods cleanly), seen.json (rollback protection resets), launch.ini backups (so .old validation falls back to "no backups" and accepts any parseable .old), FTP resume records, Downloads.
+  - WebView localStorage: saved consoles with FTP credentials, saved drives (xboxDrives), all settings.
+- cleanup.c removes both folders, but nothing copies the old data over.
+- **Status:** confirmed by reading only.
+- **Fix:** at first run, if the new folder is empty and the old one exists, copy `catalog/`, `ftp-resume/` and the WebView2 / WebKit storage. Or keep the old identifier.
+
+**LOW-6: CI hardening**
+- No action is SHA-pinned (`actions/checkout@v4`, `dtolnay/rust-toolchain@1.90.0`, `swatinem/rust-cache@v2`, `actions/setup-node@v4`, `actions/upload-artifact@v4`).
+- test.yml has no `permissions:` block (release.yml has `contents: read`).
+- release.yml:39 uses `npm install` (should be `npm ci`). test.yml:55/62 use unpinned `pip install pyftpdlib` and `npm install puppeteer-core@23`.
+- No secrets are used, and there is no `pull_request_target`.
+- **Status:** confirmed by reading only.
+
+**INFO**
+- The committed `rarfile-4.5-py3-none-any.whl` (commit 35205f5) is genuine: its sha256 c74341f4… matches PyPI. Nothing in the repo references it, so it isn't needed; remove it.
+- The Discord pipe can be claimed by any local process first (`\\.\pipe\discord-ipc-0`). It would only receive the fixed view text above.
+
+### Code Smith pre-check claims
+| Claim | Verdict | How |
+|---|---|---|
+| MEDIUM: nested archives have no size/ratio/free-space cap (archive.rs:908-943) | CONFIRMED (MEDIUM-2) | ran: 4.8 KB → 2 GB |
+| MEDIUM: multi-disc XEX overlay overwrites files that differ (iso_extract.rs:329/357/457) | CONFIRMED, worse (MEDIUM-3) | ran: overwrite, and cross-game merge by name |
+| LOW: destlock cancel, hierarchy, canonicalize (destlock.rs:46-51) | CONFIRMED (LOW-3) | read |
+| Attribute-error tolerance at archive.rs:359 | REFUTED as a bug: errors are tolerated only when a refused hard link is present and every other error is "Cannot set file attribute"; the data is written. Minor: the attribute lines may belong to other entries. | read |
+| FAT32 hint on every error | CONFIRMED (LOW-4) | read |
+| Discord on by default, pings Idle before the toggle applies | CONFIRMED (LOW-1); the data sent is coarse only | read |
+| CI: actions not SHA-pinned, no permissions in test.yml, npm install vs ci | CONFIRMED (LOW-6) | read |
+| Committed rarfile wheel | Genuine (hash matches PyPI), unused → remove | ran (hash) |
+| Identifier change loses app data | CONFIRMED (LOW-5) | read |
+
+### Other checks
+- **Zip-slip in inner archives (ran):** an inner zip with `../../…`, absolute and `..\` names, plus an inner tar with a symlink, a file written through that link and a hard link to /etc/passwd. Nothing escaped: names were contained under the output folder, and the tar was refused and left closed with a warning.
+- **Error banner XSS (read):** `showError` uses `textContent`. The new disc and warning HTML goes through `escapeHtml`. No sink found.
+- **Mismatched title IDs:** see MEDIUM-3.
+
+**Checked by reading only:** destlock races and deadlocks; Discord worker, data and pipe; CI files; identifier and migration; FAT32 hint; the attribute tolerance; nested depth (3) and archive count (40) limits; `open_inner` cleanup on failure.
+
+**Not run:** the desktop app with a Discord pipe, a real FAT32 mount, Windows-only CI/NSIS, and cleanup.exe.
