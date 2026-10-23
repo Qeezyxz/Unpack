@@ -1,6 +1,7 @@
 mod archive;
 mod commands;
 mod convert;
+mod destlock;
 mod discord;
 mod download;
 mod fileops;
