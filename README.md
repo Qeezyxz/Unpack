@@ -1,10 +1,8 @@
 # Unpack
 
-> **Work in Progress — Still being tested**
->
-> This program is under active development. Features may change, break, or be incomplete. Use at your own risk. Not ready for everyday use yet.
+Unpack **1.1.0** is a Windows (and Linux-dev) desktop tool for extracting archives (ZIP, RAR, 7Z, and more), converting Xbox 360 ISOs to Games on Demand or extracted XEX folders, managing a game library, installing DLC/title updates, handling mod menus, and sending files to a modded Xbox 360 over the local network.
 
-Unpack is a Windows desktop tool for extracting archives (ZIP, RAR, 7Z, and more), converting Xbox 360 ISOs to Games on Demand or extracted XEX folders, managing a game library, installing DLC/title updates, handling mod menus, and sending files to a modded Xbox 360 over the local network.
+Use at your own risk. Back up `launch.ini` and anything you convert or copy. See `DISCLAIMER.txt`.
 
 ## Build from source
 
@@ -20,14 +18,13 @@ ISO conversion uses a vendored copy of [iso2god-rs](https://github.com/iliazeus/
 
 ## Status
 
-- **WIP / Testing** — Newest features are still being reviewed and tested.
-- Source is being organized in this repo.
-- Installer and portable builds exist but are not yet released here.
-- Expect bugs. Back up your files.
+- **1.1.0** — first source-complete release in this repo. The unpublished 1.0.0 installer is a separate build.
+- Build from source with `npx tauri build` on Windows for an installer / portable zip.
+- Keep backups. This is a hobbyist offline tool.
 
 ## Known Bugs
 
-- **Send to Xbox:** Older builds could delete `launch.ini` if a transfer was interrupted. Current source skips `launch.ini` unless you opt in, and even then replaces it with a rename instead of delete-then-upload. Keep a backup anyway.
+- **Send to Xbox (fixed in 1.1.0):** Older builds could delete `launch.ini` if a transfer was interrupted. 1.1.0 skips `launch.ini` unless you opt in, and replacements use rename instead of delete-then-upload. Keep a backup anyway.
 
 ## VirusTotal
 
@@ -36,10 +33,12 @@ ISO conversion uses a vendored copy of [iso2god-rs](https://github.com/iliazeus/
 
 Currently flagged only by Trapmine (`Malicious.high.ml.score`). This is a common machine-learning false positive on unsigned NSIS/Tauri builds. All other engines report clean.
 
-## Install (when ready)
+## Install
+
+Build a Windows installer with `npx tauri build`. Until that artifact is attached to a GitHub Release:
 
 **Option A (recommended): the installer**
-1. Run `Unpack_1.0.0_x64-setup.exe`.
+1. Run `Unpack_1.1.0_x64-setup.exe` (or the older `Unpack_1.0.0_x64-setup.exe` if you still have it).
 2. Windows may show "Windows protected your PC" because the file isn't signed. Click **More info**, then **Run anyway**.
 3. The installer doesn't need admin rights. It installs only for your user account.
 

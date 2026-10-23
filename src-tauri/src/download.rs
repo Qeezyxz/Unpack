@@ -22,6 +22,9 @@ pub fn download_url(
     mut progress: impl FnMut(String, u64, u64),
 ) -> Result<DownloadReport, String> {
     let parsed = Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("only http and https URLs are allowed".into());
+    }
     deny_non_loopback_if_testing(&parsed)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -189,5 +192,12 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_non_http() {
+        let dest = std::env::temp_dir().join("unpack-dl-reject.bin");
+        assert!(download_url("ftp://127.0.0.1/x", &dest, None, |_, _, _| {}).is_err());
+        assert!(download_url("file:///etc/passwd", &dest, None, |_, _, _| {}).is_err());
     }
 }

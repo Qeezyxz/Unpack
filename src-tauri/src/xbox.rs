@@ -1,4 +1,5 @@
 use crate::ftp::{FtpClient, UploadOutcome};
+use crate::net;
 use crate::paths;
 use serde::Serialize;
 use std::fs;
@@ -97,6 +98,9 @@ pub fn send_paths(
     if host.trim().is_empty() {
         return Err("Xbox IP is required".into());
     }
+    if !net::is_lan_host(host) {
+        return Err("Send to Xbox only accepts a local-network IP (192.168/10/172.16) or a .local name".into());
+    }
     progress(format!("Connecting to {host}:{port}"), 0, 1);
     let mut ftp = FtpClient::connect(host, port, user, pass)?;
     ftp.mkdir_p(dest_root)?;
@@ -183,7 +187,17 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn relative_to_batch(roots: &[PathBuf], file: &Path) -> String {
     for root in roots {
         if let Ok(rel) = file.strip_prefix(root) {
-            return rel.to_string_lossy().into_owned();
+            let folder = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if rel.as_os_str().is_empty() {
+                return folder;
+            }
+            if folder.is_empty() {
+                return rel.to_string_lossy().into_owned();
+            }
+            return Path::new(&folder).join(rel).to_string_lossy().into_owned();
         }
         if let Some(parent) = root.parent() {
             if let Ok(rel) = file.strip_prefix(parent) {
@@ -204,6 +218,22 @@ mod tests {
     fn relative_paths_keep_folder_shape() {
         let root = PathBuf::from("/tmp/Games/Halo");
         let file = PathBuf::from("/tmp/Games/Halo/default.xex");
-        assert_eq!(relative_to_batch(&[root], &file), "default.xex");
+        assert_eq!(relative_to_batch(&[root], &file), "Halo/default.xex");
+    }
+
+    #[test]
+    fn refuses_public_hosts() {
+        let err = send_paths(
+            "8.8.8.8",
+            21,
+            "xbox",
+            "xbox",
+            "/Hdd1",
+            &[],
+            false,
+            |_, _, _| {},
+        )
+        .unwrap_err();
+        assert!(err.contains("local-network"));
     }
 }

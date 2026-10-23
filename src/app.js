@@ -25,6 +25,8 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
+let busy = false;
+
 function log(line) {
   const time = new Date().toLocaleTimeString();
   logEl.textContent += `[${time}] ${line}\n`;
@@ -55,10 +57,36 @@ function showView(name) {
 }
 
 async function pickMany(title, extensions) {
-  return invoke("pick_files", { title, extensions });
+  const files = (await invoke("pick_files", { title, extensions })) || [];
+  return files.filter(Boolean);
 }
 async function pickDir(title) {
   return invoke("pick_folder", { title });
+}
+
+async function remember() {
+  try {
+    await invoke("save_settings", { settings: collectSettings() });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+async function job(label, fn) {
+  if (busy) {
+    log("Wait for the current job to finish.");
+    return;
+  }
+  busy = true;
+  $("job-status").textContent = label;
+  try {
+    await fn();
+    await remember();
+  } catch (e) {
+    log(String(e));
+  } finally {
+    busy = false;
+  }
 }
 
 function bindDrop(el, onPaths) {
@@ -194,14 +222,12 @@ function bindExtract() {
     const d = await pickDir("Extract to");
     if (d) $("extract-dest").value = d;
   };
-  $("run-extract").onclick = async () => {
-    if (!state.extractFiles.length || !$("extract-dest").value) return log("Choose archives and a destination.");
-    try {
-      const result = await invoke("extract_archives", { archives: state.extractFiles, dest: $("extract-dest").value });
-      log(`Extracted ${result.length} archive(s).`);
-      await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` });
-    } catch (e) { log(String(e)); }
-  };
+  $("run-extract").onclick = () => job("Extracting…", async () => {
+    if (!state.extractFiles.length || !$("extract-dest").value) throw new Error("Choose archives and a destination.");
+    const result = await invoke("extract_archives", { archives: state.extractFiles, dest: $("extract-dest").value });
+    log(`Extracted ${result.length} archive(s).`);
+    await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` });
+  });
   $("pick-archive-inputs").onclick = async () => {
     state.packFiles = await pickMany("Files to pack");
     log(`Packing ${state.packFiles.length} item(s).`);
@@ -211,13 +237,11 @@ function bindExtract() {
     packOut = await invoke("pick_save", { title: "Save archive", defaultName: "archive.7z" });
     if (packOut) log(`Archive will be ${packOut}`);
   };
-  $("run-pack").onclick = async () => {
-    if (!state.packFiles.length || !packOut) return log("Choose files and an archive name.");
-    try {
-      const result = await invoke("create_archive", { inputs: state.packFiles, dest: packOut });
-      log(`Created ${result.archive}`);
-    } catch (e) { log(String(e)); }
-  };
+  $("run-pack").onclick = () => job("Creating archive…", async () => {
+    if (!state.packFiles.length || !packOut) throw new Error("Choose files and an archive name.");
+    const result = await invoke("create_archive", { inputs: state.packFiles, dest: packOut });
+    log(`Created ${result.archive}`);
+  });
 }
 
 function bindConvert() {
@@ -239,21 +263,19 @@ function bindConvert() {
       log(String(e));
     }
   };
-  $("run-convert").onclick = async () => {
+  $("run-convert").onclick = () => job("Converting ISO…", async () => {
     const mode = document.querySelector("input[name=iso-mode]:checked").value;
-    try {
-      const report = await invoke("convert_iso", {
-        path: $("iso-path").value,
-        dest: $("iso-dest").value,
-        mode,
-        trim: $("iso-trim").checked,
-        verify: $("iso-verify").checked,
-      });
-      $("iso-info").textContent = JSON.stringify(report, null, 2);
-      log(`Converted ${report.info.name} → ${report.output}`);
-      await invoke("notify", { title: "Unpack", body: `Converted ${report.info.name}` });
-    } catch (e) { log(String(e)); }
-  };
+    const report = await invoke("convert_iso", {
+      path: $("iso-path").value,
+      dest: $("iso-dest").value,
+      mode,
+      trim: $("iso-trim").checked,
+      verify: $("iso-verify").checked,
+    });
+    $("iso-info").textContent = JSON.stringify(report, null, 2);
+    log(`Converted ${report.info.name} → ${report.output}`);
+    await invoke("notify", { title: "Unpack", body: `Converted ${report.info.name}` });
+  });
 }
 
 function bindLibrary() {
@@ -277,19 +299,17 @@ function bindLibrary() {
     const d = await pickDir("Library folder");
     if (d) $("library-root").value = d;
   };
-  $("scan-library").onclick = async () => {
-    try {
-      const items = await invoke("scan_library", { root: $("library-root").value });
-      const el = $("library-results");
-      el.innerHTML = "";
-      items.forEach((item) => {
-        const li = document.createElement("li");
-        li.innerHTML = `<span>${item.name}</span><span class="muted">${item.kind} ${item.title_id || ""}</span>`;
-        el.appendChild(li);
-      });
-      log(`Found ${items.length} item(s).`);
-    } catch (e) { log(String(e)); }
-  };
+  $("scan-library").onclick = () => job("Scanning library…", async () => {
+    const items = await invoke("scan_library", { root: $("library-root").value });
+    const el = $("library-results");
+    el.innerHTML = "";
+    items.forEach((item) => {
+      const li = document.createElement("li");
+      li.innerHTML = `<span>${item.name}</span><span class="muted">${item.kind} ${item.title_id || ""}</span>`;
+      el.appendChild(li);
+    });
+    log(`Found ${items.length} item(s).`);
+  });
 }
 
 function bindUsb() {
@@ -309,18 +329,16 @@ function bindUsb() {
       if (info.is_fat32) log("Destination is FAT32 — files over 4 GiB will be rejected.");
     } catch (e) { log(String(e)); }
   };
-  $("run-usb").onclick = async () => {
-    try {
-      const report = await invoke("copy_to_usb", {
-        sources: state.usbFiles,
-        dest: $("usb-dest").value,
-        verify: $("usb-verify").checked,
-        overwriteProtected: false,
-      });
-      $("usb-info").textContent = JSON.stringify(report, null, 2);
-      log(`Copied ${report.copied} file(s), skipped ${report.skipped_protected} protected.`);
-    } catch (e) { log(String(e)); }
-  };
+  $("run-usb").onclick = () => job("Copying to USB…", async () => {
+    const report = await invoke("copy_to_usb", {
+      sources: state.usbFiles,
+      dest: $("usb-dest").value,
+      verify: $("usb-verify").checked,
+      overwriteProtected: false,
+    });
+    $("usb-info").textContent = JSON.stringify(report, null, 2);
+    log(`Copied ${report.copied} file(s), skipped ${report.skipped_protected} protected.`);
+  });
 }
 
 function bindContent() {
@@ -332,19 +350,18 @@ function bindContent() {
     const d = await pickDir("Content root");
     if (d) $("content-root").value = d;
   };
-  $("run-place").onclick = async () => {
+  $("run-place").onclick = () => job("Placing DLC / updates…", async () => {
+    if (!$("content-root").value) throw new Error("Choose a library or USB root.");
     const el = $("content-results");
     el.innerHTML = "";
     for (const path of state.packageFiles) {
-      try {
-        const item = await invoke("place_content", { path, libraryRoot: $("content-root").value });
-        const li = document.createElement("li");
-        li.innerHTML = `<span>${item.name || path}</span><span class="muted">${item.detail}</span>`;
-        el.appendChild(li);
-        log(item.detail);
-      } catch (e) { log(String(e)); }
+      const item = await invoke("place_content", { path, libraryRoot: $("content-root").value });
+      const li = document.createElement("li");
+      li.innerHTML = `<span>${item.name || path}</span><span class="muted">${item.detail}</span>`;
+      el.appendChild(li);
+      log(item.detail);
     }
-  };
+  });
 }
 
 function bindMods() {
@@ -362,17 +379,15 @@ function bindMods() {
       $("mods-list").innerHTML = names.map((n) => `<li><span>${n}</span></li>`).join("");
     } catch (e) { log(String(e)); }
   };
-  $("copy-mods").onclick = async () => {
-    try {
-      const report = await invoke("copy_to_usb", {
-        sources: [$("mods-root").value],
-        dest: $("mods-dest").value,
-        verify: true,
-        overwriteProtected: false,
-      });
-      log(`Copied mods (${report.copied} files).`);
-    } catch (e) { log(String(e)); }
-  };
+  $("copy-mods").onclick = () => job("Copying mods…", async () => {
+    const report = await invoke("copy_to_usb", {
+      sources: [$("mods-root").value],
+      dest: $("mods-dest").value,
+      verify: true,
+      overwriteProtected: false,
+    });
+    log(`Copied mods (${report.copied} files).`);
+  });
 }
 
 function bindDownloads() {
@@ -380,16 +395,14 @@ function bindDownloads() {
     const d = await pickDir("Download folder");
     if (d) $("dl-dest").value = d;
   };
-  $("run-download").onclick = async () => {
-    try {
-      const report = await invoke("download_url", {
-        url: $("dl-url").value,
-        destDir: $("dl-dest").value,
-        expectedHash: $("dl-hash").value || null,
-      });
-      log(`Downloaded ${report.bytes} bytes to ${report.path}${report.resumed ? " (resumed)" : ""}`);
-    } catch (e) { log(String(e)); }
-  };
+  $("run-download").onclick = () => job("Downloading…", async () => {
+    const report = await invoke("download_url", {
+      url: $("dl-url").value,
+      destDir: $("dl-dest").value,
+      expectedHash: $("dl-hash").value || null,
+    });
+    log(`Downloaded ${report.bytes} bytes to ${report.path}${report.resumed ? " (resumed)" : ""}`);
+  });
 }
 
 function bindHomebrew() {
@@ -415,36 +428,32 @@ function bindXbox() {
     state.xboxFiles.push(...files);
     setList("xbox-files", state.xboxFiles);
   };
-  $("discover-xbox").onclick = async () => {
+  $("discover-xbox").onclick = () => job("Scanning LAN…", async () => {
     log("Scanning local subnet for FTP on port 21…");
-    try {
-      const hosts = await invoke("discover_xbox", { port: Number($("xbox-port").value || 21) });
-      const el = $("xbox-hosts");
-      el.innerHTML = "";
-      if (!hosts.length) log("No FTP listeners found. Enter the IP from Aurora.");
-      hosts.forEach((h) => {
-        const li = document.createElement("li");
-        li.innerHTML = `<span>${h.ip}:${h.port}</span><span class="muted">${h.banner || "FTP"}</span>`;
-        li.onclick = () => { $("xbox-host").value = h.ip; };
-        el.appendChild(li);
-      });
-    } catch (e) { log(String(e)); }
-  };
-  $("run-send").onclick = async () => {
-    try {
-      const report = await invoke("send_to_xbox", {
-        host: $("xbox-host").value,
-        port: Number($("xbox-port").value || 21),
-        user: $("xbox-user").value,
-        pass: $("xbox-pass").value,
-        dest: $("xbox-dest").value,
-        paths: state.xboxFiles,
-        includeLaunchIni: $("xbox-launchini").checked,
-      });
-      log(`Sent ${report.uploaded} file(s) to ${report.host}. Protected skips: ${report.skipped_protected}.`);
-      report.warnings.forEach(log);
-    } catch (e) { log(String(e)); }
-  };
+    const hosts = await invoke("discover_xbox", { port: Number($("xbox-port").value || 21) });
+    const el = $("xbox-hosts");
+    el.innerHTML = "";
+    if (!hosts.length) log("No FTP listeners found. Enter the IP from Aurora.");
+    hosts.forEach((h) => {
+      const li = document.createElement("li");
+      li.innerHTML = `<span>${h.ip}:${h.port}</span><span class="muted">${h.banner || "FTP"}</span>`;
+      li.onclick = () => { $("xbox-host").value = h.ip; };
+      el.appendChild(li);
+    });
+  });
+  $("run-send").onclick = () => job("Sending to Xbox…", async () => {
+    const report = await invoke("send_to_xbox", {
+      host: $("xbox-host").value,
+      port: Number($("xbox-port").value || 21),
+      user: $("xbox-user").value,
+      pass: $("xbox-pass").value,
+      dest: $("xbox-dest").value,
+      paths: state.xboxFiles,
+      includeLaunchIni: $("xbox-launchini").checked,
+    });
+    log(`Sent ${report.uploaded} file(s) to ${report.host}. Protected skips: ${report.skipped_protected}.`);
+    report.warnings.forEach(log);
+  });
 }
 
 function bindSettings() {
