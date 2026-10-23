@@ -10,6 +10,10 @@ pub struct ArchiveResult {
     pub status: String,
     #[serde(default)]
     pub nested: u32,
+    /// Zip/rar/7z files inside the result that were left closed because
+    /// "open zips inside zips" is off.
+    #[serde(default)]
+    pub inner_left: u32,
     #[serde(default)]
     pub isos: Vec<String>,
 }
@@ -110,6 +114,7 @@ pub fn extract_archives_with(
                 destination: dest.join(&stem).display().to_string(),
                 status: "skipped (folder already exists)".into(),
                 nested: 0,
+                inner_left: 0,
                 isos: Vec::new(),
             });
             continue;
@@ -117,8 +122,11 @@ pub fn extract_archives_with(
         match extract_one(&seven, archive, &out, opts, true) {
             Ok(status) => {
                 let mut nested = 0u32;
+                let mut inner_left = 0u32;
                 if opts.nested {
                     nested = extract_nested(&seven, &out, opts, 1, &mut progress)?;
+                } else {
+                    inner_left = find_archives(&out).len() as u32;
                 }
                 results.push(ArchiveResult {
                     archive: archive.display().to_string(),
@@ -129,6 +137,7 @@ pub fn extract_archives_with(
                         status
                     },
                     nested,
+                    inner_left,
                     isos: find_isos(&out),
                 });
             }
@@ -350,6 +359,7 @@ pub fn create_archive(inputs: &[PathBuf], dest: &Path) -> Result<ArchiveResult, 
         destination: dest.display().to_string(),
         status,
         nested: 0,
+        inner_left: 0,
         isos: Vec::new(),
     })
 }
@@ -479,8 +489,13 @@ mod tests {
 
         let dest2 = root.join("out2");
         opts.nested = false;
-        extract_archives_with(&[outer], &dest2, &opts, None).unwrap();
-        assert!(dest2.join("outer").join("inner.zip").is_file() || dest2.join("outer").join("inner").join("inner.zip").is_file() || dest2.join("outer").is_dir());
+        let closed = extract_archives_with(&[outer], &dest2, &opts, None).unwrap();
+        assert_eq!(closed[0].nested, 0);
+        assert_eq!(
+            closed[0].inner_left, 1,
+            "turning nested off must still report the inner zip it left closed"
+        );
+        assert!(!dest2.join("outer").join("inner").is_dir(), "inner zip must stay closed");
         let _ = std::fs::remove_dir_all(&root);
     }
 

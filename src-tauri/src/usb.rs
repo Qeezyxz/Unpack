@@ -42,6 +42,23 @@ pub fn exceeds_fat32(size: u64) -> bool {
     size > FAT32_MAX_FILE
 }
 
+const FAT32_HINT: &str =
+    "The destination is a FAT32 drive, which cannot hold a file over 4 GB. Pick an NTFS or exFAT folder, or convert to Games on Demand (GOD) instead.";
+
+pub fn fat32_hint_text(err: String, dest_is_fat32: bool) -> String {
+    if dest_is_fat32 {
+        format!("{err} {FAT32_HINT}")
+    } else {
+        err
+    }
+}
+
+/// Add the FAT32 explanation to a failed write when the folder is on FAT32.
+pub fn with_fat32_hint(err: String, dest: &Path) -> String {
+    let is_fat32 = filesystem_for(dest).map(|v| v.is_fat32).unwrap_or(false);
+    fat32_hint_text(err, is_fat32)
+}
+
 pub fn copy_tree(
     src: &Path,
     dest_dir: &Path,
@@ -251,6 +268,15 @@ pub fn list_fat32_warnings(paths: &[PathBuf], dest: &Path) -> Result<Vec<String>
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn fat32_failure_gets_a_plain_hint() {
+        let hinted = fat32_hint_text("7-Zip failed on big.iso".into(), true);
+        assert!(hinted.starts_with("7-Zip failed on big.iso"), "{hinted}");
+        assert!(hinted.contains("FAT32"), "{hinted}");
+        assert!(hinted.contains("4 GB"), "{hinted}");
+        assert_eq!(fat32_hint_text("7-Zip failed".into(), false), "7-Zip failed");
+    }
 
     #[test]
     fn fat32_limit() {
