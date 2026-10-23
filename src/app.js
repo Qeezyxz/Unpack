@@ -84,6 +84,22 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.remove("show"), 2600);
 }
 
+// Dismissable notice, shown once (Rust deletes the notice file when it is read).
+function showMigrationNotice(msg) {
+  const el = document.createElement("div");
+  el.id = "migration-notice";
+  el.setAttribute("role", "status");
+  el.style.cssText = "position:fixed;left:50%;bottom:24px;transform:translateX(-50%);max-width:640px;z-index:9999;padding:12px 16px;border-radius:8px;background:var(--panel,#222);color:var(--text,#eee);border:1px solid var(--accent,#5a8);box-shadow:0 4px 16px rgba(0,0,0,.4);display:flex;gap:12px;align-items:flex-start";
+  const t = document.createElement("div");
+  t.textContent = msg;
+  const b = document.createElement("button");
+  b.textContent = "OK";
+  b.setAttribute("data-migration-ok", "");
+  b.onclick = () => el.remove();
+  el.append(t, b);
+  document.body.appendChild(el);
+}
+
 // Red error banner: stays on top of every dialog until dismissed or the next job starts.
 function showError(message) {
   const el = document.getElementById("job-error");
@@ -3764,6 +3780,8 @@ async function initDesktop() {
   }
   await N.initNativeEvents();
   await N.invoke("discord_set_enabled", { enabled: N.settings.discordPresence }).catch(() => {});
+  // One-time notice when the update had to set the older settings profile aside (R19 L5).
+  for (const msg of await N.invoke("migration_notices").catch(() => [])) showMigrationNotice(msg);
   // Archives passed on the command line, by double-click, or from the Explorer menu.
   // A second launch while we're open forwards its request here (single-instance).
   let draining = Promise.resolve();

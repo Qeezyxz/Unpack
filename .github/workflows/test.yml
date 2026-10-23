@@ -75,7 +75,7 @@ jobs:
         working-directory: src-tauri
         run: |
           mkdir -p /tmp/unpack-dlc-e2e/usb
-          UNPACK_TEST_ALLOW_LOOPBACK=1 UNPACK_TEST_DRIVES=/tmp/unpack-dlc-e2e/usb \
+          UNPACK_TEST_NOTICE_DIR=/tmp/unpack-v160-notice UNPACK_TEST_ALLOW_LOOPBACK=1 UNPACK_TEST_DRIVES=/tmp/unpack-dlc-e2e/usb \
             nohup ./target/debug/examples/bridge ../src > /tmp/bridge.log 2>&1 &
           sleep 3
       - name: UI suites

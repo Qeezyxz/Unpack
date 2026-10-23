@@ -689,6 +689,12 @@ async fn xex_extracted(app: AppHandle, jobs: State<'_, Jobs>, id: String, token:
     res?
 }
 
+/// One-time notices left by the first-start migration (R19 L5); empty after the first call.
+#[tauri::command]
+fn migration_notices() -> Vec<String> {
+    migrate::take_notices()
+}
+
 #[tauri::command]
 fn cancel_job(jobs: State<'_, Jobs>, id: String) -> bool {
     jobs.cancel(&id)
@@ -755,7 +761,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![native_info, file_info, list_archive, read_entry, extract_archive, extract_entry, read_file, cancel_job, take_launch_requests, create_archive, iso_info, iso_companions, iso_to_god, iso_to_xex, god_extracted, xex_extracted, dlc_install, dlc_scan_drives, library_scan, copy_to_usb, mod_identify, mod_name_key, mod_copy, game_search, pick_path, pick_save, download_url, download_folder, list_archives_in_folder, notify_done, set_taskbar_progress, ftp_list, ftp_send, ftp_dest, builtin_menus, catalog, discord_set_activity, discord_set_enabled])
+        .invoke_handler(tauri::generate_handler![native_info, file_info, list_archive, read_entry, extract_archive, extract_entry, read_file, cancel_job, take_launch_requests, create_archive, iso_info, iso_companions, iso_to_god, iso_to_xex, god_extracted, xex_extracted, dlc_install, dlc_scan_drives, library_scan, copy_to_usb, mod_identify, mod_name_key, mod_copy, game_search, pick_path, pick_save, download_url, download_folder, list_archives_in_folder, notify_done, set_taskbar_progress, ftp_list, ftp_send, ftp_dest, builtin_menus, catalog, discord_set_activity, discord_set_enabled, migration_notices])
         .run(tauri::generate_context!())
         .expect("error while running Unpack");
 }

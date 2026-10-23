@@ -142,6 +142,14 @@ fn extra(cmd: &str, a: &Value, exe: &std::path::Path, jobs: &Jobs, events: &Arc<
             DISCORD.lock().unwrap().push(json!({"call": "enabled", "enabled": a["enabled"].as_bool().unwrap_or(false)}));
             Ok(Value::Null)
         }
+        // The harness can't run a real migration: tests plant the notice file in a temp folder.
+        "migration_notices" => Ok(json!(std::env::var_os("UNPACK_TEST_NOTICE_DIR").and_then(|d| unpack_lib::migrate::take_notice_in(std::path::Path::new(&d))).into_iter().collect::<Vec<_>>())),
+        "__plant_migration_notice" => {
+            let d = std::env::var_os("UNPACK_TEST_NOTICE_DIR").ok_or("UNPACK_TEST_NOTICE_DIR not set")?;
+            std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+            std::fs::write(std::path::Path::new(&d).join(unpack_lib::migrate::NOTICE), "C:\\Users\\me\\AppData\\Local\\com.qeezyxz.unpack\\EBWebView.old-version").map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
         "__discord_calls" => Ok(Value::Array(DISCORD.lock().unwrap().clone())),
         "iso_to_god" => {
             let id = a["id"].as_str().unwrap().to_string();

@@ -216,7 +216,7 @@ Rust (from `src-tauri`):
 
 UI e2e (headless Chrome + `/workspace/testenv` puppeteer-core, real Rust via the bridge):
 1. `cargo build --example bridge --features download-test-loopback`
-2. From `src-tauri`: `UNPACK_TEST_ALLOW_LOOPBACK=1 UNPACK_TEST_DRIVES=/tmp/unpack-dlc-e2e/usb ./target/debug/examples/bridge ../src &` (port 18790, `UNPACK_BRIDGE_PORT` to change)
+2. From `src-tauri`: `UNPACK_TEST_NOTICE_DIR=/tmp/unpack-v160-notice UNPACK_TEST_ALLOW_LOOPBACK=1 UNPACK_TEST_DRIVES=/tmp/unpack-dlc-e2e/usb ./target/debug/examples/bridge ../src &` (port 18790, `UNPACK_BRIDGE_PORT` to change)
 3. From the repo root: `node tests/e2e.mjs` (42), `tests/autogod.mjs` (15), `tests/dlc.mjs` (16), `tests/download.mjs` (27), `tests/mods.mjs` (39), `tests/builtin.mjs` (9; own bridge on a random port with `UNPACK_TEST_MENUS` dummy fixtures), `tests/catalog.mjs` (36; own bridge + local HTTP + fake_aurora.py; keys from `target/debug/unpack-catalog-sign`, so `cargo build --bin unpack-catalog-sign` first), `tests/v160.mjs` (37: jobs-at-once, nested archives, Discord toggle/presence via the bridge's `__discord_calls` recorder, error banner, unknown-TitleID warning, multi-disc notes, companion prompt), `tests/xbox.mjs` (52, incl. the pyftpdlib LIST-425 overwrite repro and a Usb0+Usb1 console (`fake_aurora.py --drives`); needs `pip install pyftpdlib`, starts `tests/fake_aurora.py`). Fixtures are generated (`make_iso.py`, `make_stfs.py`, big.7z). Screenshots go to /tmp unless `UPDATE_SHOTS=1`. Download tests use local servers only.
 
 Other checks: `npm test` (`tests/theme.test.mjs`, node:test), `python3 tests/gamelists.py` (game-list merge script consistency). CI: `.github/workflows/test.yml` runs all of the above; `.github/workflows/release.yml` is a manual Windows build (installer + portable zip) that never tags or publishes.
@@ -269,3 +269,9 @@ FTP benchmark: `tests/fake_aurora.py ROOT PORT [--limit MBPS] [--cons N] [--no-s
 - migrate.rs: the retry merges `.pre-migration` into the migrated copy instead of overwriting (`merge_newer`): journal union by (target, entry_id), later `installed_at` wins; seen.json max per key; JSON arrays unioned, objects newer-per-key (logged); other differing files newer wins, older kept as `<name>.old-version`; Downloads merged with `name (2).ext` on clashes; an earlier backup is merged, not dropped; `.pre-migration` removed after the merge. WebView localStorage (leveldb) can't be merged per key: the profile with Unpack settings made after the failed start wins, the 1.5 profile is kept as `EBWebView.old-version` and the choice is logged.
 - archive.rs: the 100k inner file cap is also checked from the listing (before extracting) and recounted after 7-Zip finishes.
 - lib.rs: parses_explorer_args uses its own temp folder (flaked under parallel runs).
+
+## Round 19 fixes (non-blocking lows)
+- Merge: a journal.json/seen.json that doesn't parse never beats a valid one; the damaged side is saved as `<name>.bad`.
+- Journal merge is O(n) (HashMap by target+entry_id); on a clash a valid installed_at beats a missing/garbage one; both invalid → new-folder record.
+- EBWebView swap never deletes anything: a kill between the renames just finishes the second rename; an existing `.old-version` is never reused (`.old-version-2`, …); cross-drive fallback copies via `.migrating`.
+- One-time in-app notice (`migration_notices` command, `.migration-notice` file removed when read) saying where the older settings are kept. The bridge reads it from `UNPACK_TEST_NOTICE_DIR`.

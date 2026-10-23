@@ -262,6 +262,20 @@ async function pickGodDest(dir) {
   await p.evaluate(() => localStorage.setItem("unpack.autoIso", "off"));
 }
 
+// ---- One-time migration notice (R19 L5) ----
+{
+  const planted = await fetch(`http://127.0.0.1:${PORT}/invoke/__plant_migration_notice`, { method: "POST", body: "{}" }).then((r) => r.ok);
+  await p.reload({ waitUntil: "load" });
+  await p.waitForSelector("#migration-notice", { timeout: 5000 }).catch(() => {});
+  const txt = await p.evaluate(() => document.querySelector("#migration-notice")?.textContent || "");
+  check("migration: one-time notice says where the older settings are", planted && /older settings/.test(txt) && txt.includes("EBWebView.old-version"), txt);
+  await click("[data-migration-ok]");
+  check("migration: notice dismisses", await p.evaluate(() => !document.querySelector("#migration-notice")));
+  await p.reload({ waitUntil: "load" });
+  await new Promise((r) => setTimeout(r, 1500));
+  check("migration: notice is shown only once", await p.evaluate(() => !document.querySelector("#migration-notice")));
+}
+
 // ---- Wrap + no page errors ----
 {
   await drop([D + "/unknown.iso"]);

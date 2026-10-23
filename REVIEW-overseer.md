@@ -1199,3 +1199,72 @@ Commit 98c6c08 on v1.6.0-merge (local). Reviewer did not change source; scratch 
 - has_own_data looks only at `EBWebView/*/Local Storage/leveldb`. That is the Windows layout; on Linux and macOS a settings-only new profile isn't seen. Harmless now that the retry marker drives the decision.
 - Line 161 removes an existing .pre-migration without merging it.
 - A kill in the middle of overlay is safe: `.migration-pending` makes finish() rerun it, and every overlay is a plain copy.
+
+## Round 19 — 2026-10-23 (CDT)
+Commit 1b27a20 reviewed locally. **Verdict: PASS.** There are 3 Low bugs, none blocking.
+
+### Ranked bugs
+1. **LOW: a corrupt journal.json or seen.json on the post-failure side beats a valid one.**
+   - A file that doesn't parse goes down the "unknown file, newer wins" path.
+   - Run D: a truncated new journal was kept, and the valid 1.5 journal ended up only as journal.json.old-version.
+   - Run F2: a corrupt `{"v":2` seen.json was kept, and seen v7 went to .old-version.
+   - The strict reader then turns catalog installs off until the user repairs the file by hand.
+   - No data is lost, but there is no .bad copy and no merge. The fix is to prefer the side that parses, and keep the bad one as `.bad`.
+   - With the corrupt file on the old side (E), the new valid journal won. That is correct.
+2. **LOW: the journal merge is O(n²).**
+   - Each record does an `out.iter().position` that builds new key Strings.
+   - 2k and 5k records merged in seconds.
+   - 50k records (10 MB) did not finish in 290 s. The app sits blank because this runs before the WebView.
+   - A kill partway through left the state safe (.pending, .pre-migration and the retry marker all intact, 1 record), and nothing was half-written. Unrealistic for a hobby user. Fix with a HashMap index.
+3. **LOW: installed_at that is missing or not a number counts as 0, and a skewed clock decides.**
+   - B and B2: a record from after the failed start with garbage or no installed_at lost to the 1.5 record (100).
+   - C2: the newer record with an older timestamp also lost.
+   - The app always writes a u64, so in practice only clock skew can trigger this.
+
+### Notes on the merge
+- **Nested settings objects:** the merge is shallow. Per top-level key, the new value wins and the change is logged (run I: {"a":{..d:2}} replaced d:1 as a whole, and "t" 1→"str" won). This matches the claim.
+- **Repeated .old-version overwrites (J):** a 3-retry run gave a correct final state. Each .old-version is recopied from the same 1.5 source, so overwriting it loses nothing.
+
+### Round 18 issue table
+| Round 18 issue | Round 19 run | Result |
+|---|---|---|
+| MEDIUM: retry overwrote whole files. Exact repro: old has OLDMOD / v7 / OLD, new has NEWMOD / v3 / NEWSETTINGS. | Journal is [OLDMOD, NEWMOD], seen is v7, grants are [OLDGRANT, NEWG]. NEWSETTINGS kept; OLD saved in EBWebView.old-version and logged. .pre-migration removed. | PASS |
+| LOW: Downloads in .pre-migration were hidden | K3, K5, K7: 400 × 1 MB files, killed at 3, 5 and 7 s, then rerun. All 405 present, 0 duplicate hashes, 0 missing. A same-size file with different content became "s (2).txt" (compared by content). An identical file was dropped. With "game (2).zip" already taken, the file went to "game (3).zip". | PASS |
+| LOW: .pre-migration never cleaned | Removed after success. If removal fails partway (M2, a chmod 555 subdir), the app logs "skipped" and keeps the retry marker and the rest. The retry re-merges without duplicates (2 records). After the permission was fixed, it completed. | PASS |
+| LOW: the 100k cap missed 100,500 | Zip containing a 100,500-file tar: "holds 100500 files", peak 1 file on disk, so refused before writing. Forged-ISIZE tar.gz with 100,500 files: stopped by the live cap. Honest tar.gz: ratio refusal. 99,000 files: extracted. | PASS |
+
+### Other checks run
+- **Same entry on two targets (C):** both records kept.
+- **Non-numeric seen value and different keys (F):** gave {"v":7,"w":5}.
+- **Duplicate grants and missing paths (G):** union without duplicates. The missing path is kept, which is harmless.
+- **Symlinks in .pre-migration:** /etc and /etc/passwd links were skipped, not followed.
+
+### Test suites
+| Suite | Result |
+|---|---|
+| cargo | 20 × 246 passed, 0 failed (no parses_explorer_args flake) |
+| Wine | 236 passed |
+| e2e | 42 |
+| autogod | 15 |
+| dlc | 16 |
+| download | 28 |
+| mods | 40 |
+| builtin | 9 |
+| catalog | 36 |
+| xbox | 52 |
+| v160 | 40 |
+| npm | OK |
+| gamelists | 7 PASS |
+
+All node suites had 0 FAIL.
+
+### Checked by reading only
+- A kill between the two EBWebView renames (line ~208) could leave the 1.5 profile only in .old-version. The next run then calls remove_dir_all on that .old-version before renaming. This narrow window was not exercised.
+- The Linux and macOS profile check only looks at the EBWebView path (see Round 18).
+
+### localStorage limit
+- **What triggers it:** the known limit applies only if the user changed a setting during the failed start. A plain first load writes no `unpack.*` keys (checked with puppeteer: localStorage was empty after load).
+- **What the user loses:** if it triggers, saved consoles (including FTP credentials), drives, libraries, mods and theme all revert to the post-failure profile.
+- **Where the old data goes:** the 1.5 data sits in EBWebView.old-version and the switch is logged only to stderr. Nothing in the UI shows it.
+- **Severity:** LOW.
+- **Recommendation:** accept it for a hobby app. Optionally show a one-time notice that points to EBWebView.old-version. A first-load merge in the frontend isn't worth it.

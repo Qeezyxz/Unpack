@@ -178,6 +178,21 @@ fn finish(old: &Path, new: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Written when the 1.5 WebView profile was set aside; the app shows a one-time notice (R19 L5).
+pub const NOTICE: &str = ".migration-notice";
+
+/// The one-time notices left by a migration (each is removed once read).
+pub fn take_notices() -> Vec<String> {
+    bases().iter().filter_map(|b| take_notice_in(&b.join(NEW_ID))).collect()
+}
+
+pub fn take_notice_in(dir: &Path) -> Option<String> {
+    let f = dir.join(NOTICE);
+    let kept = fs::read_to_string(&f).ok()?;
+    let _ = fs::remove_file(&f);
+    Some(format!("Your settings from before the update couldn't be merged with the ones you made since, so the newer ones are in use. The older settings (saved consoles, drives and options) are kept in {kept}."))
+}
+
 fn log(msg: String) { eprintln!("migration: {msg}"); }
 
 /// Merge the folder `src` (written later) into `dst` (R18 M1/L1). Idempotent, so a kill part-way
@@ -204,13 +219,18 @@ pub(crate) fn merge_newer(src: &Path, dst: &Path) -> std::io::Result<()> {
             if m.is_dir() { merge_downloads(&from, &to)?; }
         } else if n == "EBWebView" {
             if m.is_dir() && has_own_data_webview(&from) {
+                // Crash-safe swap (R19 L4): nothing is ever deleted here. If a kill hit between the
+                // two renames, the live profile is missing and .old-version already holds the 1.5
+                // profile: just finish the second rename. An existing .old-version is never reused.
+                let mut keep = sibling(&to, ".old-version");
                 if to.exists() {
-                    let keep = sibling(&to, ".old-version");
-                    if keep.exists() { fs::remove_dir_all(&keep)?; }
+                    let mut i = 2;
+                    while fs::symlink_metadata(&keep).is_ok() { keep = sibling(&to, &format!(".old-version-{i}")); i += 1; }
                     fs::rename(&to, &keep)?;
                 }
                 rename_or_copy(&from, &to)?;
-                log(format!("kept the settings made after the failed start; the 1.5 profile is saved as {}", sibling(&to, ".old-version").display()));
+                fs::write(dst.join(NOTICE), keep.display().to_string())?;
+                log(format!("kept the settings made after the failed start; the 1.5 profile is saved as {}", keep.display()));
             } else if !to.exists() && m.is_dir() {
                 rename_or_copy(&from, &to)?;
             }
@@ -225,8 +245,11 @@ pub(crate) fn merge_newer(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 fn rename_or_copy(from: &Path, to: &Path) -> std::io::Result<()> {
     if fs::rename(from, to).is_ok() { return Ok(()); }
+    let part = sibling(to, ".migrating");
+    if part.exists() { fs::remove_dir_all(&part)?; }
     let mut n = 0;
-    if fs::symlink_metadata(from)?.is_dir() { copy_tree(from, to, false, &mut n) } else { fs::copy(from, to).map(|_| ()) }
+    if fs::symlink_metadata(from)?.is_dir() { copy_tree(from, &part, false, &mut n)? } else { fs::copy(from, &part)?; }
+    fs::rename(&part, to)
 }
 
 fn merge_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -244,6 +267,23 @@ fn merge_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     if old_b == new_b { return Ok(()); }
     let name = dst.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let parse = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).ok();
+    if name == "journal.json" || name == "seen.json" {
+        // Never let a damaged file beat a valid one (R19 L1): keep the side that parses, save the
+        // other as <name>.bad. Both damaged: keep the newer, the older goes to .bad.
+        match (parse(&old_b).filter(|v| v.is_object()), parse(&new_b).filter(|v| v.is_object())) {
+            (Some(_), None) => {
+                write_atomic(&sibling(dst, ".bad"), &new_b)?;
+                log(format!("{} from after the failed start is damaged: kept the migrated one, saved the damaged one as .bad", dst.display()));
+                return Ok(());
+            }
+            (None, Some(_)) | (None, None) => {
+                write_atomic(&sibling(dst, ".bad"), &old_b)?;
+                log(format!("migrated {} is damaged: saved it as .bad", dst.display()));
+                return write_atomic(dst, &new_b);
+            }
+            _ => {}
+        }
+    }
     if let (Some(o), Some(n)) = (parse(&old_b), parse(&new_b)) {
         if let Some(v) = merge_json(name, o, n, dst) {
             return write_atomic(dst, &serde_json::to_vec_pretty(&v).unwrap());
@@ -260,13 +300,24 @@ fn merge_json(name: &str, o: serde_json::Value, n: serde_json::Value, at: &Path)
     use serde_json::Value;
     match (name, o, n) {
         ("journal.json", Value::Object(mut om), Value::Object(nm)) if om.get("installs").is_some_and(|v| v.is_array()) && nm.get("installs").is_some_and(|v| v.is_array()) => {
+            // O(n) by (target, entry_id) (R19 L2). Clash: a valid installed_at beats a missing or
+            // garbage one; both valid: the later wins (tie: new folder); both invalid: new folder (R19 L3).
             let key = |r: &Value| (r["target"].as_str().unwrap_or("").to_string(), r["entry_id"].as_str().unwrap_or("").to_string());
-            let at_of = |r: &Value| r["installed_at"].as_u64().unwrap_or(0);
+            let at_of = |r: &Value| r["installed_at"].as_u64().filter(|&t| t > 0);
             let mut out: Vec<Value> = om["installs"].as_array().cloned().unwrap_or_default();
+            let mut index: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::with_capacity(out.len());
+            for (i, r) in out.iter().enumerate() { index.insert(key(r), i); }
             for r in nm["installs"].as_array().unwrap() {
-                match out.iter().position(|x| key(x) == key(r)) {
-                    Some(i) => { if at_of(r) >= at_of(&out[i]) { out[i] = r.clone(); } }
-                    None => out.push(r.clone()),
+                match index.get(&key(r)) {
+                    Some(&i) => {
+                        let newer = match (at_of(r), at_of(&out[i])) {
+                            (Some(n), Some(o)) => n >= o,
+                            (Some(_), None) | (None, None) => true,
+                            (None, Some(_)) => false,
+                        };
+                        if newer { out[i] = r.clone(); }
+                    }
+                    None => { index.insert(key(r), out.len()); out.push(r.clone()); }
                 }
             }
             log(format!("merged install journals ({} records)", out.len()));
@@ -649,5 +700,71 @@ mod tests {
         assert!(j.contains("OLDMOD") && j.contains("EARLY") && j.contains("LATER"), "{j}");
         assert!(new.join("Downloads/early.zip").is_file() && new.join("Downloads/later.zip").is_file());
         assert!(!backup_of(&new).exists());
+    }
+
+    /// R19 L1: a damaged journal/seen on either side never beats a valid one; the bad one is kept as .bad.
+    #[test]
+    fn r19_l1_damaged_side_never_wins() {
+        let d = crate::testutil::TmpDir::new("migrate-r19a");
+        let (a, b) = (d.join("new"), d.join("bak"));
+        put(&a, &[("catalog/journal.json", &journal(&[("OLD", 1)])), ("catalog/seen.json", "{broken")]);
+        put(&b, &[("catalog/journal.json", "{garbage"), ("catalog/seen.json", r#"{"v":9}"#)]);
+        merge_newer(&b, &a).unwrap();
+        assert!(fs::read_to_string(a.join("catalog/journal.json")).unwrap().contains("OLD"), "valid migrated journal kept");
+        assert_eq!(fs::read_to_string(a.join("catalog/journal.json.bad")).unwrap(), "{garbage");
+        assert_eq!(fs::read_to_string(a.join("catalog/seen.json")).unwrap(), r#"{"v":9}"#, "valid newer seen kept");
+        assert_eq!(fs::read_to_string(a.join("catalog/seen.json.bad")).unwrap(), "{broken");
+    }
+
+    /// R19 L2 + L3: 50k-record journals merge in linear time; a valid installed_at beats a missing or
+    /// garbage one, and with both invalid the new-folder record wins.
+    #[test]
+    fn r19_l2_l3_journal_merge_fast_and_timestamps() {
+        let n = 50_000;
+        let mk = |pre: &str, at: serde_json::Value| -> serde_json::Value {
+            let v: Vec<_> = (0..n).map(|i| serde_json::json!({"target": "usb", "entry_id": format!("{pre}{i}"), "installed_at": at.clone()})).collect();
+            serde_json::json!({"installs": v})
+        };
+        let mut old = mk("m", 100.into());
+        let mut new = mk("m", 200.into());
+        // clashes with bad timestamps
+        old["installs"].as_array_mut().unwrap().push(serde_json::json!({"target": "usb", "entry_id": "B", "installed_at": 100, "who": "old"}));
+        new["installs"].as_array_mut().unwrap().push(serde_json::json!({"target": "usb", "entry_id": "B", "installed_at": "garbage", "who": "new"}));
+        old["installs"].as_array_mut().unwrap().push(serde_json::json!({"target": "usb", "entry_id": "C", "who": "old"}));
+        new["installs"].as_array_mut().unwrap().push(serde_json::json!({"target": "usb", "entry_id": "C", "installed_at": 5, "who": "new"}));
+        old["installs"].as_array_mut().unwrap().push(serde_json::json!({"target": "usb", "entry_id": "D", "who": "old"}));
+        new["installs"].as_array_mut().unwrap().push(serde_json::json!({"target": "usb", "entry_id": "D", "installed_at": null, "who": "new"}));
+        new["installs"].as_array_mut().unwrap().push(serde_json::json!({"target": "usb", "entry_id": "E", "installed_at": 1}));
+        let t = std::time::Instant::now();
+        let out = merge_json("journal.json", old, new, Path::new("j")).unwrap();
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "took {:?}", t.elapsed());
+        let recs = out["installs"].as_array().unwrap();
+        assert_eq!(recs.len(), n + 4);
+        assert!(recs[..n].iter().all(|r| r["installed_at"] == 200));
+        let who = |id: &str| recs.iter().find(|r| r["entry_id"] == id).unwrap()["who"].clone();
+        assert_eq!(who("B"), "old", "valid timestamp beats garbage");
+        assert_eq!(who("C"), "new", "valid beats missing");
+        assert_eq!(who("D"), "new", "both invalid: new folder wins");
+    }
+
+    /// R19 L4: killed between the two EBWebView renames (live profile gone, 1.5 profile only in
+    /// .old-version): the rerun finishes the swap and never deletes .old-version. L5: a notice is left once.
+    #[test]
+    fn r19_l4_webview_swap_kill_between_renames() {
+        let d = crate::testutil::TmpDir::new("migrate-r19c");
+        let (new, bak) = (d.join("new"), d.join("bak"));
+        put(&new, &[("EBWebView.old-version/Default/Local Storage/leveldb/1.log", "unpack.consoles=OLD")]);
+        put(&bak, &[("EBWebView/Default/Local Storage/leveldb/5.log", "unpack.consoles=NEW")]);
+        merge_newer(&bak, &new).unwrap();
+        assert!(fs::read_to_string(new.join("EBWebView.old-version/Default/Local Storage/leveldb/1.log")).unwrap().contains("OLD"));
+        assert!(fs::read_to_string(new.join("EBWebView/Default/Local Storage/leveldb/5.log")).unwrap().contains("NEW"));
+        // a second swap never overwrites an existing .old-version
+        put(&bak, &[("EBWebView/Default/Local Storage/leveldb/6.log", "unpack.consoles=NEWER")]);
+        merge_newer(&bak, &new).unwrap();
+        assert!(new.join("EBWebView.old-version/Default/Local Storage/leveldb/1.log").is_file());
+        assert!(new.join("EBWebView.old-version-2/Default/Local Storage/leveldb/5.log").is_file());
+        let msg = take_notice_in(&new).unwrap();
+        assert!(msg.contains("EBWebView.old-version-2") && msg.contains("older settings"), "{msg}");
+        assert!(take_notice_in(&new).is_none(), "shown once");
     }
 }
