@@ -1,6 +1,6 @@
 # Unpack
 
-Unpack **1.2.1** is a Windows (and Linux-dev) desktop tool for extracting archives (ZIP, RAR, 7Z, and more), converting Xbox 360 ISOs to Games on Demand or extracted XEX folders, managing a game library, installing DLC/title updates, handling mod menus, and sending files to a modded Xbox 360 over the local network. While it is open, Discord can show Rich Presence (current tool and job). You can turn that off in Settings.
+Unpack **1.3.0** is a Windows (and Linux-dev) desktop tool for extracting archives (ZIP, RAR, 7Z, and more), converting Xbox 360 ISOs to Games on Demand or extracted XEX folders, managing a game library, installing DLC/title updates, handling mod menus, and sending files to a modded Xbox 360 over the local network. While it is open, Discord can show Rich Presence (current tool and job). You can turn that off in Settings.
 
 Use at your own risk. Back up `launch.ini` and anything you convert or copy. See `DISCLAIMER.txt`.
 
@@ -18,7 +18,7 @@ ISO conversion uses a vendored copy of [iso2god-rs](https://github.com/iliazeus/
 
 ## Status
 
-- **1.2.1** — Restores the original Unpack mark (isometric box and up-chevron on blue-cyan). 1.2.0 added Discord Rich Presence. 1.1.1 added the full TitleID lists and Disc 1 / Disc 2 merge. 1.1.0 is the first source-complete release.
+- **1.3.0** — Restores the original dark UI (top chrome, drop canvas, overlay tools) and the original Unpack mark. 1.2.0 added Discord Rich Presence. 1.1.1 added the full TitleID lists and Disc 1 / Disc 2 merge.
 - Build from source with `npx tauri build` on Windows for an installer / portable zip.
 - Keep backups. This is a hobbyist offline tool.
 
@@ -38,7 +38,7 @@ Currently flagged only by Trapmine (`Malicious.high.ml.score`). This is a common
 Windows builds are attached to the [latest GitHub Release](https://github.com/Qeezyxz/Unpack/releases/latest).
 
 **Option A (recommended): the installer**
-1. Download and run `Unpack_1.2.1_x64-setup.exe` (or the latest installer on the releases page).
+1. Download and run `Unpack_1.3.0_x64-setup.exe`.
 2. Windows may show "Windows protected your PC" because the file isn't signed. Click **More info**, then **Run anyway**.
 3. The installer doesn't need admin rights. It installs only for your user account.
 

@@ -55,6 +55,7 @@ pub fn run() {
             commands::download_url,
             commands::discover_xbox,
             commands::send_to_xbox,
+            commands::xbox_test,
             commands::list_dir,
             commands::discord_set_activity,
             commands::discord_set_enabled,

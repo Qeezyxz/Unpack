@@ -3,249 +3,295 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Unpack</title>
+    <title>Unpack — ZIP, RAR, 7Z</title>
     <script src="theme.js"></script>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div id="app">
-      <aside>
-        <div class="brand">
-          <img class="logo" src="logo.png" width="40" height="40" alt="Unpack" />
+      <header class="chrome">
+        <div class="brand" id="open-settings" data-modal="settings" title="Settings">
+          <img class="logo" src="logo.png" width="36" height="36" alt="" />
           <div>
             <strong>Unpack</strong>
-            <span class="muted">Xbox 360 toolkit</span>
+            <span>Local archives, ISO &amp; 7Z</span>
           </div>
         </div>
-        <nav>
-          <button data-view="extract" class="active">Extract</button>
-          <button data-view="convert">Convert ISO</button>
-          <button data-view="library">Library</button>
-          <button data-view="usb">USB copy</button>
-          <button data-view="content">DLC / Updates</button>
-          <button data-view="mods">Mod menus</button>
-          <button data-view="downloads">Downloader</button>
-          <button data-view="homebrew">Homebrew</button>
-          <button data-view="xbox">Send to Xbox</button>
-          <button data-view="settings">Settings</button>
+        <nav class="top-nav">
+          <button data-modal="archive" type="button">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10v2H3zm0 3h10V13H3z" fill="currentColor" opacity=".9"/><path d="M7 8h2v3H7z" fill="currentColor"/></svg>
+            Create archive
+          </button>
+          <button data-modal="library" type="button">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h4.2c1.2 0 2.3.7 2.8 1.8.5-1.1 1.6-1.8 2.8-1.8H15V13h-2.2c-1 0-1.8.4-2.3 1.1-.5-.7-1.3-1.1-2.3-1.1H3z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+            Library
+          </button>
+          <button data-modal="mods" type="button">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2h4v3H6zm5 4h3v4h-3zM2 6h3v4H2zm4 5h4v3H6z" fill="currentColor"/></svg>
+            Mod Menus
+          </button>
+          <button data-modal="homebrew" type="button">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 11.5 6.5 7l2 2 5.5-5.5V11H2z" fill="currentColor"/></svg>
+            Homebrew Tools
+          </button>
+          <button data-modal="xbox" type="button">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor"/><path d="M5 8.5c1 2 2 3 3 3s2-1 3-3" fill="none" stroke="currentColor"/></svg>
+            Send to Xbox
+          </button>
+          <button data-modal="dlc" class="plus" type="button">+ Install DLC</button>
+          <button id="iso-mode-btn" class="iso-pill" type="button">ISO → GOD / XEX</button>
+          <span id="auto-badge" class="badge-green">AUTO GOD</span>
         </nav>
-        <div class="aside-foot">
-          <label class="theme-row">Theme
-            <select id="theme-select">
-              <option value="system">System</option>
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
+      </header>
+
+      <section class="dest-wrap">
+        <div class="dest-bar">
+          <div class="dest-path">
+            <span class="live-dot" aria-hidden="true"></span>
+            <input id="extract-dest" placeholder="Choose a destination folder" />
+            <p class="dest-hint">Every archive gets its own folder in here. New archives extract here as soon as they open.</p>
+          </div>
+          <div class="dest-actions">
+            <label class="tiny">Extract to
+              <select id="extract-target">
+                <option value="chosen">A chosen folder</option>
+              </select>
+            </label>
+            <button id="pick-extract-dest" class="ghost" type="button">Change folder</button>
+          </div>
+        </div>
+        <div class="opts">
+          <label class="tiny">If it already exists
+            <select id="extract-existing">
+              <option value="number">Add a number</option>
+              <option value="overwrite">Overwrite</option>
+              <option value="skip">Skip</option>
             </select>
           </label>
-          <p class="muted tiny" id="meta-line">WIP · local files only</p>
+          <label class="check"><input type="checkbox" id="extract-auto" checked /> Extract as soon as they open</label>
+          <label class="check"><input type="checkbox" id="extract-junk" checked /> Skip junk files</label>
+          <label class="tiny">Auto ISO
+            <select id="auto-iso">
+              <option value="god">GOD</option>
+              <option value="xex">XEX</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
         </div>
-      </aside>
-      <main>
-        <header class="top">
-          <div>
-            <h1 id="view-title">Extract</h1>
-            <p class="muted" id="view-sub">Unpack ZIP, RAR, 7Z, TAR, and more with bundled 7-Zip.</p>
-          </div>
-          <div class="status" id="job-status">Ready</div>
-        </header>
+      </section>
 
-        <section class="view" id="view-extract">
-          <div class="drop" data-drop="extract-files">
-            Drop archives here or
-            <button class="link" id="pick-archives">browse</button>
+      <main class="hero">
+        <h1>Drop an archive.</h1>
+        <p class="lede">Choose a destination, then drop one archive or a whole set. Each one lands in its own folder. Nothing leaves this tab.</p>
+        <div class="drop" id="drop-zone" tabindex="0">
+          <svg class="drop-art" viewBox="0 0 160 100" aria-hidden="true">
+            <g fill="none" stroke-linejoin="round" stroke-linecap="round">
+              <path d="M78 18l28 14-28 14-28-14z" stroke="#5ee7ff" stroke-width="2"/>
+              <path d="M50 32v22l28 14 28-14V32" stroke="#5ee7ff" stroke-width="2"/>
+              <path d="M78 46v22" stroke="#5ee7ff" stroke-width="2"/>
+              <path d="M108 40l18 10v16l-18 10-18-10V50z" stroke="#7a6bff" stroke-width="2"/>
+              <path d="M108 40l18 10-18 10-18-10z" stroke="#9d8cff" stroke-width="2"/>
+              <path d="M70 8v10M65 12h10" stroke="#5ee7ff" stroke-width="2"/>
+              <circle cx="128" cy="28" r="6" stroke="#ffb24a" stroke-width="2"/>
+            </g>
+          </svg>
+          <strong>Drop files here</strong>
+          <span>or click to browse · multi-select is fine · Ctrl/⌘ O</span>
+          <div class="file-kinds">
+            <i class="kind zip">ZIP</i>
+            <i class="kind rar">RAR</i>
+            <i class="kind folder">DIR</i>
+            <i class="kind seven">7Z</i>
           </div>
-          <ul class="file-list" id="extract-files"></ul>
-          <div class="row">
-            <label>Destination
-              <input id="extract-dest" placeholder="Folder for extracted files" />
-            </label>
-            <button class="ghost" id="pick-extract-dest">Choose folder</button>
-            <button class="primary" id="run-extract">Extract</button>
-          </div>
-          <div class="row">
-            <button id="pick-archive-inputs">Files to pack</button>
-            <button id="pick-archive-out">Save archive as…</button>
-            <button id="run-pack">Create archive</button>
-          </div>
-        </section>
-
-        <section class="view hidden" id="view-convert">
-          <p class="note">Multi-disc: add Disc 1 and Disc 2 (or one of them — Unpack looks next to it). Extracted XEX merges into <strong>one playable folder</strong>, keeping disc 1’s <code>default.xex</code>. GOD keeps both discs under the same TitleID so Aurora can swap discs.</p>
-          <div class="drop" data-drop="iso-path">Drop Xbox 360 ISOs here (Disc 1 and Disc 2)</div>
-          <ul class="file-list" id="iso-files"></ul>
-          <div class="row">
-            <label class="grow">ISO
-              <input id="iso-path" placeholder="Game (Disc 1).iso" />
-            </label>
-            <button class="ghost" id="pick-iso">Browse</button>
-            <button id="inspect-iso">Inspect</button>
-          </div>
-          <pre class="panel" id="iso-info">No ISO selected.</pre>
-          <div class="row wrap">
-            <label>Output folder
-              <input id="iso-dest" />
-            </label>
-            <button class="ghost" id="pick-iso-dest">Choose</button>
-            <label class="check"><input type="radio" name="iso-mode" value="god" checked /> Games on Demand</label>
-            <label class="check"><input type="radio" name="iso-mode" value="xex" /> Extracted XEX folder</label>
-            <label class="check"><input type="checkbox" id="iso-trim" checked /> Trim unused ISO space</label>
-            <label class="check"><input type="checkbox" id="iso-verify" checked /> Verify before finishing</label>
-            <label class="check"><input type="checkbox" id="iso-companions" checked /> Find Disc 2 in the same folder</label>
-            <button class="primary" id="run-convert">Convert</button>
-          </div>
-        </section>
-
-        <section class="view hidden" id="view-library">
-          <div class="row">
-            <label class="grow">Search TitleIDs
-              <input id="title-search" placeholder="Halo 3 or 4D5307E6" />
-            </label>
-            <label class="grow">Library folder
-              <input id="library-root" />
-            </label>
-            <button class="ghost" id="pick-library">Choose</button>
-            <button class="primary" id="scan-library">Scan</button>
-          </div>
-          <div class="split">
-            <div>
-              <h3>Title database</h3>
-              <ul class="results" id="title-results"></ul>
-            </div>
-            <div>
-              <h3>On disk</h3>
-              <ul class="results" id="library-results"></ul>
-            </div>
-          </div>
-        </section>
-
-        <section class="view hidden" id="view-usb">
-          <p class="note">FAT32 USB drives reject files larger than 4 GiB. Copies go to a temp name first, then rename, so a crash does not wipe <code>launch.ini</code>.</p>
-          <div class="drop" data-drop="usb-sources">Drop games, GOD folders, or files to copy</div>
-          <ul class="file-list" id="usb-sources"></ul>
-          <div class="row">
-            <label class="grow">USB / destination
-              <input id="usb-dest" />
-            </label>
-            <button class="ghost" id="pick-usb">Choose</button>
-            <button id="check-usb">Check filesystem</button>
-            <label class="check"><input type="checkbox" id="usb-verify" checked /> Verify hashes</label>
-            <button class="primary" id="run-usb">Copy</button>
-          </div>
-          <pre class="panel" id="usb-info"></pre>
-        </section>
-
-        <section class="view hidden" id="view-content">
-          <p class="note">DLC goes to <code>Content/0000000000000000/{TitleID}/00000002</code>. Title updates use <code>000B0000</code>. Packages are identified from the CON/LIVE/PIRS header.</p>
-          <div class="row">
-            <button id="pick-packages">Choose DLC / TU files</button>
-            <label class="grow">Library or USB root
-              <input id="content-root" />
-            </label>
-            <button class="ghost" id="pick-content-root">Choose</button>
-            <button class="primary" id="run-place">Place automatically</button>
-          </div>
-          <ul class="results" id="content-results"></ul>
-        </section>
-
-        <section class="view hidden" id="view-mods">
-          <p class="note">Point at a folder of mod menus you already have. Unpack copies them onto USB or into a game folder. It does not download copyrighted mods.</p>
-          <div class="row">
-            <label class="grow">Mods folder
-              <input id="mods-root" />
-            </label>
-            <button class="ghost" id="pick-mods">Choose</button>
-            <button id="list-mods">List</button>
-            <label class="grow">Copy to
-              <input id="mods-dest" />
-            </label>
-            <button class="ghost" id="pick-mods-dest">Choose</button>
-            <button class="primary" id="copy-mods">Copy</button>
-          </div>
-          <ul class="results" id="mods-list"></ul>
-        </section>
-
-        <section class="view hidden" id="view-downloads">
-          <div class="row">
-            <label class="grow">URL
-              <input id="dl-url" placeholder="https://…" />
-            </label>
-            <label>Expected SHA-1 or SHA-256
-              <input id="dl-hash" placeholder="optional" />
-            </label>
-          </div>
-          <div class="row">
-            <label class="grow">Save folder
-              <input id="dl-dest" />
-            </label>
-            <button class="ghost" id="pick-dl-dest">Choose</button>
-            <button class="primary" id="run-download">Download (resume + hash)</button>
-          </div>
-        </section>
-
-        <section class="view hidden" id="view-homebrew">
-          <p class="note">Keep Aurora, XeXMenu, DashLaunch, and other tools in a local folder you provide. Unpack will not fetch them from the internet.</p>
-          <div class="row">
-            <label class="grow">Tools folder
-              <input id="hb-root" />
-            </label>
-            <button class="ghost" id="pick-hb">Choose</button>
-            <button id="list-hb">List</button>
-            <button id="open-hb">Open folder</button>
-          </div>
-          <ul class="results" id="hb-list"></ul>
-        </section>
-
-        <section class="view hidden" id="view-xbox">
-          <p class="warn">Known bug (fixed here): an interrupted send must never delete <code>launch.ini</code>. Unpack skips it unless you opt in, and even then replaces it with a rename instead of delete-then-upload.</p>
-          <div class="row wrap">
-            <label>IP
-              <input id="xbox-host" placeholder="192.168.1.20" />
-            </label>
-            <label>Port
-              <input id="xbox-port" value="21" />
-            </label>
-            <label>User
-              <input id="xbox-user" value="xbox" />
-            </label>
-            <label>Password
-              <input id="xbox-pass" value="xbox" type="password" />
-            </label>
-            <label class="grow">Remote folder
-              <input id="xbox-dest" value="/Hdd1/Games" />
-            </label>
-            <button id="discover-xbox">Scan LAN (port 21)</button>
-          </div>
-          <ul class="results" id="xbox-hosts"></ul>
-          <div class="drop" data-drop="xbox-files">Drop files or game folders to send</div>
-          <ul class="file-list" id="xbox-files"></ul>
-          <div class="row">
-            <button class="ghost" id="pick-xbox-files">Browse</button>
-            <label class="check"><input type="checkbox" id="xbox-launchini" /> Replace launch.ini (atomic rename)</label>
-            <button class="primary" id="run-send">Send</button>
-          </div>
-        </section>
-
-        <section class="view hidden" id="view-settings">
-          <p class="note">Unpack is a hobbyist offline tool. It does not include games, DLC, or dashboards. Use files you own, on a modded console, at your own risk.</p>
-          <dl class="meta" id="settings-meta"></dl>
-          <div class="row">
-            <label class="check"><input type="checkbox" id="discord-presence" checked /> Show Unpack on Discord (Rich Presence)</label>
-          </div>
-          <div class="row">
-            <button id="save-settings">Save settings</button>
-            <button id="show-notify">Test notification</button>
-          </div>
-        </section>
-
-        <footer class="log-wrap">
-          <div class="log-head">
-            <span>Activity</span>
-            <progress id="job-progress" max="1" value="0"></progress>
-          </div>
-          <pre class="log" id="log"></pre>
-        </footer>
+        </div>
+        <button id="sample-zip" class="text-link" type="button">Try a sample ZIP</button>
+        <ul class="file-list" id="recent-files"></ul>
+        <p class="status" id="job-status"></p>
+        <progress id="job-progress" max="1" value="0" hidden></progress>
       </main>
     </div>
+
+    <div class="overlay hidden" id="overlay"></div>
+
+    <section class="modal hidden" id="modal-library">
+      <header>
+        <h2>Library</h2>
+      </header>
+      <div class="empty" id="library-empty">
+        <div class="empty-art library-art" aria-hidden="true"></div>
+        <strong>No games found yet</strong>
+        <p>Add the folder with your GOD games (or a USB drive’s Content folder) in <button type="button" class="text-link" data-modal="settings">Settings → Game library folders</button>.</p>
+      </div>
+      <ul class="results" id="library-results"></ul>
+      <footer>
+        <button type="button" id="scan-library" class="ghost">Refresh</button>
+        <button type="button" class="primary close-modal">Done</button>
+      </footer>
+    </section>
+
+    <section class="modal wide hidden" id="modal-mods">
+      <header>
+        <h2>Mod Menus</h2>
+      </header>
+      <p class="note">For offline / modded-console use. Unpack doesn’t include or link to any mods. Downloads only run when you paste a link and click Download — the page itself stays offline.</p>
+      <div class="tabs">
+        <button type="button" class="tab on" data-tab="mods-files">Your files</button>
+        <button type="button" class="tab" data-tab="mods-dl">Download from link</button>
+        <button type="button" class="tab" data-tab="mods-names">Known names</button>
+      </div>
+      <div class="tab-panel" id="mods-files">
+        <div class="row">
+          <input id="mods-search" placeholder="Search your mods…" />
+          <select id="mods-game"><option>All games</option></select>
+          <select id="mods-type"><option>All types</option></select>
+          <button type="button" id="pick-mod-files" class="ghost">+ Add files…</button>
+          <button type="button" id="pick-mod-folder" class="ghost">Add folder…</button>
+        </div>
+        <div class="empty" id="mods-empty">
+          <div class="empty-art mods-art" aria-hidden="true"></div>
+          <strong>No mods added yet</strong>
+          <p>Add .xex plugins, CON/LIVE/PIRS packages or folders you already have on this PC.</p>
+        </div>
+        <ul class="results" id="mods-list"></ul>
+      </div>
+      <div class="tab-panel hidden" id="mods-dl">
+        <div class="row">
+          <input id="dl-url" class="grow" placeholder="https://…" />
+          <input id="dl-hash" placeholder="optional SHA-1 / SHA-256" />
+        </div>
+        <div class="row">
+          <input id="dl-dest" class="grow" placeholder="Save folder" />
+          <button type="button" id="pick-dl-dest" class="ghost">Choose</button>
+          <button type="button" id="run-download" class="primary">Download</button>
+        </div>
+      </div>
+      <div class="tab-panel hidden" id="mods-names">
+        <input id="title-search" placeholder="Search TitleIDs or names…" />
+        <ul class="results" id="title-results"></ul>
+      </div>
+      <footer>
+        <button type="button" class="primary close-modal">Done</button>
+      </footer>
+    </section>
+
+    <section class="modal wide hidden" id="modal-homebrew">
+      <header>
+        <h2>Homebrew Tools</h2>
+      </header>
+      <p class="note">Reference cards for PC/console utilities only — not online mod menus. Unpack never bundles these apps; each button opens the real source page in your browser. After you download a tool zip via Download from link, you can place it under usb\Apps\name.</p>
+      <div class="row">
+        <input id="hb-search" class="grow" placeholder="Search tools…" />
+        <select id="hb-cat"><option value="">All categories</option></select>
+      </div>
+      <div class="cards" id="hb-cards"></div>
+      <footer>
+        <button type="button" class="primary close-modal">Done</button>
+      </footer>
+    </section>
+
+    <section class="modal wide hidden" id="modal-xbox">
+      <header>
+        <h2>Send to Xbox <small>FTP over WiFi / LAN</small></h2>
+      </header>
+      <div class="stack">
+        <input id="xbox-name" placeholder="My Xbox" />
+        <input id="xbox-host" placeholder="Console IP, e.g. 192.168.1.50" />
+        <input id="xbox-port" value="21" />
+        <input id="xbox-user" value="xboxftp" />
+        <input id="xbox-pass" type="password" value="xboxftp" />
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="xbox-two" /> 2 at once</label>
+        <button type="button" id="xbox-test" class="primary">Connect / Test</button>
+        <button type="button" id="xbox-save" class="ghost">Save console</button>
+      </div>
+      <div class="split">
+        <div>
+          <div class="row">
+            <button type="button" id="pick-xbox-files">+ Add files…</button>
+            <button type="button" id="pick-xbox-folder" class="ghost">Add folder…</button>
+            <button type="button" id="xbox-from-library" class="text-link">From Library…</button>
+          </div>
+          <p class="help">Nothing queued. Add files, or use Send to Xbox on a game in the Library or a mod in Mod Menus. Unpack detects GOD games, DLC, title updates and XEX games and picks the right folder. Uploads go to a .part file, are renamed when complete and their size is checked on the console. Existing files are never overwritten. Only local network addresses are allowed.</p>
+          <ul class="file-list" id="xbox-files"></ul>
+          <div class="row">
+            <label class="check tight"><input type="checkbox" id="xbox-launchini" /> Replace launch.ini (atomic rename)</label>
+            <button type="button" id="run-send" class="primary">Send</button>
+          </div>
+        </div>
+        <div class="empty xbox-empty">
+          <div class="empty-art xbox-art" aria-hidden="true"></div>
+          <strong>Connect to your console</strong>
+          <p>Turn on the FTP server in Aurora (or run XeXMenu / DashLaunch), enter the IP shown on the console and press Connect. Default login: xboxftp / xboxftp.</p>
+        </div>
+      </div>
+      <footer>
+        <button type="button" class="primary close-modal">Done</button>
+      </footer>
+    </section>
+
+    <section class="modal hidden" id="modal-archive">
+      <header>
+        <h2>Create archive</h2>
+      </header>
+      <p class="note">Pack files you already have into a ZIP or 7Z. Nothing is uploaded.</p>
+      <div class="row">
+        <button type="button" id="pick-archive-inputs">+ Add files…</button>
+        <button type="button" id="pick-archive-out" class="ghost">Save archive as…</button>
+      </div>
+      <ul class="file-list" id="pack-files"></ul>
+      <p class="status" id="pack-out"></p>
+      <footer>
+        <button type="button" id="run-pack" class="ghost">Create</button>
+        <button type="button" class="primary close-modal">Done</button>
+      </footer>
+    </section>
+
+    <section class="modal hidden" id="modal-dlc">
+      <header>
+        <h2>Install DLC</h2>
+      </header>
+      <p class="note">DLC goes to <code>Content/0000000000000000/{TitleID}/00000002</code>. Title updates use <code>000B0000</code>. Packages are identified from the CON/LIVE/PIRS header.</p>
+      <div class="row">
+        <button type="button" id="pick-packages">Choose DLC / TU files</button>
+        <input id="content-root" class="grow" placeholder="Library or USB root" />
+        <button type="button" id="pick-content-root" class="ghost">Choose</button>
+      </div>
+      <ul class="results" id="content-results"></ul>
+      <footer>
+        <button type="button" id="run-place" class="ghost">Place automatically</button>
+        <button type="button" class="primary close-modal">Done</button>
+      </footer>
+    </section>
+
+    <section class="modal hidden" id="modal-settings">
+      <header>
+        <h2>Settings</h2>
+      </header>
+      <label>Game library folders
+        <input id="library-root" placeholder="GOD games or USB Content folder" />
+      </label>
+      <div class="row">
+        <button type="button" id="pick-library" class="ghost">Add folder</button>
+      </div>
+      <label>USB / apps folder
+        <input id="usb-dest" />
+      </label>
+      <label class="tiny">Theme
+        <select id="theme-select">
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+          <option value="system">System</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="discord-presence" checked /> Show Unpack on Discord (Rich Presence)</label>
+      <dl class="meta" id="settings-meta"></dl>
+      <footer>
+        <button type="button" id="save-settings" class="ghost">Save</button>
+        <button type="button" class="primary close-modal">Done</button>
+      </footer>
+    </section>
+
     <script src="app.js"></script>
   </body>
 </html>

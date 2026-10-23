@@ -85,6 +85,15 @@ fn local_ipv4() -> Option<Ipv4Addr> {
     }
 }
 
+pub fn test_login(host: &str, port: u16, user: &str, pass: &str) -> Result<String, String> {
+    if !net::is_lan_host(host) {
+        return Err("Send to Xbox only accepts local network addresses".into());
+    }
+    let client = FtpClient::connect(host, port, user, pass)?;
+    client.close();
+    Ok(format!("Connected to {host}:{port}"))
+}
+
 pub fn send_paths(
     host: &str,
     port: u16,

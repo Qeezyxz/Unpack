@@ -1,84 +1,60 @@
 const invoke = (...args) => window.__TAURI__.core.invoke(...args);
 const listen = (...args) => window.__TAURI__.event.listen(...args);
 
-const views = {
-  extract: ["Extract", "Unpack ZIP, RAR, 7Z, TAR, and more with 7-Zip."],
-  convert: ["Convert ISO", "ISO → Games on Demand or an extracted XEX folder, then verify."],
-  library: ["Game Library", "Search the built-in TitleID database and scan folders on disk."],
-  usb: ["USB copy", "Copy to a stick with FAT32 checks and hash verification."],
-  content: ["DLC / Title Updates", "Read STFS headers and place packages in the Xbox Content layout."],
-  mods: ["Mod menus", "Manage a local mods folder and copy it where you need it."],
-  downloads: ["Downloader", "HTTP download with resume and optional SHA-1 / SHA-256 check."],
-  homebrew: ["Homebrew tools", "Browse a local tools folder (Aurora, XeXMenu, DashLaunch, …)."],
-  xbox: ["Send to Xbox", "FTP to Aurora / XeXMenu / DashLaunch on the local network only."],
-  settings: ["Settings", "Paths, theme, and toolchain status."],
-};
+const HOMEBREW = [
+  { name: "Aurora Dashboard", cat: "Dashboards & File Explorers", blurb: "Feature-rich custom dashboard for RGH/JTAG consoles (game scanning, covers, scripts).", url: "https://consolemods.org/wiki/Xbox_360:Aurora" },
+  { name: "XeXMenu 1.2", cat: "Dashboards & File Explorers", blurb: "Classic file manager / launcher used as a backup dashboard on modded consoles.", url: "https://consolemods.org/wiki/Xbox_360:XeXMenu" },
+  { name: "DashLaunch", cat: "Dashboards & File Explorers", blurb: "Configures launch.ini (default dashboard, plugins, fans) on modded consoles.", url: "https://consolemods.org/wiki/Xbox_360:DashLaunch" },
+  { name: "XE Unshackle", cat: "Dashboards & File Explorers", blurb: "Temporary HV/kernel patch loader for BadUpdate; loads DashLaunch from USB.", url: "https://github.com/Byrom90/XeUnshackle" },
+  { name: "Horizon", cat: "PC Utilities", blurb: "PC content manager for Xbox 360 profiles, saves, and device browsing.", url: "https://www.horizonmb.com/" },
+  { name: "Modio", cat: "PC Utilities", blurb: "PC all-in-one for browsing Xbox 360 USB/HDD content and editing packages.", url: "https://github.com/bboxy/modio" },
+  { name: "Le Fluffie", cat: "PC Utilities", blurb: "Open-source PC tool for profiles, achievements, and package security (rehash/resign).", url: "https://consolemods.org/wiki/Xbox_360:Game_Saves" },
+  { name: "Xbox 360 Hash Block Calculator", cat: "PC Utilities", blurb: "Recalculates STFS hash blocks after editing a package or save.", url: "https://consolemods.org/wiki/Xbox_360:STFS" },
+  { name: "USBXTAFGUI", cat: "PC Utilities", blurb: "Browse, extract, and inject files on Xbox 360-formatted USB drives.", url: "https://github.com/Swizzy/USBXTAFGUI" },
+  { name: "RDR Gamesave Editor", cat: "Save Editors", blurb: "Edit Red Dead Redemption Xbox 360 save games offline.", url: "https://consolemods.org/wiki/Xbox_360:Game_Saves" },
+  { name: "Saints Row save editor", cat: "Save Editors", blurb: "Edit Saints Row Xbox 360 save games offline.", url: "https://www.saintsrowmods.com/" },
+  { name: "WillowTree (Borderlands)", cat: "Save Editors", blurb: "Borderlands save editor for Xbox 360 (characters, items, stats).", url: "https://github.com/mattweidner/WillowTreeSharp" },
+];
 
 const state = {
-  extractFiles: [],
-  convertFiles: [],
   packFiles: [],
-  usbFiles: [],
   xboxFiles: [],
   packageFiles: [],
+  modFiles: [],
   settings: {},
+  packOut: "",
 };
 
 const $ = (id) => document.getElementById(id);
-const logEl = $("log");
 let busy = false;
+let currentView = "extract";
+
+function native() {
+  return Boolean(window.__TAURI__?.core?.invoke);
+}
 
 function log(line) {
-  const time = new Date().toLocaleTimeString();
-  logEl.textContent += `[${time}] ${line}\n`;
-  logEl.scrollTop = logEl.scrollHeight;
   $("job-status").textContent = line;
 }
 
-function setList(id, paths) {
-  const el = $(id);
-  el.innerHTML = "";
-  paths.forEach((p, i) => {
-    const li = document.createElement("li");
-    li.innerHTML = `<span>${p}</span><button data-i="${i}">remove</button>`;
-    li.querySelector("button").onclick = () => {
-      paths.splice(i, 1);
-      setList(id, paths);
-    };
-    el.appendChild(li);
-  });
-}
-
-let currentView = "extract";
-
-function showView(name) {
-  currentView = name;
-  document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
-  $(`view-${name}`).classList.remove("hidden");
-  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
-  $("view-title").textContent = views[name][0];
-  $("view-sub").textContent = views[name][1];
-  setPresence(name, null);
-}
-
 function setPresence(view, job) {
+  currentView = view;
+  if (!native()) return;
   invoke("discord_set_activity", { view, job: job || null }).catch(() => {});
 }
 
 async function pickMany(title, extensions) {
-  const files = (await invoke("pick_files", { title, extensions })) || [];
-  return files.filter(Boolean);
+  if (!native()) return [];
+  return ((await invoke("pick_files", { title, extensions })) || []).filter(Boolean);
 }
 async function pickDir(title) {
+  if (!native()) return null;
   return invoke("pick_folder", { title });
 }
 
 async function remember() {
-  try {
-    await invoke("save_settings", { settings: collectSettings() });
-  } catch (_) {
-    /* ignore */
-  }
+  if (!native()) return;
+  try { await invoke("save_settings", { settings: collectSettings() }); } catch (_) { /* ignore */ }
 }
 
 async function job(label, fn) {
@@ -87,7 +63,8 @@ async function job(label, fn) {
     return;
   }
   busy = true;
-  $("job-status").textContent = label;
+  log(label);
+  $("job-progress").hidden = false;
   setPresence(currentView, label);
   try {
     await fn();
@@ -96,49 +73,258 @@ async function job(label, fn) {
     log(String(e));
   } finally {
     busy = false;
+    $("job-progress").hidden = true;
     setPresence(currentView, null);
   }
 }
 
-function bindDrop(el, onPaths) {
-  el.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    el.classList.add("over");
+function isIso(path) {
+  return /\.(iso|000)$/i.test(path);
+}
+
+function openModal(name) {
+  closeModal();
+  $("overlay").classList.remove("hidden");
+  $(`modal-${name}`).classList.remove("hidden");
+  const view = { library: "library", mods: "mods", homebrew: "homebrew", xbox: "xbox", dlc: "content", archive: "extract", settings: "settings" }[name] || "extract";
+  setPresence(view, null);
+}
+
+function closeModal() {
+  $("overlay").classList.add("hidden");
+  document.querySelectorAll(".modal").forEach((el) => el.classList.add("hidden"));
+  setPresence("extract", null);
+}
+
+function collectSettings() {
+  return {
+    libraryRoot: $("library-root").value,
+    usbRoot: $("usb-dest").value,
+    downloadDir: $("dl-dest").value,
+    xboxHost: $("xbox-host").value,
+    xboxPort: Number($("xbox-port").value || 21),
+    xboxUser: $("xbox-user").value,
+    xboxPass: $("xbox-pass").value,
+    xboxName: $("xbox-name").value,
+    extractDest: $("extract-dest").value,
+    contentRoot: $("content-root").value,
+    theme: $("theme-select").value,
+    discordPresence: $("discord-presence").checked,
+    autoIso: $("auto-iso").value,
+    extractAuto: $("extract-auto").checked,
+    skipJunk: $("extract-junk").checked,
+    existing: $("extract-existing").value,
+  };
+}
+
+function applySettings(s) {
+  if (!s) return;
+  const set = (id, v) => { if (v != null && $(id)) $(id).value = v; };
+  set("library-root", s.libraryRoot);
+  set("usb-dest", s.usbRoot);
+  set("dl-dest", s.downloadDir);
+  set("xbox-host", s.xboxHost);
+  if (s.xboxPort) $("xbox-port").value = s.xboxPort;
+  set("xbox-user", s.xboxUser);
+  set("xbox-pass", s.xboxPass);
+  set("xbox-name", s.xboxName);
+  set("extract-dest", s.extractDest);
+  set("content-root", s.contentRoot);
+  if (s.autoIso) $("auto-iso").value = s.autoIso;
+  if (typeof s.extractAuto === "boolean") $("extract-auto").checked = s.extractAuto;
+  if (typeof s.skipJunk === "boolean") $("extract-junk").checked = s.skipJunk;
+  if (s.existing) $("extract-existing").value = s.existing;
+  syncIsoBadge();
+}
+
+function syncIsoBadge() {
+  const mode = $("auto-iso").value;
+  const badge = $("auto-badge");
+  if (mode === "off") {
+    badge.textContent = "ISO OFF";
+    badge.style.color = "var(--muted)";
+  } else {
+    badge.textContent = `AUTO ${mode.toUpperCase()}`;
+    badge.style.color = "var(--green)";
+  }
+}
+
+function setList(id, paths) {
+  const el = $(id);
+  el.innerHTML = "";
+  paths.forEach((p, i) => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span>${p}</span><button type="button">remove</button>`;
+    li.querySelector("button").onclick = () => {
+      paths.splice(i, 1);
+      setList(id, paths);
+    };
+    el.appendChild(li);
   });
-  el.addEventListener("dragleave", () => el.classList.remove("over"));
-  el.addEventListener("drop", (e) => {
-    e.preventDefault();
-    el.classList.remove("over");
-  });
-  el._onPaths = onPaths;
+}
+
+async function handlePaths(paths) {
+  if (!paths?.length) return;
+  const dest = $("extract-dest").value.trim();
+  const isos = paths.filter(isIso);
+  const archives = paths.filter((p) => !isIso(p));
+  if (archives.length) {
+    setList("recent-files", archives.slice());
+    if ($("extract-auto").checked) {
+      if (!dest) {
+        log("Choose a destination folder first.");
+        return;
+      }
+      await job("Extracting…", async () => {
+        const result = await invoke("extract_archives", {
+          archives,
+          dest,
+          skipJunk: $("extract-junk").checked,
+          existing: $("extract-existing").value,
+        });
+        log(`Extracted ${result.length} archive(s).`);
+        await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` });
+      });
+    }
+  }
+  if (isos.length && $("auto-iso").value !== "off") {
+    if (!dest) {
+      log("Choose a destination folder first.");
+      return;
+    }
+    await job("Converting ISO…", async () => {
+      const reports = await invoke("convert_iso", {
+        paths: isos,
+        dest,
+        mode: $("auto-iso").value,
+        trim: true,
+        verify: true,
+        autoCompanions: true,
+      });
+      const list = Array.isArray(reports) ? reports : [reports];
+      for (const report of list) {
+        const discs = report.merged ? ` (${report.discs?.length || 0} discs)` : "";
+        log(`Converted ${report.info?.name || "ISO"}${discs} → ${report.output}`);
+      }
+    });
+  }
+}
+
+function renderHomebrew() {
+  const q = ($("hb-search").value || "").toLowerCase();
+  const cat = $("hb-cat").value;
+  const el = $("hb-cards");
+  el.innerHTML = "";
+  HOMEBREW.filter((t) => (!cat || t.cat === cat) && (!q || `${t.name} ${t.blurb} ${t.cat}`.toLowerCase().includes(q)))
+    .forEach((t) => {
+      const card = document.createElement("article");
+      card.className = "card";
+      const save = t.cat === "Save Editors";
+      card.innerHTML = `<div><h3>${t.name}</h3><span class="tag${save ? " save" : ""}">${t.cat}</span></div><p>${t.blurb}</p><button type="button">Open source page</button>`;
+      card.querySelector("button").onclick = async () => {
+        try { await invoke("open_path", { path: t.url }); }
+        catch (e) { log(String(e)); window.open(t.url, "_blank"); }
+      };
+      el.appendChild(card);
+    });
+}
+
+async function refreshLibrary() {
+  const root = $("library-root").value.trim();
+  const empty = $("library-empty");
+  const list = $("library-results");
+  list.innerHTML = "";
+  if (!root) {
+    empty.classList.remove("hidden");
+    return;
+  }
+  try {
+    const items = await invoke("scan_library", { root });
+    if (!items.length) {
+      empty.classList.remove("hidden");
+      return;
+    }
+    empty.classList.add("hidden");
+    items.forEach((item) => {
+      const li = document.createElement("li");
+      li.innerHTML = `<span>${item.name}</span><span class="muted">${item.kind} ${item.title_id || ""}</span>`;
+      li.onclick = () => {
+        state.xboxFiles = [item.path].filter(Boolean);
+        if (state.xboxFiles.length) {
+          setList("xbox-files", state.xboxFiles);
+          openModal("xbox");
+        }
+      };
+      list.appendChild(li);
+    });
+    log(`Found ${items.length} item(s).`);
+  } catch (e) {
+    empty.classList.remove("hidden");
+    log(String(e));
+  }
 }
 
 async function init() {
-  document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
-  document.querySelectorAll("[data-drop]").forEach((el) => bindDrop(el, null));
+  document.querySelectorAll("[data-modal]").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      e.preventDefault();
+      openModal(b.dataset.modal);
+      if (b.dataset.modal === "library") refreshLibrary();
+      if (b.dataset.modal === "homebrew") renderHomebrew();
+    });
+  });
+  document.querySelectorAll(".close-modal").forEach((b) => b.addEventListener("click", closeModal));
+  $("overlay").onclick = closeModal;
 
-  $("theme-select").value = localStorage.getItem("unpack.theme") || "system";
+  $("theme-select").value = localStorage.getItem("unpack.theme") || "dark";
   $("theme-select").onchange = () => {
     localStorage.setItem("unpack.theme", $("theme-select").value);
     window.__applyTheme();
   };
+  $("auto-iso").onchange = syncIsoBadge;
+  $("iso-mode-btn").onclick = () => {
+    const order = ["god", "xex", "off"];
+    const i = order.indexOf($("auto-iso").value);
+    $("auto-iso").value = order[(i + 1) % order.length];
+    syncIsoBadge();
+  };
+
+  const cats = [...new Set(HOMEBREW.map((t) => t.cat))];
+  cats.forEach((c) => {
+    const o = document.createElement("option");
+    o.value = c;
+    o.textContent = c;
+    $("hb-cat").appendChild(o);
+  });
+  $("hb-search").oninput = renderHomebrew;
+  $("hb-cat").onchange = renderHomebrew;
+  renderHomebrew();
+
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.onclick = () => {
+      tab.parentElement.querySelectorAll(".tab").forEach((t) => t.classList.remove("on"));
+      tab.classList.add("on");
+      ["mods-files", "mods-dl", "mods-names"].forEach((id) => $(id).classList.toggle("hidden", tab.dataset.tab !== id));
+    };
+  });
 
   try {
-    const meta = await invoke("app_meta");
-    $("meta-line").textContent = `v${meta.version} · ${meta.title_count.toLocaleString()} TitleIDs`;
-    $("settings-meta").innerHTML = `
-      <dt>Version</dt><dd>${meta.version}</dd>
-      <dt>TitleIDs</dt><dd>${meta.title_count}</dd>
-      <dt>7-Zip</dt><dd>${meta.seven_zip || "not found (put 7za.exe next to Unpack.exe)"}</dd>
-      <dt>Config</dt><dd>${meta.config_dir}</dd>`;
-    state.settings = await invoke("load_settings");
-    applySettings(state.settings);
-    const presenceOn = state.settings?.discordPresence !== false;
-    $("discord-presence").checked = presenceOn;
-    await invoke("discord_set_enabled", { enabled: presenceOn }).catch(() => {});
-    setPresence(currentView, null);
+    if (native()) {
+      const meta = await invoke("app_meta");
+      $("settings-meta").innerHTML = `
+        <dt>Version</dt><dd>${meta.version}</dd>
+        <dt>TitleIDs</dt><dd>${meta.title_count.toLocaleString()}</dd>
+        <dt>7-Zip</dt><dd>${meta.seven_zip || "not found (put 7za.exe next to Unpack.exe)"}</dd>
+        <dt>Config</dt><dd>${meta.config_dir}</dd>`;
+      state.settings = await invoke("load_settings");
+      applySettings(state.settings);
+      const presenceOn = state.settings?.discordPresence !== false;
+      $("discord-presence").checked = presenceOn;
+      await invoke("discord_set_enabled", { enabled: presenceOn }).catch(() => {});
+      setPresence("extract", null);
+    }
   } catch (err) {
-    log(`Running without native bridge (${err}). Open via \`npx tauri dev\`.`);
+    log(`Open via Unpack.exe / npx tauri dev (${err}).`);
   }
 
   if (window.__TAURI__?.event) {
@@ -151,241 +337,138 @@ async function init() {
     try {
       const webview = window.__TAURI__.webview.getCurrentWebview();
       webview.onDragDropEvent((event) => {
-        if (event.payload.type === "drop") {
-          const paths = event.payload.paths || [];
-          const view = document.querySelector(".view:not(.hidden)").id.replace("view-", "");
-          ingestDrop(view, paths);
-        }
+        if (event.payload.type === "drop") handlePaths(event.payload.paths || []);
       });
-    } catch (_) {
-      /* older webview API */
-    }
+    } catch (_) { /* older webview */ }
   }
 
-  bindExtract();
-  bindConvert();
-  bindLibrary();
-  bindUsb();
-  bindContent();
-  bindMods();
-  bindDownloads();
-  bindHomebrew();
-  bindXbox();
-  bindSettings();
-  document.addEventListener("keydown", onKeys);
-  log("Unpack ready. Local files only — nothing is uploaded.");
-}
-
-function ingestDrop(view, paths) {
-  if (view === "extract") {
-    state.extractFiles.push(...paths);
-    setList("extract-files", state.extractFiles);
-  } else if (view === "convert") {
-    state.convertFiles.push(...paths);
-    setList("iso-files", state.convertFiles);
-    $("iso-path").value = state.convertFiles[0] || paths[0] || "";
-  } else if (view === "usb") {
-    state.usbFiles.push(...paths);
-    setList("usb-sources", state.usbFiles);
-  } else if (view === "xbox") {
-    state.xboxFiles.push(...paths);
-    setList("xbox-files", state.xboxFiles);
-  } else if (view === "content") {
-    state.packageFiles.push(...paths);
-  }
-}
-
-function applySettings(s) {
-  if (!s) return;
-  if (s.libraryRoot) $("library-root").value = s.libraryRoot;
-  if (s.usbRoot) $("usb-dest").value = s.usbRoot;
-  if (s.downloadDir) $("dl-dest").value = s.downloadDir;
-  if (s.xboxHost) $("xbox-host").value = s.xboxHost;
-  if (s.xboxPort) $("xbox-port").value = s.xboxPort;
-  if (s.xboxUser) $("xbox-user").value = s.xboxUser;
-  if (s.xboxPass) $("xbox-pass").value = s.xboxPass;
-  if (s.xboxDest) $("xbox-dest").value = s.xboxDest;
-  if (s.extractDest) $("extract-dest").value = s.extractDest;
-  if (s.contentRoot) $("content-root").value = s.contentRoot;
-  if (s.modsRoot) $("mods-root").value = s.modsRoot;
-  if (s.homebrewRoot) $("hb-root").value = s.homebrewRoot;
-}
-
-function collectSettings() {
-  return {
-    libraryRoot: $("library-root").value,
-    usbRoot: $("usb-dest").value,
-    downloadDir: $("dl-dest").value,
-    xboxHost: $("xbox-host").value,
-    xboxPort: Number($("xbox-port").value || 21),
-    xboxUser: $("xbox-user").value,
-    xboxPass: $("xbox-pass").value,
-    xboxDest: $("xbox-dest").value,
-    extractDest: $("extract-dest").value,
-    contentRoot: $("content-root").value,
-    modsRoot: $("mods-root").value,
-    homebrewRoot: $("hb-root").value,
-    theme: $("theme-select").value,
-    discordPresence: $("discord-presence").checked,
-  };
-}
-
-function bindExtract() {
-  $("pick-archives").onclick = async () => {
+  const drop = $("drop-zone");
+  drop.addEventListener("click", async () => {
     const files = await pickMany("Archives", ["zip", "rar", "7z", "tar", "gz", "xz", "iso"]);
-    state.extractFiles.push(...files);
-    setList("extract-files", state.extractFiles);
-  };
+    await handlePaths(files);
+  });
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("over");
+  });
+
   $("pick-extract-dest").onclick = async () => {
     const d = await pickDir("Extract to");
     if (d) $("extract-dest").value = d;
   };
-  $("run-extract").onclick = () => job("Extracting…", async () => {
-    if (!state.extractFiles.length || !$("extract-dest").value) throw new Error("Choose archives and a destination.");
-    const result = await invoke("extract_archives", { archives: state.extractFiles, dest: $("extract-dest").value });
-    log(`Extracted ${result.length} archive(s).`);
-    await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` });
+  $("sample-zip").onclick = () => job("Creating sample ZIP…", async () => {
+    const dest = $("extract-dest").value.trim();
+    if (!dest) throw new Error("Choose a destination folder first.");
+    const inputs = await pickMany("Pick any small file to pack as a sample");
+    if (!inputs.length) throw new Error("Pick a file to wrap in a sample ZIP, or drop a real archive.");
+    const out = `${dest.replace(/[\\/]+$/, "")}/Unpack-sample.zip`;
+    await invoke("create_archive", { inputs, dest: out });
+    await handlePaths([out]);
   });
-  $("pick-archive-inputs").onclick = async () => {
-    state.packFiles = await pickMany("Files to pack");
-    log(`Packing ${state.packFiles.length} item(s).`);
-  };
-  let packOut = "";
-  $("pick-archive-out").onclick = async () => {
-    packOut = await invoke("pick_save", { title: "Save archive", defaultName: "archive.7z" });
-    if (packOut) log(`Archive will be ${packOut}`);
-  };
-  $("run-pack").onclick = () => job("Creating archive…", async () => {
-    if (!state.packFiles.length || !packOut) throw new Error("Choose files and an archive name.");
-    const result = await invoke("create_archive", { inputs: state.packFiles, dest: packOut });
-    log(`Created ${result.archive}`);
-  });
-}
 
-function bindConvert() {
-  $("pick-iso").onclick = async () => {
-    const files = await pickMany("Xbox ISO", ["iso", "ISO", "000"]);
-    if (files.length) {
-      state.convertFiles.push(...files);
-      setList("iso-files", state.convertFiles);
-      $("iso-path").value = state.convertFiles[0];
-    }
-  };
-  $("pick-iso-dest").onclick = async () => {
-    const d = await pickDir("Output folder");
-    if (d) $("iso-dest").value = d;
-  };
-  $("inspect-iso").onclick = async () => {
-    const paths = convertPaths();
-    if (!paths.length) {
-      log("Choose an ISO first.");
-      return;
-    }
-    try {
-      const infos = [];
-      for (const path of paths) {
-        infos.push(await invoke("inspect_iso", { path }));
-      }
-      $("iso-info").textContent = JSON.stringify(infos, null, 2);
-      infos.forEach((info) => log(`ISO disc ${info.disc_number}/${info.disc_count} ${info.title_id} ${info.name}`));
-    } catch (e) {
-      $("iso-info").textContent = String(e);
-      log(String(e));
-    }
-  };
-  $("run-convert").onclick = () => job("Converting ISO…", async () => {
-    const paths = convertPaths();
-    if (!paths.length) throw new Error("Choose Disc 1 (and Disc 2 if you have it).");
-    const mode = document.querySelector("input[name=iso-mode]:checked").value;
-    const reports = await invoke("convert_iso", {
-      paths,
-      dest: $("iso-dest").value,
-      mode,
-      trim: $("iso-trim").checked,
-      verify: $("iso-verify").checked,
-      autoCompanions: $("iso-companions").checked,
-    });
-    const list = Array.isArray(reports) ? reports : [reports];
-    $("iso-info").textContent = JSON.stringify(list, null, 2);
-    for (const report of list) {
-      const discs = report.merged ? ` (${report.discs?.length || 0} discs merged)` : "";
-      log(`Converted ${report.info.name}${discs} → ${report.output}`);
-      await invoke("notify", { title: "Unpack", body: `Converted ${report.info.name}${discs}` });
-    }
-  });
-}
-
-function convertPaths() {
-  const listed = state.convertFiles.filter(Boolean);
-  const one = $("iso-path").value.trim();
-  if (one && !listed.includes(one)) listed.unshift(one);
-  return listed;
-}
-
-function bindLibrary() {
-  let timer;
-  $("title-search").oninput = () => {
-    clearTimeout(timer);
-    timer = setTimeout(runSearch, 160);
-  };
-  async function runSearch() {
-    const rows = await invoke("search_titles", { query: $("title-search").value, limit: 80 });
-    const el = $("title-results");
-    el.innerHTML = "";
-    rows.forEach((r) => {
-      const li = document.createElement("li");
-      li.innerHTML = `<span>${r.name}</span><span class="muted">${r.title_id} · ${r.title_type}</span>`;
-      el.appendChild(li);
-    });
-  }
-  runSearch().catch(() => {});
   $("pick-library").onclick = async () => {
-    const d = await pickDir("Library folder");
+    const d = await pickDir("Game library folder");
     if (d) $("library-root").value = d;
   };
-  $("scan-library").onclick = () => job("Scanning library…", async () => {
-    const items = await invoke("scan_library", { root: $("library-root").value });
-    const el = $("library-results");
-    el.innerHTML = "";
-    items.forEach((item) => {
-      const li = document.createElement("li");
-      li.innerHTML = `<span>${item.name}</span><span class="muted">${item.kind} ${item.title_id || ""}</span>`;
-      el.appendChild(li);
-    });
-    log(`Found ${items.length} item(s).`);
-  });
-}
+  $("scan-library").onclick = () => job("Scanning library…", refreshLibrary);
 
-function bindUsb() {
-  $("pick-usb").onclick = async () => {
-    const d = await pickDir("USB destination");
-    if (d) $("usb-dest").value = d;
+  $("pick-mod-files").onclick = async () => {
+    const files = await pickMany("Mod files");
+    state.modFiles.push(...files);
+    $("mods-empty").classList.toggle("hidden", state.modFiles.length > 0);
+    setList("mods-list", state.modFiles);
   };
-  document.querySelector("#view-usb .drop").addEventListener("click", async () => {
-    const files = await pickMany("Copy these");
-    state.usbFiles.push(...files);
-    setList("usb-sources", state.usbFiles);
-  });
-  $("check-usb").onclick = async () => {
-    try {
-      const info = await invoke("volume_info", { path: $("usb-dest").value });
-      $("usb-info").textContent = JSON.stringify(info, null, 2);
-      if (info.is_fat32) log("Destination is FAT32 — files over 4 GiB will be rejected.");
-    } catch (e) { log(String(e)); }
+  $("pick-mod-folder").onclick = async () => {
+    const d = await pickDir("Mods folder");
+    if (d) {
+      state.modFiles.push(d);
+      $("mods-empty").classList.toggle("hidden", true);
+      setList("mods-list", state.modFiles);
+    }
   };
-  $("run-usb").onclick = () => job("Copying to USB…", async () => {
-    const report = await invoke("copy_to_usb", {
-      sources: state.usbFiles,
-      dest: $("usb-dest").value,
-      verify: $("usb-verify").checked,
-      overwriteProtected: false,
+  $("pick-dl-dest").onclick = async () => {
+    const d = await pickDir("Download folder");
+    if (d) $("dl-dest").value = d;
+  };
+  $("run-download").onclick = () => job("Downloading…", async () => {
+    const report = await invoke("download_url", {
+      url: $("dl-url").value,
+      destDir: $("dl-dest").value,
+      expectedHash: $("dl-hash").value || null,
     });
-    $("usb-info").textContent = JSON.stringify(report, null, 2);
-    log(`Copied ${report.copied} file(s), skipped ${report.skipped_protected} protected.`);
+    log(`Downloaded ${report.bytes} bytes to ${report.path}`);
   });
-}
 
-function bindContent() {
+  let searchTimer;
+  $("title-search").oninput = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(async () => {
+      try {
+        const rows = await invoke("search_titles", { query: $("title-search").value, limit: 80 });
+        const el = $("title-results");
+        el.innerHTML = "";
+        rows.forEach((r) => {
+          const li = document.createElement("li");
+          li.innerHTML = `<span>${r.name}</span><span>${r.title_id}</span>`;
+          el.appendChild(li);
+        });
+      } catch (e) { log(String(e)); }
+    }, 160);
+  };
+
+  $("pick-xbox-files").onclick = async () => {
+    const files = await pickMany("Send to Xbox");
+    state.xboxFiles.push(...files);
+    setList("xbox-files", state.xboxFiles);
+  };
+  $("pick-xbox-folder").onclick = async () => {
+    const d = await pickDir("Folder to send");
+    if (d) {
+      state.xboxFiles.push(d);
+      setList("xbox-files", state.xboxFiles);
+    }
+  };
+  $("xbox-from-library").onclick = () => openModal("library");
+  $("xbox-test").onclick = () => job("Connecting…", async () => {
+    const msg = await invoke("xbox_test", {
+      host: $("xbox-host").value,
+      port: Number($("xbox-port").value || 21),
+      user: $("xbox-user").value,
+      pass: $("xbox-pass").value,
+    });
+    log(msg);
+  });
+  $("xbox-save").onclick = remember;
+  $("run-send").onclick = () => job("Sending to Xbox…", async () => {
+    const report = await invoke("send_to_xbox", {
+      host: $("xbox-host").value,
+      port: Number($("xbox-port").value || 21),
+      user: $("xbox-user").value,
+      pass: $("xbox-pass").value,
+      dest: "/Hdd1/Games",
+      paths: state.xboxFiles,
+      includeLaunchIni: $("xbox-launchini").checked,
+    });
+    log(`Sent ${report.uploaded} file(s) to ${report.host}.`);
+    (report.warnings || []).forEach(log);
+  });
+
+  $("pick-archive-inputs").onclick = async () => {
+    state.packFiles = await pickMany("Files to pack");
+    setList("pack-files", state.packFiles);
+  };
+  $("pick-archive-out").onclick = async () => {
+    state.packOut = await invoke("pick_save", { title: "Save archive", defaultName: "archive.7z" });
+    if (state.packOut) $("pack-out").textContent = state.packOut;
+  };
+  $("run-pack").onclick = () => job("Creating archive…", async () => {
+    if (!state.packFiles.length || !state.packOut) throw new Error("Choose files and an archive name.");
+    const result = await invoke("create_archive", { inputs: state.packFiles, dest: state.packOut });
+    log(`Created ${result.archive}`);
+  });
+
   $("pick-packages").onclick = async () => {
     state.packageFiles = await pickMany("DLC / Title Updates");
     log(`${state.packageFiles.length} package(s) selected.`);
@@ -401,132 +484,33 @@ function bindContent() {
     for (const path of state.packageFiles) {
       const item = await invoke("place_content", { path, libraryRoot: $("content-root").value });
       const li = document.createElement("li");
-      li.innerHTML = `<span>${item.name || path}</span><span class="muted">${item.detail}</span>`;
+      li.innerHTML = `<span>${item.name || path}</span><span>${item.detail}</span>`;
       el.appendChild(li);
-      log(item.detail);
     }
   });
-}
 
-function bindMods() {
-  $("pick-mods").onclick = async () => {
-    const d = await pickDir("Mods folder");
-    if (d) $("mods-root").value = d;
-  };
-  $("pick-mods-dest").onclick = async () => {
-    const d = await pickDir("Copy mods to");
-    if (d) $("mods-dest").value = d;
-  };
-  $("list-mods").onclick = async () => {
-    try {
-      const names = await invoke("list_dir", { path: $("mods-root").value });
-      $("mods-list").innerHTML = names.map((n) => `<li><span>${n}</span></li>`).join("");
-    } catch (e) { log(String(e)); }
-  };
-  $("copy-mods").onclick = () => job("Copying mods…", async () => {
-    const report = await invoke("copy_to_usb", {
-      sources: [$("mods-root").value],
-      dest: $("mods-dest").value,
-      verify: true,
-      overwriteProtected: false,
-    });
-    log(`Copied mods (${report.copied} files).`);
-  });
-}
-
-function bindDownloads() {
-  $("pick-dl-dest").onclick = async () => {
-    const d = await pickDir("Download folder");
-    if (d) $("dl-dest").value = d;
-  };
-  $("run-download").onclick = () => job("Downloading…", async () => {
-    const report = await invoke("download_url", {
-      url: $("dl-url").value,
-      destDir: $("dl-dest").value,
-      expectedHash: $("dl-hash").value || null,
-    });
-    log(`Downloaded ${report.bytes} bytes to ${report.path}${report.resumed ? " (resumed)" : ""}`);
-  });
-}
-
-function bindHomebrew() {
-  $("pick-hb").onclick = async () => {
-    const d = await pickDir("Homebrew folder");
-    if (d) $("hb-root").value = d;
-  };
-  $("list-hb").onclick = async () => {
-    try {
-      const names = await invoke("list_dir", { path: $("hb-root").value });
-      $("hb-list").innerHTML = names.map((n) => `<li><span>${n}</span></li>`).join("");
-    } catch (e) { log(String(e)); }
-  };
-  $("open-hb").onclick = async () => {
-    try { await invoke("open_path", { path: $("hb-root").value }); }
-    catch (e) { log(String(e)); }
-  };
-}
-
-function bindXbox() {
-  $("pick-xbox-files").onclick = async () => {
-    const files = await pickMany("Send to Xbox");
-    state.xboxFiles.push(...files);
-    setList("xbox-files", state.xboxFiles);
-  };
-  $("discover-xbox").onclick = () => job("Scanning LAN…", async () => {
-    log("Scanning local subnet for FTP on port 21…");
-    const hosts = await invoke("discover_xbox", { port: Number($("xbox-port").value || 21) });
-    const el = $("xbox-hosts");
-    el.innerHTML = "";
-    if (!hosts.length) log("No FTP listeners found. Enter the IP from Aurora.");
-    hosts.forEach((h) => {
-      const li = document.createElement("li");
-      li.innerHTML = `<span>${h.ip}:${h.port}</span><span class="muted">${h.banner || "FTP"}</span>`;
-      li.onclick = () => { $("xbox-host").value = h.ip; };
-      el.appendChild(li);
-    });
-  });
-  $("run-send").onclick = () => job("Sending to Xbox…", async () => {
-    const report = await invoke("send_to_xbox", {
-      host: $("xbox-host").value,
-      port: Number($("xbox-port").value || 21),
-      user: $("xbox-user").value,
-      pass: $("xbox-pass").value,
-      dest: $("xbox-dest").value,
-      paths: state.xboxFiles,
-      includeLaunchIni: $("xbox-launchini").checked,
-    });
-    log(`Sent ${report.uploaded} file(s) to ${report.host}. Protected skips: ${report.skipped_protected}.`);
-    report.warnings.forEach(log);
-  });
-}
-
-function bindSettings() {
   $("discord-presence").onchange = async () => {
+    if (!native()) return;
     const enabled = $("discord-presence").checked;
-    try {
-      await invoke("discord_set_enabled", { enabled });
-      await remember();
-      log(enabled ? "Discord Rich Presence on." : "Discord Rich Presence off.");
-    } catch (e) { log(String(e)); }
+    await invoke("discord_set_enabled", { enabled }).catch(() => {});
+    await remember();
   };
-  $("save-settings").onclick = async () => {
-    try {
-      await invoke("save_settings", { settings: collectSettings() });
-      log("Settings saved.");
-    } catch (e) { log(String(e)); }
-  };
-  $("show-notify").onclick = async () => {
-    try { await invoke("notify", { title: "Unpack", body: "Notifications are working." }); }
-    catch (e) { log(String(e)); }
-  };
-}
+  $("save-settings").onclick = remember;
 
-function onKeys(e) {
-  if (e.target.matches("input, textarea, select")) return;
-  const map = { Digit1: "extract", Digit2: "convert", Digit3: "library", Digit4: "usb", Digit5: "content", Digit6: "mods", Digit7: "downloads", Digit8: "homebrew", Digit9: "xbox", Digit0: "settings" };
-  if (e.ctrlKey && map[e.code]) {
-    e.preventDefault();
-    showView(map[e.code]);
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
+      e.preventDefault();
+      $("drop-zone").click();
+    }
+    if (e.key === "Escape") closeModal();
+  });
+
+  syncIsoBadge();
+  const preview = new URLSearchParams(location.search).get("modal");
+  if (preview) {
+    openModal(preview);
+    if (preview === "library") refreshLibrary();
+    if (preview === "homebrew") renderHomebrew();
   }
 }
 

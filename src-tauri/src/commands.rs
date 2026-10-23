@@ -138,21 +138,42 @@ pub fn notify(app: AppHandle, title: String, body: String) -> Result<(), String>
 
 #[tauri::command]
 pub fn open_path(app: AppHandle, path: String) -> Result<(), String> {
-    app.opener()
-        .open_path(path, None::<&str>)
-        .map_err(|e| e.to_string())
+    if path.starts_with("http://") || path.starts_with("https://") {
+        app.opener()
+            .open_url(path, None::<&str>)
+            .map_err(|e| e.to_string())
+    } else {
+        app.opener()
+            .open_path(path, None::<&str>)
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
-pub async fn extract_archives(app: AppHandle, archives: Vec<String>, dest: String) -> Result<Vec<archive::ArchiveResult>, String> {
+pub fn xbox_test(host: String, port: u16, user: String, pass: String) -> Result<String, String> {
+    xbox::test_login(&host, port, &user, &pass)
+}
+
+#[tauri::command]
+pub async fn extract_archives(
+    app: AppHandle,
+    archives: Vec<String>,
+    dest: String,
+    skip_junk: Option<bool>,
+    existing: Option<String>,
+) -> Result<Vec<archive::ArchiveResult>, String> {
     if dest.trim().is_empty() {
         return Err("choose a destination folder".into());
     }
     progress::emit(&app, "extract", "Extracting archives", 0, archives.len() as u64);
     let app2 = app.clone();
+    let opts = archive::ExtractOptions {
+        skip_junk: skip_junk.unwrap_or(true),
+        existing: existing.unwrap_or_else(|| "number".into()),
+    };
     let result = tauri::async_runtime::spawn_blocking(move || {
         let paths: Vec<PathBuf> = archives.into_iter().map(PathBuf::from).collect();
-        archive::extract_archives(&paths, &PathBuf::from(dest))
+        archive::extract_archives_with(&paths, &PathBuf::from(dest), &opts)
     })
     .await
     .map_err(|e| e.to_string())??;

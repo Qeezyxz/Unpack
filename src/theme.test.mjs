@@ -24,6 +24,7 @@ function run(prefersLight, stored) {
 }
 
 const cases = [
+  [true, null, "dark"],
   [true, "system", "light"],
   [false, "system", "dark"],
   [true, "dark", "dark"],
@@ -36,4 +37,4 @@ for (const [prefers, stored, expect] of cases) {
     process.exit(1);
   }
 }
-console.log("theme.js: 4/4 PASS");
+console.log("theme.js: 5/5 PASS");

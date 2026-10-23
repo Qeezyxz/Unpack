@@ -52,24 +52,106 @@ fn on_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+#[derive(Debug, Clone)]
+pub struct ExtractOptions {
+    pub skip_junk: bool,
+    pub existing: String,
+}
+
+impl Default for ExtractOptions {
+    fn default() -> Self {
+        Self {
+            skip_junk: true,
+            existing: "number".into(),
+        }
+    }
+}
+
 pub fn extract_archives(archives: &[PathBuf], dest: &Path) -> Result<Vec<ArchiveResult>, String> {
+    extract_archives_with(archives, dest, &ExtractOptions::default())
+}
+
+pub fn extract_archives_with(
+    archives: &[PathBuf],
+    dest: &Path,
+    opts: &ExtractOptions,
+) -> Result<Vec<ArchiveResult>, String> {
     let seven = find_seven_zip().ok_or_else(|| {
         "7-Zip was not found. Put 7za.exe next to Unpack.exe, or install 7-Zip / p7zip and set UNPACK_7ZA.".to_string()
     })?;
     fs_create(dest)?;
     let mut results = Vec::new();
     for archive in archives {
-        let status = run_7z(
-            &seven,
-            &["x", "-y", &format!("-o{}", dest.display()), "--", &archive.display().to_string()],
-        )?;
+        let stem = archive_stem(archive);
+        let Some(out) = unique_dir(dest, &stem, &opts.existing)? else {
+            results.push(ArchiveResult {
+                archive: archive.display().to_string(),
+                destination: dest.join(&stem).display().to_string(),
+                status: "skipped (folder already exists)".into(),
+            });
+            continue;
+        };
+        fs_create(&out)?;
+        let mut args = vec!["x".into(), "-y".into(), format!("-o{}", out.display())];
+        if opts.skip_junk {
+            args.extend(junk_excludes());
+        }
+        args.push("--".into());
+        args.push(archive.display().to_string());
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let status = run_7z(&seven, &arg_refs)?;
         results.push(ArchiveResult {
             archive: archive.display().to_string(),
-            destination: dest.display().to_string(),
+            destination: out.display().to_string(),
             status,
         });
     }
     Ok(results)
+}
+
+fn archive_stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "archive".into())
+}
+
+fn unique_dir(parent: &Path, stem: &str, existing: &str) -> Result<Option<PathBuf>, String> {
+    let first = parent.join(stem);
+    if !first.exists() {
+        return Ok(Some(first));
+    }
+    match existing {
+        "skip" => Ok(None),
+        "overwrite" => Ok(Some(first)),
+        _ => {
+            let mut n = 2u32;
+            loop {
+                let candidate = parent.join(format!("{stem} ({n})"));
+                if !candidate.exists() {
+                    return Ok(Some(candidate));
+                }
+                n += 1;
+                if n > 9_999 {
+                    return Err(format!("too many existing folders named {stem}"));
+                }
+            }
+        }
+    }
+}
+
+fn junk_excludes() -> Vec<String> {
+    [
+        "-xr!__MACOSX",
+        "-x!Thumbs.db",
+        "-x!desktop.ini",
+        "-x!*.DS_Store",
+        "-x!*.nfo",
+        "-x!*.url",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 pub fn create_archive(inputs: &[PathBuf], dest: &Path) -> Result<ArchiveResult, String> {
@@ -141,11 +223,25 @@ mod tests {
             ],
         )
         .unwrap();
-        extract_archives(&[archive], &dest).unwrap();
-        let extracted = std::fs::read_to_string(dest.join("note.txt"))
-            .or_else(|_| std::fs::read_to_string(dest.join("src").join("note.txt")))
+        extract_archives(&[archive.clone()], &dest).unwrap();
+        let folder = dest.join("pack");
+        let extracted = std::fs::read_to_string(folder.join("note.txt"))
+            .or_else(|_| std::fs::read_to_string(folder.join("src").join("note.txt")))
             .unwrap();
         assert_eq!(extracted, "unpack-archive");
+        extract_archives(&[archive], &dest).unwrap();
+        assert!(dest.join("pack (2)").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unique_dir_adds_a_number() {
+        let root = std::env::temp_dir().join(format!("unpack-unique-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Game")).unwrap();
+        let next = unique_dir(&root, "Game", "number").unwrap().unwrap();
+        assert_eq!(next.file_name().unwrap(), "Game (2)");
+        assert!(unique_dir(&root, "Game", "skip").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
