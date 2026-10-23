@@ -181,7 +181,13 @@ fn safe_file_name(raw: &str) -> String {
         })
         .collect();
     let trimmed = cleaned.trim().trim_end_matches(['.', ' ']);
-    trimmed.chars().take(120).collect()
+    let short: String = trimmed.chars().take(120).collect();
+    let short = short.trim_end_matches(['.', ' ']);
+    if crate::paths::is_windows_device_name(short) {
+        format!("_{short}")
+    } else {
+        short.to_string()
+    }
 }
 
 pub fn dest_for_url(dir: &Path, url: &str) -> PathBuf {
@@ -196,6 +202,9 @@ mod tests {
         assert_eq!(super::default_download_name("https://h/a/evil.txt:payload.exe"), "evil.txt_payload.exe");
         assert_eq!(super::default_download_name("https://h/a/name.."), "name");
         assert_eq!(super::default_download_name("https://h/"), "download.bin");
+        assert_eq!(super::default_download_name("https://h/CON"), "_CON");
+        assert_eq!(super::default_download_name("https://h/nul.txt"), "_nul.txt");
+        assert_eq!(super::default_download_name(&format!("https://h/{}. x", "a".repeat(119))), "a".repeat(119));
         assert_eq!(super::default_download_name("https://h/%2e%2e"), "download.bin");
         assert!(super::default_download_name(&format!("https://h/{}", "a".repeat(400))).len() <= 120);
     }
