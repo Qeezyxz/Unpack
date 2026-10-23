@@ -553,6 +553,24 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_with_accented_text_does_not_panic_the_client() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _ = s.write_all("220 hola\r\n".as_bytes());
+            let mut buf = [0u8; 256];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all("\u{e9}\u{e9}\u{e9} contrase\u{f1}a incorrecta\r\n".as_bytes());
+            let _ = s.write_all("\u{e9}\u{e9}1 mas\r\n".as_bytes());
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        let result = std::panic::catch_unwind(|| test_login("127.0.0.1", port, "xbox", "xbox"));
+        assert!(result.is_ok(), "the client panicked on a multi-byte reply");
+    }
+
+    #[test]
     fn refuses_public_hosts() {
         let err = send_paths(
             "8.8.8.8",

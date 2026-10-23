@@ -70,7 +70,9 @@ impl FtpClient {
             }
             text.push_str(&line);
             if line.len() >= 4 {
-                let code: u16 = line[0..3].parse().unwrap_or(0);
+                // `get` because a reply with accented text in its first bytes
+                // must not panic on a character boundary.
+                let code: u16 = line.get(0..3).and_then(|c| c.parse().ok()).unwrap_or(0);
                 if line.as_bytes()[3] == b' ' {
                     return Ok((code, text));
                 }
