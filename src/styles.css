@@ -12,6 +12,7 @@
   --warn: #ffb24a;
   --danger: #e07a8a;
   --shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
 }
 [data-theme="light"] {
   --bg: #eef2f7;
@@ -27,6 +28,7 @@
   --warn: #9a6b00;
   --danger: #c62828;
   --shadow: 0 18px 50px rgba(16, 24, 32, 0.12);
+  color-scheme: light;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
