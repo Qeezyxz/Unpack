@@ -524,11 +524,14 @@ mod tests {
         let big = blob(3_000_000);
         fs::write(game.join("default.xex"), blob(9000)).unwrap();
         fs::write(game.join("Data/0000"), &big).unwrap();
+        fs::write(game.join("Data/Café número 2.txt"), b"accents and spaces").unwrap();
         let go = || {
             send_paths("127.0.0.1", port, "xbox", "xbox", "/Hdd1/Games", &[game.clone()], false, |_, _, _| {})
         };
         let first = go().unwrap();
-        assert_eq!(first.uploaded, 2, "{first:?}");
+        assert_eq!(first.uploaded, 3, "{first:?}");
+        let accented = PathBuf::from(&root).join("Hdd1/Games/Real Game/Data/Café número 2.txt");
+        assert_eq!(fs::read(&accented).unwrap(), b"accents and spaces");
         let on_disk = PathBuf::from(&root).join("Hdd1/Games/Real Game/Data/0000");
         assert_eq!(fs::read(&on_disk).unwrap(), big);
         let again = go().unwrap();
