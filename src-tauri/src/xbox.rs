@@ -588,6 +588,38 @@ mod tests {
     }
 
     #[test]
+    fn a_server_that_talks_nonsense_gets_an_error_not_a_panic_or_hang() {
+        use std::io::{Read, Write};
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..60 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let junk: Vec<u8> = (0..(next() % 300) as usize).map(|_| next() as u8).collect();
+            let texty = round % 3 == 0;
+            std::thread::spawn(move || {
+                let Ok((mut s, _)) = listener.accept() else { return };
+                if texty {
+                    let _ = s.write_all(b"220 ready\r\n");
+                    let mut buf = [0u8; 128];
+                    let _ = s.read(&mut buf);
+                    let _ = s.write_all(b"331 ");
+                }
+                let _ = s.write_all(&junk);
+            });
+            let started = std::time::Instant::now();
+            let result = std::panic::catch_unwind(|| test_login("127.0.0.1", port, "xbox", "xbox"));
+            assert!(result.is_ok(), "panic on round {round}");
+            assert!(started.elapsed() < std::time::Duration::from_secs(20), "hang on round {round}");
+        }
+    }
+
+    #[test]
     fn refuses_public_hosts() {
         let err = send_paths(
             "8.8.8.8",
