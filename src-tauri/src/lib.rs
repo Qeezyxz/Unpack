@@ -1,6 +1,7 @@
 mod archive;
 mod commands;
 mod convert;
+mod discord;
 mod download;
 mod ftp;
 mod hashutil;
@@ -26,6 +27,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            app.manage(discord::PresenceHandle::start());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::app_meta,
             commands::load_settings,
@@ -51,6 +56,8 @@ pub fn run() {
             commands::discover_xbox,
             commands::send_to_xbox,
             commands::list_dir,
+            commands::discord_set_activity,
+            commands::discord_set_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Unpack");

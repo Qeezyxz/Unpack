@@ -49,12 +49,20 @@ function setList(id, paths) {
   });
 }
 
+let currentView = "extract";
+
 function showView(name) {
+  currentView = name;
   document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
   $(`view-${name}`).classList.remove("hidden");
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   $("view-title").textContent = views[name][0];
   $("view-sub").textContent = views[name][1];
+  setPresence(name, null);
+}
+
+function setPresence(view, job) {
+  invoke("discord_set_activity", { view, job: job || null }).catch(() => {});
 }
 
 async function pickMany(title, extensions) {
@@ -80,6 +88,7 @@ async function job(label, fn) {
   }
   busy = true;
   $("job-status").textContent = label;
+  setPresence(currentView, label);
   try {
     await fn();
     await remember();
@@ -87,6 +96,7 @@ async function job(label, fn) {
     log(String(e));
   } finally {
     busy = false;
+    setPresence(currentView, null);
   }
 }
 
@@ -123,6 +133,10 @@ async function init() {
       <dt>Config</dt><dd>${meta.config_dir}</dd>`;
     state.settings = await invoke("load_settings");
     applySettings(state.settings);
+    const presenceOn = state.settings?.discordPresence !== false;
+    $("discord-presence").checked = presenceOn;
+    await invoke("discord_set_enabled", { enabled: presenceOn }).catch(() => {});
+    setPresence(currentView, null);
   } catch (err) {
     log(`Running without native bridge (${err}). Open via \`npx tauri dev\`.`);
   }
@@ -212,6 +226,7 @@ function collectSettings() {
     modsRoot: $("mods-root").value,
     homebrewRoot: $("hb-root").value,
     theme: $("theme-select").value,
+    discordPresence: $("discord-presence").checked,
   };
 }
 
@@ -486,6 +501,14 @@ function bindXbox() {
 }
 
 function bindSettings() {
+  $("discord-presence").onchange = async () => {
+    const enabled = $("discord-presence").checked;
+    try {
+      await invoke("discord_set_enabled", { enabled });
+      await remember();
+      log(enabled ? "Discord Rich Presence on." : "Discord Rich Presence off.");
+    } catch (e) { log(String(e)); }
+  };
   $("save-settings").onclick = async () => {
     try {
       await invoke("save_settings", { settings: collectSettings() });

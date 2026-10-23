@@ -1,4 +1,4 @@
-use crate::{archive, convert, download, hashutil, library, progress, stfs, usb, xbox};
+use crate::{archive, convert, discord, download, hashutil, library, progress, stfs, usb, xbox};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -61,7 +61,30 @@ pub fn load_settings(app: AppHandle) -> Result<serde_json::Value, String> {
 pub fn save_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
     let path = settings_path(&app)?;
     std::fs::write(path, serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if let Some(enabled) = settings.get("discordPresence").and_then(|v| v.as_bool()) {
+        if let Some(presence) = app.try_state::<discord::PresenceHandle>() {
+            presence.set_enabled(enabled);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn discord_set_activity(app: AppHandle, view: String, job: Option<String>) -> Result<(), String> {
+    let text = discord::activity_for(&view, job.as_deref());
+    if let Some(presence) = app.try_state::<discord::PresenceHandle>() {
+        presence.update(&text.details, &text.state);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn discord_set_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    if let Some(presence) = app.try_state::<discord::PresenceHandle>() {
+        presence.set_enabled(enabled);
+    }
+    Ok(())
 }
 
 #[tauri::command]
