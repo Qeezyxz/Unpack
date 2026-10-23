@@ -397,6 +397,27 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn copying_onto_the_same_place_never_loses_the_file() {
+        let root = std::env::temp_dir().join(format!("unpack-usb-same-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("games/sub")).unwrap();
+        fs::write(root.join("games/a.bin"), b"keep me").unwrap();
+        fs::write(root.join("games/sub/b.bin"), b"and me").unwrap();
+        let _ = copy_tree(&root.join("games/a.bin"), &root.join("games"), true, false);
+        assert_eq!(fs::read(root.join("games/a.bin")).unwrap(), b"keep me");
+        let _ = copy_tree(&root.join("games"), &root, true, false);
+        assert_eq!(fs::read(root.join("games/a.bin")).unwrap(), b"keep me");
+        assert_eq!(fs::read(root.join("games/sub/b.bin")).unwrap(), b"and me");
+        let leftovers: Vec<_> = fs::read_dir(root.join("games"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.iter().all(|n| !n.contains("unpack-part") && !n.contains(".tmp")), "{leftovers:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_link_loop_ends_with_an_error_not_a_crash() {
