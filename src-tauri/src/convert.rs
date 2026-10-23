@@ -697,6 +697,17 @@ pub fn merge_replace_allowed(dest: &Path) -> bool {
     !name.eq_ignore_ascii_case("default.xex") && !name.eq_ignore_ascii_case("default.xbe")
 }
 
+/// Characters that would escape the folder or that Windows cannot store.
+fn is_unsafe_name_char(c: char) -> bool {
+    matches!(c, '/' | '\\' | '\0' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+}
+
+fn truncated_message(name: &str, got: u64, expected: u64) -> String {
+    format!(
+        "The ISO ends early: {name} should be {expected} bytes but only {got} were there. The file is incomplete or damaged, so nothing was kept for it."
+    )
+}
+
 fn extract_dir(
     iso_path: &Path,
     volume: &VolumeDescriptor,
@@ -717,7 +728,7 @@ fn extract_dir(
         let safe = entry
             .name
             .chars()
-            .map(|c| if matches!(c, '/' | '\\' | '\0') { '_' } else { c })
+            .map(|c| if is_unsafe_name_char(c) { '_' } else { c })
             .collect::<String>();
         let dest_path = dest.join(&safe);
         if let Some(sub) = &entry.subdirectory {
@@ -747,8 +758,14 @@ fn extract_dir(
             {
                 let mut out = File::create(&tmp).map_err(|e| e.to_string())?;
                 let mut limited = (&mut reader).take(entry.size as u64);
-                std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
+                let copied_bytes =
+                    std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
                 out.flush().map_err(|e| e.to_string())?;
+                if copied_bytes != entry.size as u64 {
+                    drop(out);
+                    let _ = fs::remove_file(&tmp);
+                    return Err(truncated_message(&safe, copied_bytes, entry.size as u64));
+                }
             }
             fileops::replace_file(&tmp, &dest_path)?;
             files.push(dest_path.display().to_string());
@@ -928,6 +945,52 @@ mod tests {
             "GOD convert must not write a TitleID folder"
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unsafe_names_are_flattened() {
+        for c in ['/', '\\', ':', '<', '>', '"', '|', '?', '*', '\0'] {
+            assert!(is_unsafe_name_char(c), "{c:?}");
+        }
+        assert!(!is_unsafe_name_char('.'));
+        assert!(!is_unsafe_name_char('a'));
+    }
+
+    #[test]
+    fn truncated_iso_stops_instead_of_saving_a_short_file() {
+        let root = std::env::temp_dir().join(format!(
+            "unpack-truncated-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let iso = root.join("Sample.iso");
+        let dest = root.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        let title = 0x4D5307E6;
+        write_xsf_iso(
+            &iso,
+            &[
+                ("default.xex", minimal_xex(title, 1, 1, 0x11111111, b"XEX")),
+                ("big.bin", vec![7u8; 10_000]),
+            ],
+        );
+        let full = fs::metadata(&iso).unwrap().len();
+        let file = fs::OpenOptions::new().write(true).open(&iso).unwrap();
+        file.set_len(full - 6_000).unwrap();
+        drop(file);
+
+        let err = convert_isos(&[iso], &dest, "xex", false, true, false, |_, _, _| {})
+            .unwrap_err();
+        assert!(err.contains("ends early") && err.contains("big.bin"), "{err}");
+        assert!(
+            fs::read_dir(&dest).unwrap().next().is_none(),
+            "a damaged ISO must not leave a half-extracted folder"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
