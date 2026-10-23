@@ -40,13 +40,33 @@ function native() {
   return Boolean(window.__TAURI__?.core?.invoke);
 }
 
+let toastTimer;
+function setStatus(text) {
+  $("job-status").textContent = text;
+  // The status line sits behind an open dialog, so Connect / Send / Download
+  // results would go unseen. Show them in a toast above it.
+  const toast = $("job-toast");
+  const dialogOpen = !$("overlay").classList.contains("hidden");
+  toast.textContent = text;
+  toast.hidden = !(dialogOpen && text);
+  fadeToast();
+}
+
+function fadeToast() {
+  clearTimeout(toastTimer);
+  const toast = $("job-toast");
+  if (!toast.hidden && !runningJobs.length) {
+    toastTimer = setTimeout(() => { toast.hidden = true; }, 8000);
+  }
+}
+
 function log(line) {
-  $("job-status").textContent = line;
+  setStatus(line);
 }
 
 function showError(message) {
   const text = String(message ?? "").replace(/^Error:\s*/, "").trim() || "Something went wrong.";
-  $("job-status").textContent = "";
+  setStatus("");
   $("job-error-text").textContent = text;
   $("job-error").classList.remove("hidden");
 }
@@ -100,6 +120,7 @@ function showJobs() {
   const bar = $("job-progress");
   if (!runningJobs.length) {
     bar.hidden = true;
+    fadeToast();
     setPresence(currentView, null);
     return;
   }
@@ -139,6 +160,7 @@ function isIso(path) {
 
 function openModal(name) {
   closeModal();
+  $("job-toast").hidden = true;
   $("overlay").classList.remove("hidden");
   $(`modal-${name}`).classList.remove("hidden");
   const view = { library: "library", mods: "mods", homebrew: "homebrew", xbox: "xbox", dlc: "content", archive: "extract", settings: "settings" }[name] || "extract";
@@ -147,6 +169,7 @@ function openModal(name) {
 
 function closeModal() {
   $("overlay").classList.add("hidden");
+  $("job-toast").hidden = true;
   document.querySelectorAll(".modal").forEach((el) => el.classList.add("hidden"));
   setPresence("extract", null);
 }
@@ -423,7 +446,7 @@ async function init() {
       const p = event.payload;
       $("job-progress").max = Math.max(1, p.total);
       $("job-progress").value = p.current;
-      $("job-status").textContent = p.message;
+      setStatus(p.message);
     });
     try {
       const webview = window.__TAURI__.webview.getCurrentWebview();

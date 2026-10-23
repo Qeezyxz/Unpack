@@ -183,6 +183,18 @@ const calls = (cmd) => window.__calls.filter((c) => c.cmd === cmd);
   check("failed save says so", /Could not save/.test($$("save-settings").textContent), $$("save-settings").textContent);
   window.__behaviour.save_settings = () => Promise.resolve(null);
 
+  // A result must be visible while a dialog is open
+  document.querySelector('[data-modal="xbox"]').click();
+  window.__behaviour.xbox_test = () => Promise.resolve("Connected to 192.168.1.50");
+  $$("xbox-test").click();
+  await sleep(80);
+  check("connect result shows in a toast above the dialog", !$$("job-toast").hidden && /Connected to 192/.test($$("job-toast").textContent), $$("job-toast").textContent + " hidden=" + $$("job-toast").hidden);
+  $$("overlay").click();
+  check("toast goes away with the dialog", $$("job-toast").hidden, "");
+  $$("xbox-test").click();
+  await sleep(80);
+  check("no toast when no dialog is open", $$("job-toast").hidden, "");
+
   document.title = "DONE";
   const pre = document.createElement("pre");
   pre.id = "results";
