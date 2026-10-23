@@ -373,7 +373,16 @@ pub fn looks_like_drop(err: &str) -> bool {
         || e.contains("broken pipe")
         || e.contains("connection reset")
         || e.contains("os error 10054")
+        || e.contains("os error 10053")
+        || e.contains("os error 10060")
         || e.contains("os error 104")
+        || e.contains("os error 110")
+        || e.contains("os error 32")
+        || e.contains("did not properly respond")
+        || e.contains("forcibly closed")
+        || e.contains("connection was aborted")
+        || e.contains("unexpected eof")
+        || e.contains("failed to fill whole buffer")
 }
 
 /// The reply text starts with the 3-digit code ("213 1048576"); the size is
@@ -511,6 +520,14 @@ mod tests {
         assert_eq!(resume_action(1000, None, Some(0)), ResumeAction::Restart);
         assert!(looks_like_drop("transfer dropped while sending game.xex: reset"));
         assert!(!looks_like_drop("CWD /Hdd1 failed: 550"));
+        for windows_text in [
+            "An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond. (os error 10060)",
+            "An established connection was aborted by the software in your host machine. (os error 10053)",
+        ] {
+            assert!(looks_like_drop(windows_text), "{windows_text}");
+        }
+        assert!(!looks_like_drop("PASV failed: 425 Can't open data connection"));
     }
 
     #[test]
