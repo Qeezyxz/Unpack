@@ -13,6 +13,10 @@ Unpack is a Windows desktop tool for extracting archives (ZIP, RAR, 7Z, and more
 - Installer and portable builds exist but are not yet released here.
 - Expect bugs. Back up your files.
 
+## Known Bugs
+
+- **Send to Xbox:** If the connection is interrupted mid-transfer, it can delete the `launch.ini` file on the console. Keep a backup of your `launch.ini` before using Send to Xbox.
+
 ## VirusTotal
 
 - Installer: [VirusTotal report](https://www.virustotal.com/gui/file/06d10c80350857f733c4a1bf864e799c68f0d5e4d6423410dc4264934fd0f2f8)
