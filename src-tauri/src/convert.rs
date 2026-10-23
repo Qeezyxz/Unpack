@@ -47,13 +47,22 @@ pub fn inspect_iso(path: &Path) -> Result<IsoInfo, String> {
     ))
 }
 
-fn display_name_for_title(title_id: u32) -> String {
-    // Never collapse missing catalog entries to one "(unknown)" folder — that
-    // overwrites the previous ISO. TitleID hex keeps each conversion distinct.
+fn catalog_name(title_id: u32) -> Option<String> {
     game_list::find_title_by_id(title_id)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{title_id:08X}"))
+}
+
+fn display_name_for_title(title_id: u32) -> String {
+    catalog_name(title_id).unwrap_or_else(|| format!("{title_id:08X}"))
+}
+
+/// Inspect may still show the hex ID. Convert must not write a folder for an
+/// ID that is not in the TitleID list.
+fn require_known_title(title_id: u32) -> Result<String, String> {
+    catalog_name(title_id).ok_or_else(|| {
+        format!("Title ID {title_id:08X} not recognized. Conversion stopped.")
+    })
 }
 
 fn iso_info(path: &Path, exe: &TitleExecutionInfo, content_type: ContentType, used_bytes: u64) -> IsoInfo {
@@ -190,6 +199,15 @@ pub fn convert_isos(
     let mut reports = Vec::new();
     let game_total = groups.len() as u64;
     for (gi, discs) in groups.into_iter().enumerate() {
+        if let Some(tid) = discs
+            .iter()
+            .find_map(|(_, info)| info.as_ref().map(|i| i.title_id_num))
+        {
+            if let Err(err) = require_known_title(tid) {
+                progress(err.clone(), gi as u64, game_total.max(1));
+                return Err(err);
+            }
+        }
         let name = discs
             .first()
             .and_then(|(_, info)| info.as_ref().map(|i| i.name.clone()))
@@ -479,6 +497,7 @@ fn convert_god(
     let mut source_iso = iso::IsoReader::read(source_iso_file).map_err(|e| e.to_string())?;
     let title_info = TitleInfo::from_image(&mut source_iso).map_err(|e| e.to_string())?;
     let exe_info = title_info.execution_info.clone();
+    require_known_title(exe_info.title_id)?;
     let content_type = title_info.content_type;
     let info = iso_info(source, &exe_info, content_type, source_iso.get_max_used_prefix_size());
 
@@ -612,6 +631,9 @@ fn extract_iso_into(
     let title_info = TitleInfo::from_image(&mut iso).ok();
     if title_info.is_none() && !merge {
         return Err(format!("no default.xex/xbe in {}", source.display()));
+    }
+    if let Some(t) = &title_info {
+        require_known_title(t.execution_info.title_id)?;
     }
     let info = title_info.as_ref().map(|t| {
         iso_info(
@@ -822,12 +844,81 @@ mod tests {
     }
 
     #[test]
-    fn unknown_title_uses_title_id_not_unknown() {
-        let name = display_name_for_title(0xDEADBEEF);
-        assert_eq!(name, "DEADBEEF");
-        assert_ne!(name.to_lowercase(), "(unknown)");
+    fn unknown_title_logs_hex_and_stops() {
+        let err = require_known_title(0xDEADBEEF).unwrap_err();
+        assert!(err.contains("DEADBEEF"), "{err}");
+        assert!(err.to_lowercase().contains("not recognized"), "{err}");
+        assert!(err.to_lowercase().contains("stopped"), "{err}");
         let known = display_name_for_title(0x4D5307E6);
         assert!(known.to_lowercase().contains("halo"));
+        assert_eq!(display_name_for_title(0xDEADBEEF), "DEADBEEF");
+    }
+
+    #[test]
+    fn unknown_title_convert_writes_no_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "unpack-unknown-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let iso = root.join("Mystery.iso");
+        let dest = root.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        write_xsf_iso(
+            &iso,
+            &[(
+                "default.xex",
+                minimal_xex(0xDEADBEEF, 1, 1, 0x11111111, b"UNKNXEX"),
+            )],
+        );
+
+        let inspected = inspect_iso(&iso).expect("inspect should still return the hex Title ID");
+        assert_eq!(inspected.title_id, "DEADBEEF");
+        assert_eq!(inspected.name, "DEADBEEF");
+
+        let mut logged = Vec::new();
+        let err = convert_isos(
+            &[iso.clone()],
+            &dest,
+            "xex",
+            false,
+            true,
+            false,
+            |message, _, _| logged.push(message),
+        )
+        .unwrap_err();
+        assert!(err.contains("DEADBEEF"), "{err}");
+        assert!(err.to_lowercase().contains("not recognized"), "{err}");
+        assert!(err.to_lowercase().contains("stopped"), "{err}");
+        assert!(
+            logged.iter().any(|m| m.contains("DEADBEEF")),
+            "progress log should still include the hex Title ID, got {logged:?}"
+        );
+
+        let names: Vec<String> = fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.is_empty(),
+            "convert must not write a folder for an unknown Title ID, got {names:?}"
+        );
+        assert!(!dest.join("DEADBEEF").exists());
+
+        let god_err = convert_isos(&[iso], &dest, "god", true, true, false, |_, _, _| {})
+            .unwrap_err();
+        assert!(god_err.contains("DEADBEEF"), "{god_err}");
+        assert!(
+            fs::read_dir(&dest).unwrap().next().is_none(),
+            "GOD convert must not write a TitleID folder"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
