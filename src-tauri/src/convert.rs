@@ -204,6 +204,7 @@ pub fn convert_isos(
     if dest_dir.as_os_str().is_empty() {
         return Err("choose an output folder".into());
     }
+    fileops::check_output_folder(dest_dir)?;
     let paths = expand_iso_set(sources, auto_companions, &mut progress)?;
     let groups = group_discs(&paths)?;
     let mut reports = Vec::new();
@@ -1365,6 +1366,26 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(litter, vec!["4D5307E6".to_string()], "no staging or backup folders may remain");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unusable_output_folder_is_a_plain_error_and_leaves_nothing() {
+        let root = std::env::temp_dir().join(format!("unpack-god-baddest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let iso = root.join("Halo.iso");
+        write_xsf_iso(
+            &iso,
+            &[("default.xex", minimal_xex(0x4D5307E6, 1, 1, 0x11111111, b"XEX")), ("data.bin", vec![3u8; 20_000])],
+        );
+        let blocker = root.join("not-a-folder");
+        fs::write(&blocker, b"i am a file").unwrap();
+        for mode in ["god", "xex"] {
+            let err = convert_isos(&[iso.clone()], &blocker.join("out"), mode, true, false, false, |_, _, _| {}).unwrap_err();
+            assert!(err.contains("is a file, not a folder"), "{mode}: {err}");
+            assert_eq!(fs::read(&blocker).unwrap(), b"i am a file");
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }

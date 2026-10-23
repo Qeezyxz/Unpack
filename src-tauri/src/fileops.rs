@@ -170,6 +170,27 @@ impl Drop for Staging {
     }
 }
 
+/// Say plainly when a chosen output folder cannot be used, before any work
+/// starts. Nothing is created: only the nearest folder that already exists is
+/// looked at.
+pub fn check_output_folder(path: &Path) -> Result<(), String> {
+    let mut probe = Some(path);
+    while let Some(p) = probe {
+        match fs::metadata(p) {
+            Ok(meta) if meta.is_dir() => return Ok(()),
+            Ok(_) => {
+                return Err(format!(
+                    "The output folder \"{}\" can't be used because \"{}\" is a file, not a folder.",
+                    path.display(),
+                    p.display()
+                ))
+            }
+            Err(_) => probe = p.parent().filter(|q| !q.as_os_str().is_empty()),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
