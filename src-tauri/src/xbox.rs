@@ -156,6 +156,7 @@ pub fn send_paths(
             None
         };
         let mut attempts = 0u32;
+        let mut stalls = 0u32;
         loop {
             let dir_ok = if let Some(dir) = &remote_dir {
                 ftp.mkdir_p(dir)
@@ -203,6 +204,10 @@ pub fn send_paths(
                     break;
                 }
                 Err(e) if ftp::looks_like_drop(&e) && attempts < 3 => {
+                    stalls = if ftp::stalled(ftp.sent_last()) { stalls + 1 } else { 0 };
+                    if stalls >= 2 {
+                        return Err(ftp::stalled_message(&name, stalls));
+                    }
                     attempts += 1;
                     progress(
                         format!("Wi-Fi dropped on {name}. Reconnecting ({attempts}/3)…"),

@@ -39,6 +39,18 @@ function log(line) {
   $("job-status").textContent = line;
 }
 
+function showError(message) {
+  const text = String(message ?? "").replace(/^Error:\s*/, "").trim() || "Something went wrong.";
+  $("job-status").textContent = "";
+  $("job-error-text").textContent = text;
+  $("job-error").classList.remove("hidden");
+}
+
+function clearError() {
+  $("job-error").classList.add("hidden");
+  $("job-error-text").textContent = "";
+}
+
 function setPresence(view, job) {
   currentView = view;
   if (!native()) return;
@@ -84,13 +96,14 @@ async function job(label, fn) {
     await new Promise((resolve) => jobWaiters.push(resolve));
   }
   const id = ++jobSeq;
+  if (!runningJobs.length) clearError();
   runningJobs.push({ id, label });
   showJobs();
   try {
     await fn();
     await remember();
   } catch (e) {
-    log(String(e));
+    showError(e);
   } finally {
     const i = runningJobs.findIndex((j) => j.id === id);
     if (i >= 0) runningJobs.splice(i, 1);
@@ -208,6 +221,17 @@ async function convertIsos(isos, dest) {
   });
 }
 
+function extractSummary(result) {
+  const count = result.length;
+  const opened = result.reduce((n, r) => n + (r.nested || 0), 0);
+  const left = result.reduce((n, r) => n + (r.inner_left || 0), 0);
+  let text = opened ? `Extracted ${count} archive(s) and opened ${opened} inside.` : `Extracted ${count} archive(s).`;
+  if (left) {
+    text += ` ${left} zip/rar/7z file(s) inside were left closed. Turn on "Open zips inside zips" to open them.`;
+  }
+  return text;
+}
+
 async function handlePaths(paths) {
   if (!paths?.length) return;
   const dest = $("extract-dest").value.trim();
@@ -218,7 +242,7 @@ async function handlePaths(paths) {
     setList("recent-files", archives.slice());
     if ($("extract-auto").checked) {
       if (!dest) {
-        log("Choose a destination folder first.");
+        showError("Choose a destination folder first.");
         return;
       }
       tasks.push((async () => {
@@ -231,8 +255,7 @@ async function handlePaths(paths) {
             existing: $("extract-existing").value,
             nested: $("extract-nested").checked,
           });
-          const inner = result.reduce((n, r) => n + (r.nested || 0), 0);
-          log(inner ? `Extracted ${result.length} archive(s) and opened ${inner} inside.` : `Extracted ${result.length} archive(s).`);
+          log(extractSummary(result));
           await invoke("notify", { title: "Unpack", body: `Extracted ${result.length} archive(s)` });
           found = result.flatMap((r) => r.isos || []);
         });
@@ -242,7 +265,7 @@ async function handlePaths(paths) {
   }
   if (isos.length && $("auto-iso").value !== "off") {
     if (!dest) {
-      log("Choose a destination folder first.");
+      showError("Choose a destination folder first.");
       return;
     }
     tasks.push(convertIsos(isos, dest));
@@ -263,7 +286,7 @@ function renderHomebrew() {
       card.innerHTML = `<div><h3>${t.name}</h3><span class="tag${save ? " save" : ""}">${t.cat}</span></div><p>${t.blurb}</p><button type="button">Open source page</button>`;
       card.querySelector("button").onclick = async () => {
         try { await invoke("open_path", { path: t.url }); }
-        catch (e) { log(String(e)); window.open(t.url, "_blank"); }
+        catch (e) { showError(e); window.open(t.url, "_blank"); }
       };
       el.appendChild(card);
     });
@@ -300,7 +323,7 @@ async function refreshLibrary() {
     log(`Found ${items.length} item(s).`);
   } catch (e) {
     empty.classList.remove("hidden");
-    log(String(e));
+    showError(e);
   }
 }
 
@@ -382,6 +405,23 @@ async function init() {
     } catch (_) { /* older webview */ }
   }
 
+  $("dismiss-error").onclick = clearError;
+  $("copy-error").onclick = async () => {
+    const text = $("job-error-text").textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      $("copy-error").textContent = "Copied";
+    } catch (_) {
+      const range = document.createRange();
+      range.selectNodeContents($("job-error-text"));
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      $("copy-error").textContent = "Selected";
+    }
+    setTimeout(() => { $("copy-error").textContent = "Copy"; }, 1500);
+  };
+
   const drop = $("drop-zone");
   drop.addEventListener("click", async () => {
     const files = await pickMany("Archives", ["zip", "rar", "7z", "tar", "gz", "xz", "iso"]);
@@ -454,7 +494,7 @@ async function init() {
           li.innerHTML = `<span>${r.name}</span><span>${r.title_id}</span>`;
           el.appendChild(li);
         });
-      } catch (e) { log(String(e)); }
+      } catch (e) { showError(e); }
     }, 160);
   };
 
