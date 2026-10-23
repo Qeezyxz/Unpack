@@ -121,15 +121,11 @@ pub fn extract_archives_with(
         };
         match extract_one(&seven, archive, &out, opts, true) {
             Ok(status) => {
-                let mut nested = 0u32;
-                let mut inner_left = 0u32;
-                if opts.nested {
-                    let (opened, failed) = extract_nested(&seven, &out, opts, 1, &mut progress)?;
-                    nested = opened;
-                    inner_left = failed;
+                let (nested, inner_left) = if opts.nested {
+                    extract_nested(&seven, &out, opts, 1, &mut progress)?
                 } else {
-                    inner_left = find_archives(&out).len() as u32;
-                }
+                    (0, find_archives(&out).len() as u32)
+                };
                 results.push(ArchiveResult {
                     archive: archive.display().to_string(),
                     destination: out.display().to_string(),
