@@ -1,8 +1,19 @@
-# Unpack: desktop edition
+# Unpack
 
-Unpack opens and extracts **ZIP, RAR, 7Z** (plus TAR, GZ, BZ2, XZ and more), makes **ZIP and 7Z** archives, and converts **Xbox 360 ISOs to Games on Demand**. It looks the same as your web page, but now it's a real Windows program. It works offline, handles huge archives, and adds right-click menu entries in Explorer.
+> **Work in Progress — Still being tested**
+>
+> This program is under active development. Features may change, break, or be incomplete. Use at your own risk. Not ready for everyday use yet.
 
-## Install
+Unpack is a Windows desktop tool for extracting archives (ZIP, RAR, 7Z, and more), converting Xbox 360 ISOs to Games on Demand or extracted XEX folders, managing a game library, installing DLC/title updates, handling mod menus, and sending files to a modded Xbox 360 over the local network.
+
+## Status
+
+- **WIP / Testing** — Newest features are still being reviewed and tested.
+- Source is being organized in this repo.
+- Installer and portable builds exist but are not yet released here.
+- Expect bugs. Back up your files.
+
+## Install (when ready)
 
 **Option A (recommended): the installer**
 1. Run `Unpack_1.0.0_x64-setup.exe`.
@@ -10,18 +21,27 @@ Unpack opens and extracts **ZIP, RAR, 7Z** (plus TAR, GZ, BZ2, XZ and more), mak
 3. The installer doesn't need admin rights. It installs only for your user account.
 
 **Option B: portable (no install)**
-Unzip `Unpack-portable.zip` anywhere and run `Unpack.exe`. Keep `7za.exe` and `WebView2Loader.dll` in the same folder. The portable copy has **no** right-click menu entries (those come from the installer).
+Unzip `Unpack-portable.zip` anywhere and run `Unpack.exe`. Keep `7za.exe` and `WebView2Loader.dll` in the same folder.
 
-Unpack needs Microsoft's WebView2 runtime. Windows 10 and 11 already have it.
+Requires the WebView2 runtime (already included on Windows 10/11).
 
 ## Features
 
-(Full feature list from your description is preserved in the previous version; this is the desktop edition overview. See HANDOFF.md and source for details.)
+- Archive extraction and creation (ZIP, RAR, 7Z, TAR, etc.) via bundled 7-Zip
+- Batch processing
+- Xbox 360 ISO → Games on Demand or extracted XEX folder, with verification
+- Game Library (~4,900 TitleIDs)
+- USB copy with FAT32 checks and verification
+- Auto-detect and place DLC / Title Updates
+- Mod Menus management
+- Link downloader with resume and hash check
+- Homebrew Tools section
+- Send to Xbox (local network only, to Aurora / XeXMenu / DashLaunch)
+- Notifications, drag-and-drop, keyboard shortcuts
+- Installer + portable + cleanup tool
 
-## Status
-
-Source uploaded. Builds and binaries are separate (installer and portable zip).
+See `DISCLAIMER.txt` and `LICENSE` for terms.
 
 ## License
 
-TBD
+Non-commercial. See [LICENSE](LICENSE).
