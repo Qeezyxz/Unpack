@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ArchiveResult {
@@ -232,12 +232,28 @@ fn extract_nested(
     Ok(opened)
 }
 
+/// `game.part2.rar` and later volumes open together with `game.part1.rar`.
+fn is_later_rar_volume(lower_name: &str) -> bool {
+    let Some(base) = lower_name.strip_suffix(".rar") else {
+        return false;
+    };
+    let Some((_, number)) = base.rsplit_once(".part") else {
+        return false;
+    };
+    !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
+        && number.trim_start_matches('0') != "1"
+}
+
 fn is_archive_file(path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if is_later_rar_volume(&name) {
+        return false;
+    }
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") || name.ends_with(".tar.xz") {
         return true;
     }
@@ -349,7 +365,7 @@ pub fn create_archive(inputs: &[PathBuf], dest: &Path) -> Result<ArchiveResult, 
     if let Some(parent) = dest.parent() {
         fs_create(parent)?;
     }
-    let mut args: Vec<OsString> = vec!["a".into(), "-y".into(), dest.as_os_str().to_os_string()];
+    let mut args: Vec<OsString> = vec!["a".into(), "-y".into(), "--".into(), dest.as_os_str().to_os_string()];
     for input in inputs {
         args.push(input.as_os_str().to_os_string());
     }
@@ -365,16 +381,27 @@ pub fn create_archive(inputs: &[PathBuf], dest: &Path) -> Result<ArchiveResult, 
 }
 
 fn run_7z(bin: &Path, args: &[OsString]) -> Result<String, String> {
-    let output = Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .args(args.iter().map(|a| a.as_os_str()))
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // No flashing console window, and no password prompt waiting on a keyboard.
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("failed to run {}: {e}", bin.display()))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let combined = format!("{stderr}{stdout}");
     if !output.status.success() {
-        if combined.to_ascii_lowercase().contains("wrong password")
-            || combined.to_ascii_lowercase().contains("encrypted")
+        let lower = combined.to_ascii_lowercase();
+        if lower.contains("wrong password")
+            || lower.contains("encrypted")
+            || lower.contains("enter password")
         {
             return Err("this archive is password-protected; Unpack does not prompt for passwords".into());
         }
@@ -507,6 +534,75 @@ mod tests {
         let next = unique_dir(&root, "Game", "number").unwrap().unwrap();
         assert_eq!(next.file_name().unwrap(), "Game (2)");
         assert!(unique_dir(&root, "Game", "skip").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn later_rar_volumes_are_not_opened_on_their_own() {
+        assert!(is_later_rar_volume("game.part2.rar"));
+        assert!(is_later_rar_volume("game.part03.rar"));
+        assert!(is_later_rar_volume("game.part10.rar"));
+        assert!(!is_later_rar_volume("game.part1.rar"));
+        assert!(!is_later_rar_volume("game.part001.rar"));
+        assert!(!is_later_rar_volume("game.rar"));
+        assert!(!is_later_rar_volume("party.rar"));
+        assert!(is_archive_file(Path::new("x/game.part1.rar")));
+        assert!(!is_archive_file(Path::new("x/game.part2.rar")));
+    }
+
+    #[test]
+    fn password_protected_and_broken_archives_give_plain_errors() {
+        let Some(bin) = find_seven_zip() else {
+            eprintln!("skipping: 7-Zip not installed");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("unpack-badarc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let note = root.join("note.txt");
+        std::fs::write(&note, b"x").unwrap();
+        let locked = root.join("locked.7z");
+        run_7z(
+            &bin,
+            &[
+                OsString::from("a"),
+                OsString::from("-y"),
+                OsString::from("-psecret"),
+                OsString::from("-mhe=on"),
+                locked.as_os_str().to_os_string(),
+                note.as_os_str().to_os_string(),
+            ],
+        )
+        .unwrap();
+        let dest = root.join("out");
+        let err = extract_archives(&[locked], &dest).unwrap_err();
+        assert!(err.contains("password-protected"), "{err}");
+        assert!(!dest.join("locked").exists(), "a failed extract must not leave a folder");
+
+        let broken = root.join("broken.zip");
+        std::fs::write(&broken, b"PK\x03\x04 this is not really a zip").unwrap();
+        let err = extract_archives(&[broken], &dest).unwrap_err();
+        assert!(!err.is_empty());
+        assert!(!dest.join("broken").exists(), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_archive_handles_odd_names() {
+        if find_seven_zip().is_none() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("unpack-mkarc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let odd = root.join("-dash name.txt");
+        std::fs::write(&odd, b"odd").unwrap();
+        let out = root.join("-made.zip");
+        create_archive(&[odd], &out).unwrap();
+        let dest = root.join("out");
+        extract_archives(&[out], &dest).unwrap();
+        let found: Vec<_> = std::fs::read_dir(dest.join("-made")).unwrap().flatten().collect();
+        assert_eq!(found.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
