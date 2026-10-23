@@ -508,6 +508,39 @@ mod tests {
         assert!(!fake.saw("DELE everything"));
     }
 
+    /// Runs against a real FTP server (pyftpdlib) when UNPACK_REAL_FTP_PORT is
+    /// set, e.g. `UNPACK_REAL_FTP_PORT=2121 cargo test real_ftp -- --ignored`.
+    #[test]
+    #[ignore = "needs an external FTP server with user xbox / password xbox"]
+    fn real_ftp_server_round_trip() {
+        let Ok(port) = std::env::var("UNPACK_REAL_FTP_PORT") else {
+            return;
+        };
+        let port: u16 = port.parse().unwrap();
+        let root = std::env::var("UNPACK_REAL_FTP_ROOT").unwrap_or_else(|_| "/tmp/ftproot".into());
+        let dir = scratch("real");
+        let game = dir.join("Real Game");
+        fs::create_dir_all(game.join("Data")).unwrap();
+        let big = blob(3_000_000);
+        fs::write(game.join("default.xex"), blob(9000)).unwrap();
+        fs::write(game.join("Data/0000"), &big).unwrap();
+        let go = || {
+            send_paths("127.0.0.1", port, "xbox", "xbox", "/Hdd1/Games", &[game.clone()], false, |_, _, _| {})
+        };
+        let first = go().unwrap();
+        assert_eq!(first.uploaded, 2, "{first:?}");
+        let on_disk = PathBuf::from(&root).join("Hdd1/Games/Real Game/Data/0000");
+        assert_eq!(fs::read(&on_disk).unwrap(), big);
+        let again = go().unwrap();
+        assert!(again.warnings.iter().any(|w| w.contains("already on the Xbox")), "{again:?}");
+        fs::remove_file(&on_disk).unwrap();
+        fs::write(on_disk.with_file_name("0000.part"), &big[..1_000_000]).unwrap();
+        let resumed = go().unwrap();
+        assert_eq!(resumed.resumed, 1, "{resumed:?}");
+        assert_eq!(fs::read(&on_disk).unwrap(), big);
+        assert!(!on_disk.with_file_name("0000.part").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_link_loop_in_the_folder_is_an_error() {
