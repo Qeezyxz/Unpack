@@ -1,6 +1,6 @@
 # Unpack
 
-Unpack **1.1.0** is a Windows (and Linux-dev) desktop tool for extracting archives (ZIP, RAR, 7Z, and more), converting Xbox 360 ISOs to Games on Demand or extracted XEX folders, managing a game library, installing DLC/title updates, handling mod menus, and sending files to a modded Xbox 360 over the local network.
+Unpack **1.1.1** is a Windows (and Linux-dev) desktop tool for extracting archives (ZIP, RAR, 7Z, and more), converting Xbox 360 ISOs to Games on Demand or extracted XEX folders, managing a game library, installing DLC/title updates, handling mod menus, and sending files to a modded Xbox 360 over the local network.
 
 Use at your own risk. Back up `launch.ini` and anything you convert or copy. See `DISCLAIMER.txt`.
 
@@ -14,11 +14,11 @@ npx tauri build    # installer / portable (on Windows)
 
 Needs Node 22, Rust 1.90+ (`rust-toolchain.toml`), and the WebView2 runtime on Windows. On Linux, install the Tauri WebKitGTK packages (`libwebkit2gtk-4.1-dev`, `librsvg2-dev`). Put `7za.exe` next to `Unpack.exe` on Windows, or install p7zip / 7-Zip and optionally set `UNPACK_7ZA`.
 
-ISO conversion uses a vendored copy of [iso2god-rs](https://github.com/iliazeus/iso2god-rs) (MIT). The TitleID library is that crate’s ~4,900-name list.
+ISO conversion uses a vendored copy of [iso2god-rs](https://github.com/iliazeus/iso2god-rs) (MIT). The TitleID library starts from that crate’s list and adds the Xbox 360 / original Xbox TitleID CSVs so conversions keep a real name (or the TitleID) instead of collapsing to `(unknown)`.
 
 ## Status
 
-- **1.1.0** — first source-complete release in this repo. The unpublished 1.0.0 installer is a separate build.
+- **1.1.1** — TitleID catalog covers the Xbox 360 and original Xbox game lists. Disc 1 and Disc 2 convert into one playable folder (XEX merge / GOD TitleID set). 1.1.0 is the first source-complete release. The unpublished 1.0.0 installer is a separate build.
 - Build from source with `npx tauri build` on Windows for an installer / portable zip.
 - Keep backups. This is a hobbyist offline tool.
 
@@ -35,10 +35,10 @@ Currently flagged only by Trapmine (`Malicious.high.ml.score`). This is a common
 
 ## Install
 
-Windows builds are attached to the [1.1.0 release](https://github.com/Qeezyxz/Unpack/releases/tag/v1.1.0).
+Windows builds are attached to the [latest GitHub Release](https://github.com/Qeezyxz/Unpack/releases/latest).
 
 **Option A (recommended): the installer**
-1. Download and run `Unpack_1.1.0_x64-setup.exe`.
+1. Download and run `Unpack_1.1.1_x64-setup.exe` (or `Unpack_1.1.0_x64-setup.exe` until 1.1.1 is built).
 2. Windows may show "Windows protected your PC" because the file isn't signed. Click **More info**, then **Run anyway**.
 3. The installer doesn't need admin rights. It installs only for your user account.
 
@@ -51,8 +51,8 @@ Requires the WebView2 runtime (already included on Windows 10/11).
 
 - Archive extraction and creation (ZIP, RAR, 7Z, TAR, etc.) via bundled 7-Zip
 - Batch processing
-- Xbox 360 ISO → Games on Demand or extracted XEX folder, with verification
-- Game Library (~4,900 TitleIDs)
+- Xbox 360 ISO → Games on Demand or extracted XEX folder, with verification. Multi-disc (Disc 1 + Disc 2) merges into one playable XEX folder, or one TitleID GOD set.
+- Game Library (TitleID catalog for Xbox 360 and original Xbox)
 - USB copy with FAT32 checks and verification
 - Auto-detect and place DLC / Title Updates
 - Mod Menus management

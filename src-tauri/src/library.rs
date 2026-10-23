@@ -221,12 +221,59 @@ mod tests {
 
     #[test]
     fn title_database_has_about_4900_entries() {
-        assert!(title_count() > 4500, "got {}", title_count());
+        assert!(title_count() > 5500, "got {}", title_count());
         let aurora = lookup_title("00000166").expect("Aurora");
         assert!(aurora.name.to_lowercase().contains("aurora"));
         assert_eq!(lookup_title_u32(0x00000166).unwrap().to_lowercase(), aurora.name.to_lowercase());
         let halo = search_titles("halo 3", 10);
         assert!(halo.iter().any(|t| t.name.to_lowercase().contains("halo")));
+        let hawk = lookup_title("41560810").expect("Tony Hawk Project 8 from 360 list");
+        assert!(hawk.name.to_lowercase().contains("project 8"));
+        let afl = lookup_title("4143000D").expect("AFL Live 2003 from original Xbox list");
+        assert!(afl.name.to_lowercase().contains("afl live"));
+        assert_eq!(
+            lookup_title_u32(0x41560810).unwrap().to_lowercase(),
+            hawk.name.to_lowercase()
+        );
+    }
+
+    fn csv_title_ids(raw: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        for (i, line) in raw.lines().enumerate() {
+            if i == 0 || line.trim().is_empty() {
+                continue;
+            }
+            let tid = line.split('\t').next().unwrap_or("").trim().to_uppercase();
+            if tid.len() == 8 {
+                ids.push(tid);
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    #[test]
+    fn catalog_contains_every_uploaded_title_id() {
+        let xbox360 = csv_title_ids(include_str!(
+            "../vendor/iso2god/src/game_list/gamelist_xbox360.csv"
+        ));
+        let xbox = csv_title_ids(include_str!(
+            "../vendor/iso2god/src/game_list/gamelist_xbox.csv"
+        ));
+        assert!(xbox360.len() > 3000, "360 list too small: {}", xbox360.len());
+        assert!(xbox.len() > 1000, "Xbox list too small: {}", xbox.len());
+        for tid in xbox360.iter().chain(xbox.iter()) {
+            assert!(
+                lookup_title(tid).is_some(),
+                "TitleID {tid} from the uploaded game list is missing from the conversion catalog"
+            );
+            let num = u32::from_str_radix(tid, 16).unwrap();
+            assert!(
+                lookup_title_u32(num).is_some(),
+                "find_title_by_id missed {tid}"
+            );
+        }
     }
 
     #[test]
