@@ -146,15 +146,23 @@ pub fn notify(app: AppHandle, title: String, body: String) -> Result<(), String>
 
 #[tauri::command]
 pub fn open_path(app: AppHandle, path: String) -> Result<(), String> {
-    if path.starts_with("http://") || path.starts_with("https://") {
+    if is_web_url(&path) {
         app.opener()
             .open_url(path, None::<&str>)
             .map_err(|e| e.to_string())
-    } else {
+    } else if std::path::Path::new(&path).is_dir() {
         app.opener()
             .open_path(path, None::<&str>)
             .map_err(|e| e.to_string())
+    } else {
+        // Launching an arbitrary file would run it, so only pages and folders open.
+        Err("Unpack only opens web pages and folders".into())
     }
+}
+
+fn is_web_url(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 #[tauri::command(async)]
@@ -404,4 +412,18 @@ pub async fn send_to_xbox(
 #[tauri::command(async)]
 pub fn list_dir(path: String) -> Result<Vec<String>, String> {
     library::list_dir(&PathBuf::from(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_web_url;
+
+    #[test]
+    fn only_web_pages_count_as_urls() {
+        assert!(is_web_url("https://example.com/a"));
+        assert!(is_web_url("HTTP://example.com"));
+        assert!(!is_web_url("file:///etc/passwd"));
+        assert!(!is_web_url("C:\\Windows\\notepad.exe"));
+        assert!(!is_web_url("ms-settings:"));
+    }
 }
