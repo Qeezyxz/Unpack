@@ -84,7 +84,10 @@ pub fn copy_replace(src: &Path, dest: &Path) -> Result<(), String> {
     }
     let tmp = sibling(dest, "unpack-tmp");
     clear_path(&tmp)?;
-    fs::copy(src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
+    if let Err(e) = fs::copy(src, &tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("copy {}: {e}", src.display()));
+    }
     let src_len = fs::metadata(src).map_err(|e| e.to_string())?.len();
     let tmp_len = fs::metadata(&tmp).map_err(|e| e.to_string())?.len();
     if src_len != tmp_len {

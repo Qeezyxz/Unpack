@@ -182,7 +182,11 @@ fn copy_one(
     // Copy to a sibling temp, hash, then swap. Never delete dest first.
     let tmp = fileops::sibling(dest, "unpack-tmp");
     fileops::clear_path(&tmp)?;
-    fs::copy(src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
+    if let Err(e) = fs::copy(src, &tmp) {
+        // A half-written temp file would keep eating a drive that may be full.
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("copy {}: {e}", src.display()));
+    }
     if verify {
         let a = hashutil::sha256_file(src)?;
         let b = hashutil::sha256_file(&tmp)?;
@@ -228,12 +232,33 @@ fn detect_filesystem(path: &Path) -> Result<String, String> {
 
 #[cfg(windows)]
 fn volume_root(path: &Path) -> Result<PathBuf, String> {
-    let s = path.to_string_lossy();
-    if s.len() >= 2 && s.as_bytes()[1] == b':' {
-        Ok(PathBuf::from(format!("{}:\\", s.chars().next().unwrap())))
+    Ok(PathBuf::from(volume_root_text(&path.to_string_lossy())))
+}
+
+/// The root GetVolumeInformationW wants: `E:\` or `\\server\share\`.
+/// `canonicalize` hands back `\\?\E:\...` and `\\?\UNC\server\share\...`, so those
+/// prefixes are peeled off first.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn volume_root_text(path: &str) -> String {
+    let path = path.replace('/', "\\");
+    let plain = if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = path.strip_prefix("\\\\?\\") {
+        rest.to_string()
     } else {
-        Ok(path.to_path_buf())
+        path
+    };
+    let bytes = plain.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return format!("{}:\\", &plain[..1]);
     }
+    if let Some(rest) = plain.strip_prefix("\\\\") {
+        let mut parts = rest.split('\\').filter(|p| !p.is_empty());
+        if let (Some(server), Some(share)) = (parts.next(), parts.next()) {
+            return format!("\\\\{server}\\{share}\\");
+        }
+    }
+    plain
 }
 
 #[cfg(not(windows))]
@@ -281,6 +306,15 @@ pub fn list_fat32_warnings(paths: &[PathBuf], dest: &Path) -> Result<Vec<String>
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn windows_volume_roots_survive_canonical_paths() {
+        assert_eq!(volume_root_text(r"E:\Games\Halo"), r"E:\");
+        assert_eq!(volume_root_text(r"\\?\E:\Games\Halo"), r"E:\");
+        assert_eq!(volume_root_text(r"e:/Games"), r"e:\");
+        assert_eq!(volume_root_text(r"\\?\UNC\nas\share\Games"), r"\\nas\share\");
+        assert_eq!(volume_root_text(r"\\nas\share"), r"\\nas\share\");
+    }
 
     #[test]
     fn fat32_failure_gets_a_plain_hint() {
