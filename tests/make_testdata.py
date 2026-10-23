@@ -59,8 +59,25 @@ if not have("notxbox.iso"):
     with open(os.path.join(dest, "notxbox.iso"), "wb") as f:
         f.write(b"\0" * (64 * 2048))
 
+def rar4(path, files):
+    """Tiny RAR 2.9 writer (stored files only): there is no RAR creator on Linux, and the in-page RAR engine needs a sample."""
+    import zlib
+    def block(btype, flags, body):
+        hdr = struct.pack("<BHH", btype, flags, 7 + len(body)) + body
+        return struct.pack("<H", zlib.crc32(hdr) & 0xFFFF) + hdr
+    out = b"Rar!\x1a\x07\x00" + block(0x73, 0, b"\0" * 6)
+    for name, data in files:
+        n = name.encode()
+        body = struct.pack("<IIBIIBBHI", len(data), len(data), 3, zlib.crc32(data), 0x5A000000, 29, 0x30, len(n), 0o100644 << 16) + n
+        out += block(0x74, 0x8000, body) + data
+    open(path, "wb").write(out + struct.pack("<H", 0x3DC4) + bytes([0x7B]) + struct.pack("<HH", 0x4000, 7))
+
+
+if not have("sample.rar"):
+    rar4(os.path.join(dest, "sample.rar"), [("a.txt", b"hello\n"), ("nested/n.json", b'{"k":1}\n')])
+
 here = os.path.dirname(os.path.abspath(__file__))
 if not have("unknown.iso"):
-    subprocess.run([sys.executable, os.path.join(here, "make_iso.py"), os.path.join(dest, "unknown.iso"), "FFFE0001", "0"], check=True)
+    subprocess.run([sys.executable, os.path.join(here, "make_iso.py"), os.path.join(dest, "unknown.iso"), "0ABCDEF1", "0"], check=True)
 
 print("test data ready in", dest)

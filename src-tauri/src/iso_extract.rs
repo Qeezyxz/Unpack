@@ -22,6 +22,26 @@ pub struct ExtractResult {
     pub name: Option<String>,
     pub files: usize,
     pub bytes: u64,
+    pub disc_number: u8,
+    pub disc_count: u8,
+    /// This disc was overlaid onto a folder that already holds another disc of the game.
+    pub merged: bool,
+    /// Files that were left alone because they are the playable executable of an earlier disc.
+    pub kept: usize,
+    /// Set when the TitleID is not in the game list.
+    pub warning: Option<String>,
+}
+
+/// How a later disc is laid over an existing game folder.
+#[derive(Clone, Copy)]
+struct Merge {
+    /// May default.xex / default.xbe be replaced? Only by a lower-numbered disc (Disc 1 over a Disc 2 that arrived first).
+    replace_exe: bool,
+}
+
+/// A later disc never replaces the playable executable of an earlier one.
+pub fn is_playable_exe(rel: &Path) -> bool {
+    rel.file_name().and_then(|n| n.to_str()).map(|n| n.eq_ignore_ascii_case("default.xex") || n.eq_ignore_ascii_case("default.xbe")).unwrap_or(false)
 }
 
 #[derive(Clone)]
@@ -102,8 +122,11 @@ fn verify_content_vs_iso(
     sector_size: u64,
     root: &Path,
     planned: &[PlannedFile],
+    exact: bool,
 ) -> Result<(), String> {
-    verify_tree(root, planned)?;
+    if exact {
+        verify_tree(root, planned)?;
+    }
     let mut iso = File::open(iso_path).map_err(|e| format!("Cannot open ISO: {e}"))?;
     let mut buf_a = vec![0u8; 1 << 16];
     let mut buf_b = vec![0u8; 1 << 16];
@@ -142,6 +165,18 @@ pub fn extract(
     job_id: &str,
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<ExtractResult, String> {
+    extract_inner(iso_path, dest_dir, title_override, jobs, job_id, progress, None)
+}
+
+fn extract_inner(
+    iso_path: &Path,
+    dest_dir: &Path,
+    title_override: Option<&str>,
+    jobs: &Jobs,
+    job_id: &str,
+    progress: &mut dyn FnMut(u32, &str),
+    merge: Option<Merge>,
+) -> Result<ExtractResult, String> {
     let ioerr = |what: &str| {
         let w = what.to_string();
         move |e: std::io::Error| format!("{w}: {e}")
@@ -149,8 +184,17 @@ pub fn extract(
     let f = File::open(iso_path).map_err(ioerr("Cannot open ISO"))?;
     let iso_len = f.metadata().map_err(ioerr("Cannot read ISO"))?.len();
     let mut source = iso::IsoReader::read(f).map_err(|e| format!("Not an Xbox ISO ({e})"))?;
-    let title = TitleInfo::from_image(&mut source).map_err(|e| format!("Couldn't read the game's executable: {e:#}"))?;
-    let exe_info = title.execution_info;
+    // A later disc that carries no default.xex can still be overlaid onto its game's folder.
+    let title = match TitleInfo::from_image(&mut source) {
+        Ok(t) => Some(t),
+        Err(e) if merge.is_none() => return Err(god::missing_executable_message(iso_path, &format!("{e:#}"))),
+        Err(_) => None,
+    };
+    let exe_info = title.map(|t| t.execution_info);
+    let (disc_number, disc_count) = match &exe_info {
+        Some(e) => god::disc_numbers(iso_path, e),
+        None => (crate::discs::disc_hint_from_name(iso_path).unwrap_or(1), 2),
+    };
     let root_offset = source.volume_descriptor.root_offset;
     let sector_size = source.volume_descriptor.sector_size.max(SECTOR_SIZE);
     let data_size = source.get_max_used_prefix_size();
@@ -163,6 +207,7 @@ pub fn extract(
     }
     let need: u64 = planned.iter().map(|p| p.size).sum();
     fs::create_dir_all(dest_dir).map_err(ioerr("Cannot create output folder"))?;
+    let _dest_lock = crate::destlock::acquire(dest_dir, || progress(0, crate::destlock::WAIT_MESSAGE));
     if let Some(free) = free_space(dest_dir) {
         if free < need + 64 * 1024 * 1024 {
             return Err(format!(
@@ -229,29 +274,100 @@ pub fn extract(
     if jobs.is_cancelled(job_id) {
         return Err(ERR_CANCELLED.into());
     }
-    // Move children into dest_dir (already claimed empty).
-    for e in fs::read_dir(&tmp).map_err(ioerr("Cannot read temp"))? {
-        let e = e.map_err(ioerr("Cannot read temp"))?;
-        let to = dest_dir.join(e.file_name());
-        move_entry(&e.path(), &to).map_err(|err| format!("Could not place {}: {err}", e.file_name().to_string_lossy()))?;
+    let mut kept_files: Vec<PathBuf> = Vec::new();
+    match merge {
+        None => {
+            // Move children into dest_dir (already claimed empty).
+            for e in fs::read_dir(&tmp).map_err(ioerr("Cannot read temp"))? {
+                let e = e.map_err(ioerr("Cannot read temp"))?;
+                let to = dest_dir.join(e.file_name());
+                move_entry(&e.path(), &to).map_err(|err| format!("Could not place {}: {err}", e.file_name().to_string_lossy()))?;
+            }
+            verify_tree(dest_dir, &planned)?;
+        }
+        Some(m) => {
+            overlay(&tmp, dest_dir, Path::new(""), m, job_id, &mut kept_files)?;
+            for p in &planned {
+                if kept_files.contains(&p.rel) {
+                    continue;
+                }
+                let meta = fs::symlink_metadata(dest_dir.join(&p.rel)).map_err(|_| format!("Missing merged file: {}", p.rel.display()))?;
+                if crate::safecopy::is_link(&meta) || !meta.is_file() || meta.len() != p.size {
+                    return Err(format!("Merged file {} does not match the ISO.", p.rel.display()));
+                }
+            }
+        }
     }
-    verify_tree(dest_dir, &planned)?;
     if jobs.is_cancelled(job_id) {
         return Err(ERR_CANCELLED.into());
     }
+    let kept = kept_files.len();
     progress(100, "Done");
-    let name = title_override
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .map(|t| clamp_title(&t))
-        .or_else(|| game_list::find_title_by_id(exe_info.title_id));
+    let catalog = exe_info.as_ref().and_then(|e| game_list::find_title_by_id(e.title_id)).filter(|n| !n.trim().is_empty());
+    let title_hex = exe_info.as_ref().map(|e| format!("{:08X}", e.title_id)).unwrap_or_default();
+    let typed = title_override.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    let warning = (exe_info.is_some() && catalog.is_none() && typed.is_none()).then(|| god::unknown_title_warning(&title_hex));
+    let name = typed.map(|t| clamp_title(&t)).or(catalog);
     Ok(ExtractResult {
         output: dest_dir.display().to_string(),
-        title_id: format!("{:08X}", exe_info.title_id),
+        title_id: title_hex,
         name,
-        files: planned.len(),
+        files: planned.len() - kept,
         bytes: wrote_bytes,
+        disc_number,
+        disc_count,
+        merged: merge.is_some(),
+        kept,
+        warning,
     })
+}
+
+/// Lay the finished temp tree over `dest` (a folder Unpack made earlier in this run). Existing files
+/// are replaced by set-aside-and-rename, never written through; links in the way are refused.
+/// Playable executables that were left alone are listed in `kept`.
+fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &mut Vec<PathBuf>) -> Result<(), String> {
+    for e in fs::read_dir(src).map_err(|e| format!("Cannot read temp: {e}"))? {
+        let e = e.map_err(|e| format!("Cannot read temp: {e}"))?;
+        let name = e.file_name();
+        let to = dest.join(&name);
+        let rel2 = rel.join(&name);
+        let from_meta = fs::symlink_metadata(e.path()).map_err(|e| e.to_string())?;
+        let to_meta = fs::symlink_metadata(&to).ok();
+        if let Some(t) = &to_meta {
+            if crate::safecopy::is_link(t) {
+                return Err(format!("{} is a link; refusing to write through it.", rel2.display()));
+            }
+        }
+        if from_meta.is_dir() {
+            match &to_meta {
+                Some(t) if !t.is_dir() => return Err(format!("{} is a file where the disc has a folder.", rel2.display())),
+                Some(_) => {}
+                None => fs::create_dir(&to).map_err(|e| format!("Cannot create {}: {e}", rel2.display()))?,
+            }
+            overlay(&e.path(), &to, &rel2, m, job_id, kept)?;
+            continue;
+        }
+        match &to_meta {
+            Some(_) if is_playable_exe(&rel2) && !m.replace_exe => {
+                kept.push(rel2);
+                continue;
+            }
+            Some(t) if t.is_dir() => return Err(format!("{} is a folder where the disc has a file.", rel2.display())),
+            Some(_) => {
+                let old = to.with_file_name(format!(".unpack-old-{}-{}", crate::archive::safe_segment(job_id), name.to_string_lossy()));
+                let _ = fs::remove_file(&old);
+                fs::rename(&to, &old).map_err(|e| format!("Cannot set aside {}: {e}", rel2.display()))?;
+                if let Err(err) = move_entry(&e.path(), &to) {
+                    let _ = fs::remove_file(&to);
+                    let _ = fs::rename(&old, &to);
+                    return Err(format!("Could not place {}: {err}", rel2.display()));
+                }
+                let _ = fs::remove_file(&old);
+            }
+            None => move_entry(&e.path(), &to).map_err(|err| format!("Could not place {}: {err}", rel2.display()))?,
+        }
+    }
+    Ok(())
 }
 
 fn move_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -286,7 +402,12 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Batch / named: brand-new "<Game>" folder (then -2, …). Never reuses an existing folder.
+/// Batch / named: brand-new "<Game>" folder (then -2, …); never reuses an existing folder.
+///
+/// Multi-disc games: when an earlier disc of the same game was extracted into `parent` during this
+/// run, this disc is overlaid onto that folder. The playable executable (default.xex / default.xbe)
+/// of the lowest-numbered disc wins; a later disc never replaces it. A disc 2 without a default.xex
+/// of its own is accepted this way as long as its file name matches an earlier disc.
 pub fn extract_named(
     iso_path: &Path,
     parent: &Path,
@@ -295,28 +416,61 @@ pub fn extract_named(
     job_id: &str,
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<ExtractResult, String> {
-    let info = iso_info(iso_path)?;
-    let stem = iso_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
+    use crate::discs::{self, Kind};
+    let info = iso_info(iso_path);
+    let hint = discs::disc_hint_from_name(iso_path);
+    let (multi, disc, tid, game_name) = match &info {
+        Ok(i) => (discs::looks_multi_disc(iso_path, i.disc_number, i.disc_count), i.disc_number, Some(i.title_id.clone()), i.name.clone()),
+        // No default.xex: only a "(Disc N)" file name can attach it to a game that is already in `parent`.
+        Err(_) => (hint.map(|n| n > 1).unwrap_or(false), hint.unwrap_or(1), None, None),
+    };
+    if let (Err(e), false) = (&info, multi) {
+        return Err(e.clone());
+    }
+    let keys = discs::keys_for(tid.as_deref(), iso_path);
+    let stem = iso_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let title_hex = tid.clone().unwrap_or_default();
     let base = title_override
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
-        .or(info.name.clone())
-        .unwrap_or(if stem.trim().is_empty() {
-            info.title_id.clone()
-        } else {
-            stem
-        });
+        .or(game_name)
+        .unwrap_or(if stem.trim().is_empty() { title_hex.clone() } else { stem });
     let mut seg = crate::archive::safe_segment(&base.chars().take(80).collect::<String>());
     if seg.is_empty() {
-        seg = info.title_id.clone();
+        seg = if title_hex.is_empty() { "Game".into() } else { title_hex };
     }
-    let dir = crate::archive::claim_dir(parent, &seg).map_err(|e| format!("Cannot create output folder: {e}"))?;
-    let r = extract(iso_path, &dir, title_override, jobs, job_id, progress);
-    if r.is_err() {
-        let _ = fs::remove_dir_all(&dir);
+    let make = || crate::archive::claim_dir(parent, &seg).map_err(|e| format!("Cannot create output folder: {e}"));
+    let claim = if multi {
+        discs::claim(parent, Kind::Xex, &keys, disc, make)?
+    } else {
+        discs::Claim { dir: make()?, joined: false }
+    };
+    if info.is_err() && !claim.joined {
+        // Disc 2 with no executable and nothing to join: say why, leave nothing behind.
+        discs::release(parent, Kind::Xex, &keys, disc);
+        let _ = fs::remove_dir(&claim.dir);
+        return Err(info.err().unwrap());
+    }
+    let merge = claim.joined.then(|| {
+        let have = discs::exe_disc(parent, Kind::Xex, &keys);
+        Merge { replace_exe: have == 0 || disc < have }
+    });
+    let r = extract_inner(iso_path, &claim.dir, title_override, jobs, job_id, progress, merge);
+    match &r {
+        Ok(ok) => {
+            if multi && ok.kept == 0 && !ok.title_id.is_empty() {
+                // this disc's executable is now in the folder
+                discs::set_exe_disc(parent, Kind::Xex, &keys, disc);
+            }
+        }
+        Err(_) => {
+            if multi {
+                discs::release(parent, Kind::Xex, &keys, disc);
+            }
+            if !claim.joined {
+                let _ = fs::remove_dir_all(&claim.dir);
+            }
+        }
     }
     r
 }
@@ -330,6 +484,10 @@ pub struct ExtractedXex {
     pub name: Option<String>,
     pub iso_deleted: bool,
     pub kept_reason: Option<String>,
+    pub disc_number: u8,
+    pub disc_count: u8,
+    pub merged: bool,
+    pub warning: Option<String>,
 }
 
 /// Same token registry as GOD auto-convert. Mode is chosen by the caller (page setting).
@@ -362,6 +520,10 @@ pub fn extract_registered(
         name: r.name.clone(),
         iso_deleted: false,
         kept_reason: None,
+        disc_number: r.disc_number,
+        disc_count: r.disc_count,
+        merged: r.merged,
+        warning: r.warning.clone(),
     };
     if !want_delete {
         return Ok(out);
@@ -376,6 +538,9 @@ pub fn extract_registered(
             out,
         );
     }
+    if r.kept > 0 {
+        return keep("ISO kept: its default.xex was not copied because the folder already holds another disc's.", out);
+    }
     progress(0, "Re-checking extracted folder before deleting the ISO");
     let f = File::open(&path).map_err(|e| format!("Cannot open ISO: {e}"))?;
     let source = iso::IsoReader::read(f).map_err(|e| format!("Not an Xbox ISO ({e})"))?;
@@ -383,7 +548,7 @@ pub fn extract_registered(
     let sector_size = source.volume_descriptor.sector_size.max(SECTOR_SIZE);
     let mut planned = Vec::new();
     collect_files(&source.directory_table, Path::new(""), &mut planned);
-    verify_content_vs_iso(&path, root_offset, sector_size, Path::new(&r.output), &planned)
+    verify_content_vs_iso(&path, root_offset, sector_size, Path::new(&r.output), &planned, !r.merged)
         .map_err(|e| format!("{e}. The ISO was kept."))?;
     if jobs.is_cancelled(job_id) {
         return keep("ISO kept: cancelled.", out);
@@ -621,5 +786,181 @@ pub mod tests {
         let e = extract(&iso_path, &out, None, &jobs, "t", &mut |_, _| {}).unwrap_err();
         assert!(e.contains("incomplete") || e.contains("truncated") || e.contains("Not an Xbox"), "{e}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---------- multi-disc overlay, unknown TitleID, safer replace ----------
+
+    use crate::god::tests::{make_iso_files, tmp};
+
+    fn xex_disc(dir: &Path, name: &str, media: u32, n: u8, extra: &[(&str, &[u8])]) -> PathBuf {
+        let p = dir.join(name);
+        let mut files: Vec<(&str, &[u8])> = vec![("default.xex", format!("disc{n}").leak().as_bytes())];
+        files.extend_from_slice(extra);
+        make_iso_files(&p, 0x4D53_07E6, media, (n, 2), &files);
+        p
+    }
+
+    fn read_xex_marker(folder: &Path) -> String {
+        let b = fs::read(folder.join("default.xex")).unwrap();
+        String::from_utf8_lossy(&b[b.len() - 5..]).trim_end_matches('\0').to_string()
+    }
+
+    fn xex_names(d: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn xex_disc_two_is_overlaid_and_never_replaces_disc_ones_executable() {
+        let d = tmp("xex-merge");
+        let out = d.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let one = xex_disc(&d, "Halo (Disc 1).iso", 1, 1, &[("one.bin", b"ONE")]);
+        let two = xex_disc(&d, "Halo (Disc 2).iso", 2, 2, &[("two.bin", b"TWO")]);
+        let a = extract_named(&one, &out, None, &Jobs::default(), "x1", &mut |_, _| {}).unwrap();
+        let b = extract_named(&two, &out, None, &Jobs::default(), "x2", &mut |_, _| {}).unwrap();
+        assert!(!a.merged && b.merged, "disc 2 joins disc 1's folder");
+        assert_eq!(a.output, b.output);
+        assert_eq!(xex_names(&out).len(), 1, "{:?}", xex_names(&out));
+        let game = Path::new(&a.output);
+        assert_eq!(read_xex_marker(game), "disc1", "disc 1's default.xex stays");
+        assert_eq!(fs::read(game.join("one.bin")).unwrap(), b"ONE");
+        assert_eq!(fs::read(game.join("two.bin")).unwrap(), b"TWO");
+        assert_eq!(b.kept, 1, "disc 2's own default.xex was not copied over");
+        assert!(xex_names(game).iter().all(|n| !n.starts_with('.')), "{:?}", xex_names(game));
+    }
+
+    #[test]
+    fn xex_disc_one_arriving_second_takes_over_the_executable() {
+        let d = tmp("xex-merge-rev");
+        let out = d.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let one = xex_disc(&d, "Halo (Disc 1).iso", 1, 1, &[("one.bin", b"ONE")]);
+        let two = xex_disc(&d, "Halo (Disc 2).iso", 2, 2, &[("two.bin", b"TWO")]);
+        let b = extract_named(&two, &out, None, &Jobs::default(), "y2", &mut |_, _| {}).unwrap();
+        assert_eq!(read_xex_marker(Path::new(&b.output)), "disc2");
+        let a = extract_named(&one, &out, None, &Jobs::default(), "y1", &mut |_, _| {}).unwrap();
+        assert!(a.merged);
+        let game = Path::new(&a.output);
+        assert_eq!(read_xex_marker(game), "disc1", "the lower disc number owns the executable");
+        assert!(game.join("one.bin").is_file() && game.join("two.bin").is_file());
+        assert_eq!(xex_names(&out).len(), 1);
+    }
+
+    #[test]
+    fn xex_disc_without_an_executable_joins_by_name_or_explains() {
+        let d = tmp("xex-noexe");
+        let out = d.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let lone = d.join("Zed (Disc 2).iso");
+        make_iso_files(&lone, 0, 0, (1, 1), &[("data.bin", b"DATA")]);
+        // nothing to join: plain message, nothing created
+        let e = extract_named(&lone, &out, None, &Jobs::default(), "n0", &mut |_, _| {}).unwrap_err();
+        assert!(e.contains("Disc 2") && e.contains("Convert Disc 1 first"), "{e}");
+        assert!(xex_names(&out).is_empty(), "{:?}", xex_names(&out));
+        // with disc 1 already extracted from a matching file name it overlays
+        let one = d.join("Zed (Disc 1).iso");
+        make_iso_files(&one, 0x4D53_07E6, 1, (1, 2), &[("default.xex", b"disc1")]);
+        let a = extract_named(&one, &out, None, &Jobs::default(), "n1", &mut |_, _| {}).unwrap();
+        let b = extract_named(&lone, &out, None, &Jobs::default(), "n2", &mut |_, _| {}).unwrap();
+        assert!(b.merged && a.output == b.output);
+        assert_eq!(read_xex_marker(Path::new(&a.output)), "disc1");
+        assert_eq!(fs::read(Path::new(&a.output).join("data.bin")).unwrap(), b"DATA");
+    }
+
+    #[test]
+    fn xex_merge_never_writes_through_a_link() {
+        let d = tmp("xex-links");
+        let out = d.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let one = xex_disc(&d, "Q (Disc 1).iso", 1, 1, &[("a.bin", b"A1")]);
+        let two = xex_disc(&d, "Q (Disc 2).iso", 2, 2, &[("a.bin", b"A2")]);
+        let a = extract_named(&one, &out, None, &Jobs::default(), "l1", &mut |_, _| {}).unwrap();
+        let game = PathBuf::from(&a.output);
+        #[cfg(unix)]
+        {
+            let victim = d.join("victim.txt");
+            fs::write(&victim, "victim").unwrap();
+            fs::remove_file(game.join("a.bin")).unwrap();
+            std::os::unix::fs::symlink(&victim, game.join("a.bin")).unwrap();
+            let e = extract_named(&two, &out, None, &Jobs::default(), "l2", &mut |_, _| {}).unwrap_err();
+            assert!(e.contains("link"), "{e}");
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "victim");
+        }
+        #[cfg(not(unix))]
+        let _ = (game, two);
+    }
+
+    #[test]
+    fn xex_replaced_files_are_swapped_not_overwritten_in_place() {
+        let d = tmp("xex-swap");
+        let out = d.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let one = xex_disc(&d, "Swap (Disc 1).iso", 1, 1, &[("shared.bin", b"FROM-ONE")]);
+        let two = xex_disc(&d, "Swap (Disc 2).iso", 2, 2, &[("shared.bin", b"FROM-TWO")]);
+        let a = extract_named(&one, &out, None, &Jobs::default(), "s1", &mut |_, _| {}).unwrap();
+        extract_named(&two, &out, None, &Jobs::default(), "s2", &mut |_, _| {}).unwrap();
+        let game = Path::new(&a.output);
+        assert_eq!(fs::read(game.join("shared.bin")).unwrap(), b"FROM-TWO", "a later disc's other files overlay");
+        assert!(xex_names(game).iter().all(|n| !n.starts_with(".unpack-old")), "{:?}", xex_names(game));
+    }
+
+    #[test]
+    fn xex_merged_disc_never_deletes_its_iso_when_its_executable_was_kept() {
+        let d = tmp("xex-nodelete");
+        let ext = d.join("archive");
+        fs::create_dir_all(&ext).unwrap();
+        let one = xex_disc(&ext, "Del (Disc 1).iso", 1, 1, &[]);
+        let two = xex_disc(&ext, "Del (Disc 2).iso", 2, 2, &[("t.bin", b"T")]);
+        let reg = |p: &Path| {
+            let t = god::register_extracted(&[p.display().to_string()], &ext, true).remove(0);
+            god::seal_tokens(&[t.clone()]);
+            t
+        };
+        extract_registered(&reg(&one), false, &Jobs::default(), "d1", &mut |_, _| {}).unwrap();
+        let r = extract_registered(&reg(&two), true, &Jobs::default(), "d2", &mut |_, _| {}).unwrap();
+        assert!(r.merged && !r.iso_deleted && two.exists());
+        assert!(r.kept_reason.unwrap().contains("default.xex"));
+    }
+
+    #[test]
+    fn xex_unknown_title_extracts_with_a_warning() {
+        let d = tmp("xex-unknown");
+        let out = d.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let iso = d.join("Mystery.iso");
+        make_iso_files(&iso, 0xDEAD_BEEF, 9, (1, 1), &[("default.xex", b"M"), ("x.bin", b"X")]);
+        let r = extract_named(&iso, &out, None, &Jobs::default(), "k", &mut |_, _| {}).unwrap();
+        assert_eq!(r.title_id, "DEADBEEF");
+        let w = r.warning.expect("warning for an unknown TitleID");
+        assert!(w.contains("DEADBEEF"), "{w}");
+        assert!(Path::new(&r.output).ends_with("Mystery"), "{}", r.output);
+        assert!(Path::new(&r.output).join("x.bin").is_file());
+    }
+
+    #[test]
+    fn companions_finds_the_other_discs_next_to_an_iso() {
+        let d = tmp("companions");
+        let one = xex_disc(&d, "Halo (Disc 1).iso", 1, 1, &[]);
+        let two = xex_disc(&d, "Halo (Disc 2).iso", 2, 2, &[]);
+        // same TitleID, no marker in the name: found through the header's "disc 2 of 2"
+        let renamed = d.join("Halo second.iso");
+        make_iso_files(&renamed, 0x4D53_07E6, 3, (2, 2), &[("default.xex", b"x")]);
+        let other = d.join("Other Game.iso");
+        make_iso_files(&other, 0x4156_0817, 4, (1, 1), &[("default.xex", b"o")]);
+        fs::write(d.join("notes.txt"), "x").unwrap();
+        let found = crate::discs::companions(&one).unwrap();
+        assert_eq!(found, vec![two, renamed]);
+        assert!(!found.contains(&other) && !found.contains(&one));
+        assert!(crate::discs::companions(&other).unwrap().is_empty());
+    }
+
+    #[test]
+    fn playable_exe_names_are_matched_case_insensitively() {
+        assert!(is_playable_exe(Path::new("Default.XEX")));
+        assert!(is_playable_exe(Path::new("sub/default.xbe")));
+        assert!(!is_playable_exe(Path::new("default.xex.bak")));
+        assert!(!is_playable_exe(Path::new("media/readme.txt")));
     }
 }

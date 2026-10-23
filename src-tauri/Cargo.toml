@@ -1,6 +1,6 @@
 [package]
 name = "unpack"
-version = "1.0.0"
+version = "1.6.0"
 edition = "2021"
 default-run = "unpack"
 
@@ -27,6 +27,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
+discord-rich-presence = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

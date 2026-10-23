@@ -23,19 +23,61 @@ pub struct IsoInfo {
     /// Size after trimming unused space, i.e. roughly the GOD output size.
     pub data_size: u64,
     pub parts: u64,
+    /// false: the TitleID is not in the game list. Conversion still works (the folder is named
+    /// after the file or the title typed by the user); the page shows `unknown_title_warning`.
+    pub known: bool,
+    /// 1-based disc number and disc count, from the executable and, if that says "1 of 1", from a
+    /// `(Disc 2)` style file name.
+    pub disc_number: u8,
+    pub disc_count: u8,
+}
+
+/// Shown next to a TitleID that is not in the list. The hex ID is always included so it can be reported.
+pub fn unknown_title_warning(title_id: &str) -> String {
+    format!("Title ID {title_id} is not in Unpack's game list. It is converted anyway; the folder is named after the file (or the title you type).")
+}
+
+/// Why a disc could not be read. A disc 2 that carries no default.xex gets a plain explanation.
+pub fn missing_executable_message(path: &Path, detail: &str) -> String {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+    match crate::discs::disc_hint_from_name(path) {
+        Some(n) if n > 1 => format!("{name} is Disc {n} and has no default.xex of its own. Convert Disc 1 first, or add both discs together."),
+        _ => format!("Couldn't read the game's executable: {detail}"),
+    }
+}
+
+/// (disc number, disc count) with the file-name hint applied when the executable says "1 of 1".
+pub fn disc_numbers(path: &Path, exe: &iso2god::executable::TitleExecutionInfo) -> (u8, u8) {
+    let (mut n, mut c) = (exe.disc_number.max(1), exe.disc_count.max(1));
+    if let Some(h) = crate::discs::disc_hint_from_name(path) {
+        if c <= 1 && n <= 1 {
+            n = h;
+            c = h.max(2);
+        }
+    }
+    (n, c)
 }
 
 pub fn iso_info(path: &Path) -> Result<IsoInfo, String> {
+    read_info(path).map(|(i, _)| i)
+}
+
+fn read_info(path: &Path) -> Result<(IsoInfo, iso2god::executable::TitleExecutionInfo), String> {
     let f = File::open(path).map_err(|e| format!("Cannot open ISO: {e}"))?;
     let size = f.metadata().map(|m| m.len()).unwrap_or(0);
     let mut reader = iso::IsoReader::read(f).map_err(|e| format!("Not an Xbox ISO ({e})"))?;
-    let info = TitleInfo::from_image(&mut reader).map_err(|e| format!("Couldn't read the game's executable: {e:#}"))?;
+    let info = TitleInfo::from_image(&mut reader).map_err(|e| missing_executable_message(path, &format!("{e:#}")))?;
     let data_size = reader.get_max_used_prefix_size();
     check_complete(size, reader.volume_descriptor.root_offset, data_size)?;
     let blocks = data_size.div_ceil(god::BLOCK_SIZE);
-    Ok(IsoInfo {
+    let (disc_number, disc_count) = disc_numbers(path, &info.execution_info);
+    let name = game_list::find_title_by_id(info.execution_info.title_id).filter(|n| !n.trim().is_empty());
+    let out = IsoInfo {
         title_id: format!("{:08X}", info.execution_info.title_id),
-        name: game_list::find_title_by_id(info.execution_info.title_id),
+        known: name.is_some(),
+        disc_number,
+        disc_count,
+        name,
         kind: match info.content_type {
             ContentType::GamesOnDemand => "Xbox 360".into(),
             ContentType::XboxOriginal => "Original Xbox".into(),
@@ -43,7 +85,8 @@ pub fn iso_info(path: &Path) -> Result<IsoInfo, String> {
         size,
         data_size,
         parts: blocks.div_ceil(god::BLOCKS_PER_PART),
-    })
+    };
+    Ok((out, info.execution_info))
 }
 
 /// H1: refuse an ISO that is shorter than its own file system says (half-downloaded,
@@ -171,6 +214,12 @@ pub struct GodResult {
     pub title_id: String,
     pub name: Option<String>,
     pub parts: u64,
+    pub disc_number: u8,
+    pub disc_count: u8,
+    /// This disc was added to a folder that already holds another disc of the same game.
+    pub merged: bool,
+    /// Set when the TitleID is not in the game list (see `unknown_title_warning`).
+    pub warning: Option<String>,
 }
 
 /// Convert. `progress(percent, label)` is called after each part.
@@ -185,10 +234,11 @@ pub fn convert(
     let ioerr = |what: &str| { let w = what.to_string(); move |e: std::io::Error| format!("{w}: {e}") };
     let f = File::open(iso_path).map_err(ioerr("Cannot open ISO"))?;
     let mut source = iso::IsoReader::read(f).map_err(|e| format!("Not an Xbox ISO ({e})"))?;
-    let title = TitleInfo::from_image(&mut source).map_err(|e| format!("Couldn't read the game's executable: {e:#}"))?;
+    let title = TitleInfo::from_image(&mut source).map_err(|e| missing_executable_message(iso_path, &format!("{e:#}")))?;
     let exe_info = title.execution_info;
     let content_type = title.content_type;
     let root_offset = source.volume_descriptor.root_offset;
+    let (disc_number, disc_count) = disc_numbers(iso_path, &exe_info);
 
     let data_size = source.get_max_used_prefix_size(); // "trim from end", the iso2god default
     let block_count = data_size.div_ceil(god::BLOCK_SIZE);
@@ -200,6 +250,8 @@ pub fn convert(
     check_complete(iso_len, root_offset, data_size)?;
 
     fs::create_dir_all(dest_dir).map_err(ioerr("Cannot create output folder"))?;
+    // One writer per destination folder: a second job aimed at it waits (Disc 1 + Disc 2 into the same game folder, two converts into one picked folder).
+    let _dest_lock = crate::destlock::acquire(dest_dir, || progress(0, crate::destlock::WAIT_MESSAGE));
     let need = estimated_output(iso_len, root_offset, part_count);
     if let Some(free) = free_space(dest_dir) {
         if free < need + 64 * 1024 * 1024 {
@@ -300,11 +352,18 @@ pub fn convert(
         return Err(ERR_CANCELLED.into());
     }
     progress(100, "Done");
+    let catalog = game_list::find_title_by_id(exe_info.title_id).filter(|n| !n.trim().is_empty());
+    let title_hex = format!("{:08X}", exe_info.title_id);
+    let warning = (catalog.is_none() && title_override.map(|t| t.trim().is_empty()).unwrap_or(true)).then(|| unknown_title_warning(&title_hex));
     Ok(GodResult {
         output: title_dir.display().to_string(),
-        title_id: format!("{:08X}", exe_info.title_id),
-        name: title_override.map(|s| clamp_title(s.trim())).filter(|s| !s.is_empty()).or_else(|| game_list::find_title_by_id(exe_info.title_id)),
+        title_id: title_hex,
+        name: title_override.map(|s| clamp_title(s.trim())).filter(|s| !s.is_empty()).or(catalog),
         parts: part_count,
+        disc_number,
+        disc_count,
+        merged: false,
+        warning,
     })
 }
 
@@ -312,6 +371,10 @@ pub fn convert(
 /// `parent`. The ISO is checked first, so a non-Xbox ISO fails before anything is created.
 /// The folder is claimed atomically and never reused; on failure/cancel the (then empty)
 /// folder is removed again.
+///
+/// Multi-disc games: a later disc of a game whose earlier disc was converted into `parent` during
+/// this run is added to that disc's folder (GOD discs sit side by side under one TitleID, one
+/// MediaID each), so Disc 1 and Disc 2 end up together instead of in "Game (GOD)" and "Game (GOD)-2".
 pub fn convert_named(
     iso_path: &Path,
     parent: &Path,
@@ -320,7 +383,7 @@ pub fn convert_named(
     job_id: &str,
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<GodResult, String> {
-    let info = iso_info(iso_path)?;
+    let (info, exe) = read_info(iso_path)?;
     let stem = iso_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let base = title_override
         .map(|t| t.trim().to_string())
@@ -331,12 +394,39 @@ pub fn convert_named(
     if seg.is_empty() {
         seg = format!("{} (GOD)", info.title_id);
     }
-    let dir = crate::archive::claim_dir(parent, &seg).map_err(|e| format!("Cannot create output folder: {e}"))?;
+    let make = || crate::archive::claim_dir(parent, &seg).map_err(|e| format!("Cannot create output folder: {e}"));
+    let multi = crate::discs::looks_multi_disc(iso_path, info.disc_number, info.disc_count);
+    let keys = crate::discs::keys_for(Some(&info.title_id), iso_path);
+    let (dir, joined) = if multi {
+        let c = crate::discs::claim(parent, crate::discs::Kind::God, &keys, info.disc_number, make)?;
+        (c.dir, c.joined)
+    } else {
+        (make()?, false)
+    };
+    // A disc with this MediaID already there (same disc converted twice) is not overwritten.
+    let layout = god::FileLayout::new(&dir, &exe, ContentType::GamesOnDemand);
+    let (dir, joined) = if joined && (layout.con_header_file_path().exists() || layout.data_dir_path().exists()) {
+        crate::discs::release(parent, crate::discs::Kind::God, &keys, info.disc_number);
+        (make()?, false)
+    } else {
+        (dir, joined)
+    };
     let r = convert(iso_path, &dir, title_override, jobs, job_id, progress);
-    if r.is_err() {
-        let _ = fs::remove_dir(&dir); // only succeeds if empty: never deletes real output
+    match r {
+        Ok(mut ok) => {
+            ok.merged = joined;
+            Ok(ok)
+        }
+        Err(e) => {
+            if multi {
+                crate::discs::release(parent, crate::discs::Kind::God, &keys, info.disc_number);
+            }
+            if !joined {
+                let _ = fs::remove_dir(&dir); // only succeeds if empty: never deletes real output
+            }
+            Err(e)
+        }
     }
-    r
 }
 
 /// Identity of an extracted ISO, taken right after extraction: size, modification time and a
@@ -485,6 +575,10 @@ pub struct ExtractedGod {
     pub iso_deleted: bool,
     /// Why the ISO was kept although the user asked to delete it (None if deleted / not asked).
     pub kept_reason: Option<String>,
+    pub disc_number: u8,
+    pub disc_count: u8,
+    pub merged: bool,
+    pub warning: Option<String>,
 }
 
 /// Convert an ISO registered by `register_extracted`. Output goes into a new "<Game> (GOD)"
@@ -531,7 +625,7 @@ pub fn convert_registered(
     if identity(&path)? != ident {
         return Err(format!("{changed} Output in {} may not match; delete it.", r.output));
     }
-    let mut out = ExtractedGod { output: r.output.clone(), parts: r.parts, title_id: r.title_id.clone(), name: r.name.clone(), iso_deleted: false, kept_reason: None };
+    let mut out = ExtractedGod { output: r.output.clone(), parts: r.parts, title_id: r.title_id.clone(), name: r.name.clone(), iso_deleted: false, kept_reason: None, disc_number: r.disc_number, disc_count: r.disc_count, merged: r.merged, warning: r.warning.clone() };
     if !want_delete {
         return Ok(out);
     }
@@ -642,35 +736,58 @@ fn deep_verify_with(layout: &god::FileLayout, part_count: u64, iso_len: u64, roo
     Ok(())
 }
 
-/// Swap the finished package in: old `.data` folder is renamed aside first and only deleted
-/// once the new one is in place (restored if the move fails).
+/// Swap the finished package in. The previous `.data` folder and header are renamed aside first and
+/// only deleted once the new header is in place; if any step fails, the new data goes back to the
+/// temp folder and the previous package is restored, so there is never a window with new data under
+/// an old header (or no header at all).
 fn install(tmp: &god::FileLayout, fin: &god::FileLayout, job_id: &str) -> std::io::Result<()> {
     let (new_data, new_hdr) = (tmp.data_dir_path(), tmp.con_header_file_path());
     let (data, hdr) = (fin.data_dir_path(), fin.con_header_file_path());
     if let Some(p) = hdr.parent() {
         fs::create_dir_all(p)?;
     }
-    let backup = data.with_file_name(format!(".unpack-god-old-{}", crate::archive::safe_segment(job_id)));
-    let _ = fs::remove_dir_all(&backup);
+    let job = crate::archive::safe_segment(job_id);
+    let data_bak = data.with_file_name(format!(".unpack-god-old-{job}"));
+    let hdr_bak = hdr.with_file_name(format!(".unpack-god-oldhdr-{job}"));
+    let _ = fs::remove_dir_all(&data_bak);
+    let _ = fs::remove_file(&hdr_bak);
     let had_old = data.exists();
+    let had_hdr = fs::symlink_metadata(&hdr).is_ok();
     if had_old {
-        fs::rename(&data, &backup)?;
+        fs::rename(&data, &data_bak)?;
     }
     if let Err(e) = fs::rename(&new_data, &data) {
         if had_old {
-            let _ = fs::rename(&backup, &data);
+            let _ = fs::rename(&data_bak, &data);
         }
         return Err(e);
     }
-    if hdr.exists() {
-        fs::remove_file(&hdr)?;
+    let rollback = |e: std::io::Error| {
+        let _ = fs::rename(&data, &new_data);
+        if had_old {
+            let _ = fs::rename(&data_bak, &data);
+        }
+        if had_hdr {
+            let _ = fs::rename(&hdr_bak, &hdr);
+        }
+        Err(e)
+    };
+    if had_hdr {
+        if let Err(e) = fs::rename(&hdr, &hdr_bak) {
+            return rollback(e);
+        }
     }
-    fs::rename(&new_hdr, &hdr)?;
+    if let Err(e) = fs::rename(&new_hdr, &hdr) {
+        return rollback(e);
+    }
     if had_old {
-        let _ = fs::remove_dir_all(&backup);
+        let _ = fs::remove_dir_all(&data_bak);
+    }
+    if had_hdr {
+        let _ = fs::remove_file(&hdr_bak);
     }
     Ok(())
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

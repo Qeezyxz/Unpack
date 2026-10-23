@@ -44,14 +44,19 @@ static void scan(void){
     wchar_t p[2048]; wcsncpy(p,v,2047); PathUnquoteSpacesW(p);
     if(GetFileAttributesW(p)==INVALID_FILE_ATTRIBUTES){ add(1,un,0,0); }
   }
-  const wchar_t*mk=L"Software\\justin\\Unpack";
-  if(keyExists(mk)){ wchar_t dir[2048]; readStr(mk,NULL,dir,sizeof dir);
-    wchar_t ex[2100]; swprintf(ex,2100,L"%ls\\uninstall.exe",dir);
-    if(dir[0]==0 || GetFileAttributesW(ex)==INVALID_FILE_ATTRIBUTES){ add(1,mk,0,0); add(6,L"Software\\justin",0,0);} }
+  // Install-location key and app data: current identifier (com.qeezyxz.unpack) and the pre-1.6 one (com.justin.unpack)
+  static const wchar_t*mks[][2]={{L"Software\\qeezyxz\\Unpack",L"Software\\qeezyxz"},{L"Software\\justin\\Unpack",L"Software\\justin"}};
+  for(int i=0;i<2;i++){ const wchar_t*mk=mks[i][0];
+    if(keyExists(mk)){ wchar_t dir[2048]; readStr(mk,NULL,dir,sizeof dir);
+      wchar_t ex[2100]; swprintf(ex,2100,L"%ls\\uninstall.exe",dir);
+      if(dir[0]==0 || GetFileAttributesW(ex)==INVALID_FILE_ATTRIBUTES){ add(1,mk,0,0); add(6,mks[i][1],0,0);} } }
   // App data (WebView2 cache, settings, history)
   wchar_t e[MAX_PATH], p[MAX_PATH*2];
-  if(GetEnvironmentVariableW(L"LOCALAPPDATA",e,MAX_PATH)){ swprintf(p,MAX_PATH*2,L"%ls\\com.justin.unpack",e); if(GetFileAttributesW(p)!=INVALID_FILE_ATTRIBUTES) add(3,p,0,0);}
-  if(GetEnvironmentVariableW(L"APPDATA",e,MAX_PATH)){ swprintf(p,MAX_PATH*2,L"%ls\\com.justin.unpack",e); if(GetFileAttributesW(p)!=INVALID_FILE_ATTRIBUTES) add(3,p,0,0);}
+  static const wchar_t*ids[]={L"com.qeezyxz.unpack",L"com.justin.unpack"};
+  for(int i=0;i<2;i++){
+    if(GetEnvironmentVariableW(L"LOCALAPPDATA",e,MAX_PATH)){ swprintf(p,MAX_PATH*2,L"%ls\\%ls",e,ids[i]); if(GetFileAttributesW(p)!=INVALID_FILE_ATTRIBUTES) add(3,p,0,0);}
+    if(GetEnvironmentVariableW(L"APPDATA",e,MAX_PATH)){ swprintf(p,MAX_PATH*2,L"%ls\\%ls",e,ids[i]); if(GetFileAttributesW(p)!=INVALID_FILE_ATTRIBUTES) add(3,p,0,0);}
+  }
   // Temp files the app makes: %TEMP%\unpack-entry-*.txt
   wchar_t t[MAX_PATH]; if(GetTempPathW(MAX_PATH,t)){ WIN32_FIND_DATAW fd; swprintf(p,MAX_PATH*2,L"%lsunpack-entry-*.txt",t);
     HANDLE h=FindFirstFileW(p,&fd); if(h!=INVALID_HANDLE_VALUE){ do{ if(!(fd.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)){ wchar_t f[MAX_PATH*2]; swprintf(f,MAX_PATH*2,L"%ls%ls",t,fd.cFileName); add(4,f,0,0);} }while(FindNextFileW(h,&fd)); FindClose(h);} }

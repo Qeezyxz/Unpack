@@ -52,6 +52,7 @@ fn main() {
                             collision: Collision::parse(&s("collision")),
                             layout: if s("layout") == "here" { Layout::Here } else { Layout::Folder },
                             skip_junk: a["skipJunk"].as_bool().unwrap_or(true),
+                            nested: a["nested"].as_bool().unwrap_or(false),
                         };
                         let r = archive::extract(&exe, &opts, &jobs, &id, &mut |p, f| {
                             events.lock().unwrap().push(json!({"event":"job-progress","payload":{"id": id, "percent": p, "file": f}}));

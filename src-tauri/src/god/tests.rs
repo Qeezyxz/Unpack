@@ -64,7 +64,67 @@ fn make_iso(path: &Path, title_id: u32, pad_bytes: u64) {
     }
 }
 
-fn tmp(name: &str) -> crate::testutil::TmpDir {
+/// A flat XDVDFS image: every file in the root folder, `default.xex` (if listed) carrying the given
+/// title, media id and "disc N of M". Lets the multi-disc tests build Disc 1 / Disc 2 pairs.
+pub(crate) fn make_iso_files(path: &Path, title_id: u32, media_id: u32, disc: (u8, u8), files: &[(&str, &[u8])]) {
+    let mut f = File::create(path).unwrap();
+    f.seek(SeekFrom::Start(32 * SECTOR)).unwrap();
+    f.write_all(b"MICROSOFT*XBOX*MEDIA").unwrap();
+    f.write_all(&33u32.to_le_bytes()).unwrap();
+    f.write_all(&(SECTOR as u32).to_le_bytes()).unwrap();
+    f.write_all(&[0u8; 8]).unwrap();
+    f.seek(SeekFrom::Start(32 * SECTOR + 0x7ec)).unwrap();
+    f.write_all(b"MICROSOFT*XBOX*MEDIA").unwrap();
+    let mut dir = Vec::new();
+    let mut sector = 34u32;
+    let mut bodies: Vec<(u32, Vec<u8>)> = Vec::new();
+    for (name, body) in files {
+        let body = if *name == "default.xex" {
+            let mut x = Vec::new();
+            x.extend_from_slice(b"XEX2");
+            x.extend_from_slice(&0u32.to_be_bytes());
+            x.extend_from_slice(&0x1000u32.to_be_bytes());
+            x.extend_from_slice(&0u32.to_be_bytes());
+            x.extend_from_slice(&0u32.to_be_bytes());
+            x.extend_from_slice(&1u32.to_be_bytes());
+            x.extend_from_slice(&0x0004_0006u32.to_be_bytes());
+            x.extend_from_slice(&0x100u32.to_be_bytes());
+            x.resize(0x100, 0);
+            x.extend_from_slice(&media_id.to_be_bytes());
+            x.extend_from_slice(&1u32.to_be_bytes());
+            x.extend_from_slice(&0u32.to_be_bytes());
+            x.extend_from_slice(&title_id.to_be_bytes());
+            x.extend_from_slice(&[0, 0, disc.0, disc.1]);
+            x.extend_from_slice(body); // a marker so two discs' executables differ
+            x
+        } else {
+            body.to_vec()
+        };
+        dir.extend_from_slice(&0u16.to_le_bytes());
+        dir.extend_from_slice(&0u16.to_le_bytes());
+        dir.extend_from_slice(&sector.to_le_bytes());
+        dir.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        dir.push(0x80);
+        dir.push(name.len() as u8);
+        dir.extend_from_slice(name.as_bytes());
+        while dir.len() % 4 != 0 { dir.push(0xff); }
+        let n = (body.len() as u64).div_ceil(SECTOR).max(1) as u32;
+        bodies.push((sector, body));
+        sector += n;
+    }
+    dir.extend_from_slice(&[0xff; 4]);
+    assert!(dir.len() <= SECTOR as usize);
+    f.seek(SeekFrom::Start(33 * SECTOR)).unwrap();
+    f.write_all(&dir).unwrap();
+    for (sec, body) in &bodies {
+        f.seek(SeekFrom::Start(*sec as u64 * SECTOR)).unwrap();
+        f.write_all(body).unwrap();
+    }
+    let end = sector as u64 * SECTOR;
+    f.set_len(end).unwrap();
+}
+
+pub(crate) fn tmp(name: &str) -> crate::testutil::TmpDir {
     crate::testutil::TmpDir::new(&format!("god-{name}"))
 }
 
@@ -442,4 +502,172 @@ fn r4l1_tokens_random_single_use() {
     let _ = convert_registered(&a[0], false, &Jobs::default(), "t", &mut |_, _| {});
     assert!(convert_registered(&a[0], false, &Jobs::default(), "t", &mut |_, _| {}).unwrap_err().contains("already used"));
     fs::remove_dir_all(&d).unwrap();
+}
+
+// ---------- ported from the 1.5.0 rewrite: unknown TitleID, multi-disc, safer install ----------
+
+fn names_in(d: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    v.sort();
+    v
+}
+
+/// An ID that is not in the game list must not block the conversion: it warns, keeps the hex ID
+/// in the message and falls back to the file name for the folder.
+#[test]
+fn unknown_title_id_warns_but_converts() {
+    let d = tmp("unknown-title");
+    let iso = d.join("Mystery Game.iso");
+    make_iso_files(&iso, 0xDEAD_BEEF, 0x1111_1111, (1, 1), &[("default.xex", b"U")]);
+    let i = iso_info(&iso).unwrap();
+    assert_eq!((i.title_id.as_str(), i.known, i.name.as_deref()), ("DEADBEEF", false, None));
+    let out = d.join("out");
+    let r = convert(&iso, &out, None, &Jobs::default(), "u1", &mut |_, _| {}).unwrap();
+    let w = r.warning.expect("unknown TitleID must carry a warning");
+    assert!(w.contains("DEADBEEF") && w.contains("not in Unpack's game list"), "{w}");
+    assert!(out.join("DEADBEEF/00007000/11111111").is_file());
+    // a typed title silences the warning (the user already named it)
+    let r = convert(&iso, &d.join("out2"), Some("My Homebrew"), &Jobs::default(), "u2", &mut |_, _| {}).unwrap();
+    assert!(r.warning.is_none() && r.name.as_deref() == Some("My Homebrew"));
+    // auto mode names the folder after the file
+    fs::create_dir_all(d.join("auto")).unwrap();
+    let named = convert_named(&iso, &d.join("auto"), None, &Jobs::default(), "u3", &mut |_, _| {}).unwrap();
+    assert!(named.output.contains("Mystery Game (GOD)") && named.warning.is_some(), "{}", named.output);
+    // known titles carry no warning
+    let halo = d.join("halo.iso");
+    make_iso(&halo, 0x4D53_07E6, 0);
+    assert!(iso_info(&halo).unwrap().known);
+    assert!(convert(&halo, &d.join("out3"), None, &Jobs::default(), "u4", &mut |_, _| {}).unwrap().warning.is_none());
+}
+
+#[test]
+fn disc_two_without_an_executable_gets_a_plain_message() {
+    let d = tmp("disc2-msg");
+    let hinted = d.join("Big Game (Disc 2).iso");
+    make_iso_files(&hinted, 0, 0, (1, 1), &[("data.bin", &[7u8; 100])]);
+    let e = iso_info(&hinted).unwrap_err();
+    assert!(e.contains("Disc 2") && e.contains("Convert Disc 1 first") && e.contains("Big Game (Disc 2).iso"), "{e}");
+    let e = convert(&hinted, &d.join("o"), None, &Jobs::default(), "m", &mut |_, _| {}).unwrap_err();
+    assert!(e.contains("Disc 2"), "{e}");
+    assert!(!d.join("o/Big Game").exists());
+    let plain = d.join("Whatever.iso");
+    make_iso_files(&plain, 0, 0, (1, 1), &[("data.bin", &[7u8; 100])]);
+    let e = iso_info(&plain).unwrap_err();
+    assert!(e.contains("executable") && !e.contains("Disc"), "{e}");
+}
+
+#[test]
+fn disc_numbers_come_from_the_header_then_the_name() {
+    let d = tmp("disc-nums");
+    let a = d.join("A.iso");
+    make_iso_files(&a, 0x4D53_07E6, 0xA1, (2, 3), &[("default.xex", b"")]);
+    let i = iso_info(&a).unwrap();
+    assert_eq!((i.disc_number, i.disc_count), (2, 3));
+    let b = d.join("B (Disc 2).iso");
+    make_iso_files(&b, 0x4D53_07E6, 0xB1, (1, 1), &[("default.xex", b"")]);
+    let i = iso_info(&b).unwrap();
+    assert_eq!((i.disc_number, i.disc_count), (2, 2));
+    let c = d.join("C.iso");
+    make_iso_files(&c, 0x4D53_07E6, 0xC1, (1, 1), &[("default.xex", b"")]);
+    let i = iso_info(&c).unwrap();
+    assert_eq!((i.disc_number, i.disc_count), (1, 1));
+}
+
+fn disc(d: &Path, name: &str, media: u32, n: u8) -> PathBuf {
+    let p = d.join(name);
+    make_iso_files(&p, 0x4D53_07E6, media, (n, 2), &[("default.xex", format!("disc{n}").as_bytes())]);
+    p
+}
+
+/// Disc 1 and Disc 2 of one game end up together: one "<Game> (GOD)" folder, one TitleID folder,
+/// one header + data folder per disc. Either order works.
+#[test]
+fn god_discs_merge_into_one_folder_in_any_order() {
+    for (tag, order) in [("fwd", [1u8, 2]), ("rev", [2, 1])] {
+        let d = tmp(&format!("god-merge-{tag}"));
+        let ext = d.join("archive");
+        fs::create_dir_all(&ext).unwrap();
+        let isos = [disc(&ext, "Halo (Disc 1).iso", 0xAA01, 1), disc(&ext, "Halo (Disc 2).iso", 0xAA02, 2)];
+        let reg = |p: &Path| register_extracted(&[p.display().to_string()], &ext, false).remove(0);
+        let mut results = Vec::new();
+        for n in order {
+            let t = reg(&isos[n as usize - 1]);
+            results.push(convert_registered(&t, false, &Jobs::default(), &format!("g{n}"), &mut |_, _| {}).unwrap());
+        }
+        assert!(!results[0].merged && results[1].merged, "{tag}: second disc joins the first");
+        assert_eq!(results[0].output, results[1].output, "{tag}: same TitleID folder");
+        let gods: Vec<String> = names_in(&d).into_iter().filter(|n| n.contains("(GOD)")).collect();
+        assert_eq!(gods.len(), 1, "{tag}: {gods:?}");
+        let base = d.join(&gods[0]).join("4D5307E6/00007000");
+        for m in ["0000AA01", "0000AA02"] {
+            assert!(base.join(m).is_file() && base.join(format!("{m}.data")).is_dir(), "{tag}: media {m} missing in {:?}", names_in(&base));
+        }
+        assert_eq!(results[1].disc_number.max(results[0].disc_number), 2);
+    }
+}
+
+/// Converting the very same disc again is a re-run, not a merge: it gets its own folder, and an
+/// unrelated single-disc game is never merged.
+#[test]
+fn same_disc_twice_and_single_disc_games_get_their_own_folders() {
+    let d = tmp("god-nomerge");
+    let ext = d.join("archive");
+    fs::create_dir_all(&ext).unwrap();
+    let one = disc(&ext, "Halo (Disc 1).iso", 0xBB01, 1);
+    let reg = |p: &Path| register_extracted(&[p.display().to_string()], &ext, false).remove(0);
+    let a = convert_registered(&reg(&one), false, &Jobs::default(), "a", &mut |_, _| {}).unwrap();
+    let b = convert_registered(&reg(&one), false, &Jobs::default(), "b", &mut |_, _| {}).unwrap();
+    assert!(!a.merged && !b.merged && a.output != b.output, "{} {}", a.output, b.output);
+    let single = d.join("archive/Solo.iso");
+    make_iso_files(&single, 0x4D53_07E6, 0xCC01, (1, 1), &[("default.xex", b"s")]);
+    let s1 = convert_registered(&reg(&single), false, &Jobs::default(), "s1", &mut |_, _| {}).unwrap();
+    let s2 = convert_registered(&reg(&single), false, &Jobs::default(), "s2", &mut |_, _| {}).unwrap();
+    assert!(!s1.merged && !s2.merged && s1.output != s2.output);
+}
+
+/// Two jobs aimed at one destination take turns (per-destination lock), and both finish intact.
+#[test]
+fn concurrent_converts_into_one_folder_are_serialised() {
+    let d = tmp("god-lock");
+    let isos = [disc(&d, "Halo (Disc 1).iso", 0xDD01, 1), disc(&d, "Halo (Disc 2).iso", 0xDD02, 2)];
+    let out = d.join("shared");
+    let hs: Vec<_> = isos.iter().enumerate().map(|(i, p)| {
+        let (p, out) = (p.clone(), out.clone());
+        std::thread::spawn(move || convert(&p, &out, None, &Jobs::default(), &format!("c{i}"), &mut |_, _| {}).unwrap())
+    }).collect();
+    for h in hs { h.join().unwrap(); }
+    let base = out.join("4D5307E6/00007000");
+    assert!(base.join("0000DD01").is_file() && base.join("0000DD02").is_file());
+    assert!(names_in(&out).iter().all(|n| !n.starts_with('.')), "{:?}", names_in(&out));
+    verify_package(&god::FileLayout::new(&out, &iso2god::executable::TitleExecutionInfo { media_id: 0xDD01, version: 1, base_version: 0, title_id: 0x4D53_07E6, platform: 0, executable_type: 0, disc_number: 1, disc_count: 2 }, ContentType::GamesOnDemand), 1, fs::metadata(&isos[0]).unwrap().len(), 0).unwrap();
+}
+
+/// If the new header cannot be put in place, the previous data AND header are restored; the new
+/// data goes back to the temp folder. (No window with new data under an old header.)
+#[test]
+fn install_rolls_back_when_the_header_swap_fails() {
+    let d = tmp("god-install");
+    let exe = iso2god::executable::TitleExecutionInfo { media_id: 0x5, version: 1, base_version: 0, title_id: 0x4D53_07E6, platform: 0, executable_type: 0, disc_number: 1, disc_count: 1 };
+    let (tmp_dir, fin_dir) = (d.join("tmp"), d.join("fin"));
+    let tmp_l = god::FileLayout::new(&tmp_dir, &exe, ContentType::GamesOnDemand);
+    let fin = god::FileLayout::new(&fin_dir, &exe, ContentType::GamesOnDemand);
+    for (l, tag) in [(&tmp_l, "new"), (&fin, "old")] {
+        fs::create_dir_all(l.data_dir_path()).unwrap();
+        fs::write(l.data_dir_path().join("Data0000"), tag).unwrap();
+        fs::write(l.con_header_file_path(), tag).unwrap();
+    }
+    // sabotage: the new header is gone, so the final rename fails
+    fs::remove_file(tmp_l.con_header_file_path()).unwrap();
+    assert!(install(&tmp_l, &fin, "j").is_err());
+    assert_eq!(fs::read_to_string(fin.data_dir_path().join("Data0000")).unwrap(), "old");
+    assert_eq!(fs::read_to_string(fin.con_header_file_path()).unwrap(), "old");
+    assert_eq!(fs::read_to_string(tmp_l.data_dir_path().join("Data0000")).unwrap(), "new", "new data returned to temp");
+    let left: Vec<_> = names_in(fin.con_header_file_path().parent().unwrap());
+    assert_eq!(left.len(), 2, "no leftovers: {left:?}");
+    // and the happy path replaces both
+    fs::write(tmp_l.con_header_file_path(), "new").unwrap();
+    install(&tmp_l, &fin, "j2").unwrap();
+    assert_eq!(fs::read_to_string(fin.data_dir_path().join("Data0000")).unwrap(), "new");
+    assert_eq!(fs::read_to_string(fin.con_header_file_path()).unwrap(), "new");
+    assert_eq!(names_in(fin.con_header_file_path().parent().unwrap()).len(), 2);
 }

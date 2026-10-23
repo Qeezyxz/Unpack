@@ -408,7 +408,7 @@ pub fn stage(ctx: &Ctx, e: &Entry, downloads: &[PathBuf], out: &Path, progress: 
                     return Err(format!("Not enough free space to unpack {name} in Unpack's staging folder ({} needed, {} free).", crate::download::human_size(listed.saturating_add(STAGE_RESERVE)), crate::download::human_size(free)));
                 }
             }
-            let opts = crate::archive::ExtractOptions { archive: dl, dest_parent: &dir, password: None, collision: crate::archive::Collision::Number, layout: crate::archive::Layout::Here, skip_junk: true };
+            let opts = crate::archive::ExtractOptions { archive: dl, dest_parent: &dir, password: None, collision: crate::archive::Collision::Number, layout: crate::archive::Layout::Here, skip_junk: true, nested: false };
             crate::archive::extract(exe, &opts, &crate::archive::Jobs::default(), &format!("catalog-{k}"), progress).map_err(|err| format!("Couldn't unpack {name}: {err}"))?;
         } else {
             std::fs::rename(dl, dir.join(&name)).map_err(|e| e.to_string())?;

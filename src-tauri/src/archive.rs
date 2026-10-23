@@ -656,6 +656,11 @@ pub struct ExtractResult {
     /// True only when this run created a brand-new folder via claim_dir (Folder layout).
     /// Session grants use this; Skip / Replace-merge / Extract-here never set it.
     pub created: bool,
+    /// Archives found inside the archive that were opened too ("Open zips inside zips").
+    pub nested: u32,
+    /// Archives found inside that were left closed: the option is off, a limit was hit, or the inner
+    /// archive needs a password / is damaged.
+    pub inner_left: u32,
 }
 
 /// .iso files under `root`, as paths relative to it (links never followed).
@@ -685,6 +690,8 @@ pub struct ExtractOptions<'a> {
     pub collision: Collision,
     pub layout: Layout,
     pub skip_junk: bool,
+    /// Open archives found inside the extracted files (same folder, same safety rules).
+    pub nested: bool,
 }
 
 fn is_junk(name: &str) -> bool {
@@ -770,7 +777,7 @@ pub fn extract(
     if opts.layout == Layout::Folder && opts.collision == Collision::Skip {
         let want = safe_segment(single_root_dir.as_deref().unwrap_or(&stem));
         if fs::symlink_metadata(parent.join(&want)).is_ok() {
-            return Ok(ExtractResult { output: parent.join(want).display().to_string(), skipped: true, warnings: vec![], files: 0, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false });
+            return Ok(ExtractResult { output: parent.join(want).display().to_string(), skipped: true, warnings: vec![], files: 0, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false, nested: 0, inner_left: 0 });
         }
     }
 
@@ -809,8 +816,26 @@ pub fn extract(
     if files == 0 && fs::read_dir(&staging).map(|mut r| r.next().is_none()).unwrap_or(true) {
         return Err("The archive opened, but no files were found.".into());
     }
+    let inner = open_inner(exe, &staging, opts.nested, jobs, job_id, progress, &mut warnings)?;
+    let files = if inner.opened > 0 { count_files(&staging) } else { files };
+    let (nested, inner_left) = (inner.opened, inner.left);
 
     let place_err = |e: std::io::Error| format!("Could not move files into place: {e}");
+    // Writing into a folder that already exists (Extract here, Replace) must not overlap a convert or
+    // another extraction writing the same folder. Taken before PLACE_LOCK, so a long convert never
+    // stalls unrelated extractions.
+    let wait = || progress(100, crate::destlock::WAIT_MESSAGE);
+    let _dest_lock = match (opts.layout, opts.collision) {
+        (Layout::Here, _) => Some(crate::destlock::acquire(parent, wait)),
+        (Layout::Folder, Collision::Replace) => {
+            let name = match &single_root_dir {
+                Some(top) if staging.join(top).is_dir() => safe_segment(top),
+                _ => stem.clone(),
+            };
+            Some(crate::destlock::acquire(&parent.join(name), wait))
+        }
+        _ => None,
+    };
     // One job at a time decides names and moves files in (moves are renames, so this is quick).
     let _place = PLACE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let output = match opts.layout {
@@ -830,10 +855,10 @@ pub fn extract(
                     merge_replace(&src, &target, &mut warnings).map_err(place_err)?;
                     let isos: Vec<String> = iso_rel.iter().map(|r| target.join(r).display().to_string()).collect();
                     let iso_tokens = crate::god::register_extracted(&isos, &target, false);
-                    return Ok(ExtractResult { output: target.display().to_string(), skipped: false, warnings, files, isos, merged: true, iso_tokens, dlcs: dlc_rel.iter().map(|r| target.join(r).display().to_string()).collect(), created: false });
+                    return Ok(ExtractResult { output: target.display().to_string(), skipped: false, warnings, files, isos, merged: true, iso_tokens, dlcs: dlc_rel.iter().map(|r| target.join(r).display().to_string()).collect(), created: false, nested, inner_left });
                 }
                 (true, Collision::Skip) => {
-                    return Ok(ExtractResult { output: target.display().to_string(), skipped: true, warnings, files: 0, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false });
+                    return Ok(ExtractResult { output: target.display().to_string(), skipped: true, warnings, files: 0, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false, nested: 0, inner_left: 0 });
                 }
                 _ => {}
             }
@@ -845,7 +870,7 @@ pub fn extract(
             // Delete is never allowed in Replace mode: another archive in the batch may merge
             // into this same folder later and swap the file (Overseer round-3 H1).
             let iso_tokens = crate::god::register_extracted(&isos, &final_target, opts.collision != Collision::Replace);
-            return Ok(ExtractResult { output: final_target.display().to_string(), skipped: false, warnings, files, isos, merged: false, iso_tokens, dlcs: dlc_rel.iter().map(|r| final_target.join(r).display().to_string()).collect(), created: true });
+            return Ok(ExtractResult { output: final_target.display().to_string(), skipped: false, warnings, files, isos, merged: false, iso_tokens, dlcs: dlc_rel.iter().map(|r| final_target.join(r).display().to_string()).collect(), created: true, nested, inner_left });
         }
         Layout::Here => {
             let items: Vec<_> = fs::read_dir(&staging).map_err(place_err)?.flatten().collect();
@@ -871,7 +896,109 @@ pub fn extract(
             parent.to_path_buf()
         }
     };
-    Ok(ExtractResult { output: output.display().to_string(), skipped: false, warnings, files, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false })
+    Ok(ExtractResult { output: output.display().to_string(), skipped: false, warnings, files, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false, nested, inner_left })
+}
+
+/// Archives opened inside an extracted archive, and archives found but left closed.
+struct Inner {
+    opened: u32,
+    left: u32,
+}
+
+const MAX_NESTED_DEPTH: u32 = 3;
+/// Across the whole extraction, so a pack of packs (or a bomb) cannot make Unpack open thousands.
+const MAX_NESTED_ARCHIVES: u32 = 40;
+
+/// Archive files Unpack opens on its own inside an extracted tree (a narrower list than
+/// `is_archive_name`: no `.cab`/`.wim`/... that games ship as data).
+pub fn is_nested_archive(name: &str) -> bool {
+    let l = name.to_lowercase();
+    [".zip", ".rar", ".7z", ".tar", ".tgz", ".gz", ".xz", ".bz2"].iter().any(|e| l.ends_with(e))
+}
+
+fn find_nested(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() && !is_link(&p) {
+                stack.push(p);
+            } else if ft.is_file() && is_nested_archive(&e.file_name().to_string_lossy()) {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Open the archives found in `root` (the staging folder) in place: each `x/inner.zip` becomes a
+/// sibling folder `x/inner`, then that folder is searched in turn (depth <= 3, <= 40 archives in
+/// all). The inner archive stays where it is. Inner extraction uses the same rules as the outer
+/// one (no links, sanitised, junk skipped) and runs inside the staging folder, so a cancel or a
+/// failure leaves nothing behind. An inner archive that needs a password or is damaged is left closed.
+fn open_inner(
+    exe: &Path,
+    root: &Path,
+    open: bool,
+    jobs: &Jobs,
+    job_id: &str,
+    progress: &mut dyn FnMut(u32, &str),
+    warnings: &mut Vec<String>,
+) -> Result<Inner, String> {
+    let mut inner = Inner { opened: 0, left: 0 };
+    let mut level = vec![root.to_path_buf()];
+    for depth in 1..=MAX_NESTED_DEPTH + 1 {
+        let mut next = Vec::new();
+        for dir in &level {
+            for archive in find_nested(dir) {
+                if !open || depth > MAX_NESTED_DEPTH || inner.opened >= MAX_NESTED_ARCHIVES {
+                    inner.left += 1;
+                    continue;
+                }
+                let rel = archive.strip_prefix(root).unwrap_or(&archive).display().to_string();
+                if jobs.is_cancelled(job_id) {
+                    return Err(ERR_CANCELLED.into());
+                }
+                let parent = archive.parent().unwrap_or(root);
+                let out = claim_dir(parent, &archive_stem(&archive)).map_err(|e| format!("Could not open {rel}: {e}"))?;
+                let mut out_arg = std::ffi::OsString::from("-o");
+                out_arg.push(out.as_os_str());
+                let args: Vec<std::ffi::OsString> = vec![
+                    "x".into(), "-y".into(), "-bso0".into(), "-bse2".into(), "-bsp1".into(), "-snl-".into(), "-sccUTF-8".into(),
+                    pw_arg(None).into(), out_arg, "--".into(), archive.as_os_str().to_owned(),
+                ];
+                progress(99, &format!("Opening inner archive {rel}"));
+                match run_with_progress(exe, &args, jobs, job_id, false, &mut |_, f| progress(99, &format!("{rel}: {f}"))) {
+                    Ok(tolerated) => {
+                        warnings.extend(tolerated);
+                        warnings.extend(sanitize_tree(&out));
+                        remove_junk(&out);
+                        inner.opened += 1;
+                        next.push(out);
+                    }
+                    Err(e) if e == ERR_CANCELLED => return Err(e),
+                    Err(e) => {
+                        let _ = fs::remove_dir_all(&out);
+                        inner.left += 1;
+                        warnings.push(if e == ERR_PASSWORD_REQUIRED || e == ERR_WRONG_PASSWORD {
+                            format!("{rel} needs a password, so it was left closed.")
+                        } else {
+                            format!("{rel} could not be opened ({e}); it was left closed.")
+                        });
+                    }
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        level = next;
+    }
+    Ok(inner)
 }
 
 /// Temp list file naming exactly one entry. 7-Zip reads names from it literally

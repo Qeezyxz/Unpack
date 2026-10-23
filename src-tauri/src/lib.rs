@@ -10,6 +10,9 @@ pub mod iso_extract;
 pub mod modnames;
 pub mod ftp;
 pub mod catalog;
+pub mod discord;
+pub mod destlock;
+pub mod discs;
 #[cfg(test)]
 pub mod testutil;
 
@@ -143,6 +146,7 @@ async fn extract_archive(
     layout: String,
     skip_junk: bool,
     seal_isos: Option<bool>,
+    nested: Option<bool>,
  ) -> Result<archive::ExtractResult, String> {
     // Dest must be a picked folder, or (Extract beside) the archive's own parent.
     let dest_path = match grants.check(&dest) {
@@ -170,6 +174,7 @@ async fn extract_archive(
             collision: Collision::parse(&collision),
             layout: if layout == "here" { Layout::Here } else { Layout::Folder },
             skip_junk,
+            nested: nested.unwrap_or(false),
         };
         let mut cb = |percent: u32, file: &str| {
             let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
@@ -707,6 +712,7 @@ pub fn run() {
             for m in &menus.menus { grants.grant_session(Path::new(&m.path)); }
             app.manage(grants);
             app.manage(menus);
+            app.manage(discord::PresenceHandle::start());
             Ok(())
         })
         // Grant dropped folders in Rust (session-only). The page cannot call grant_dir.
@@ -728,9 +734,29 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![native_info, file_info, list_archive, read_entry, extract_archive, extract_entry, read_file, cancel_job, take_launch_requests, create_archive, iso_info, iso_to_god, iso_to_xex, god_extracted, xex_extracted, dlc_install, dlc_scan_drives, library_scan, copy_to_usb, mod_identify, mod_name_key, mod_copy, game_search, pick_path, pick_save, download_url, download_folder, list_archives_in_folder, notify_done, set_taskbar_progress, ftp_list, ftp_send, ftp_dest, builtin_menus, catalog])
+        .invoke_handler(tauri::generate_handler![native_info, file_info, list_archive, read_entry, extract_archive, extract_entry, read_file, cancel_job, take_launch_requests, create_archive, iso_info, iso_to_god, iso_to_xex, god_extracted, xex_extracted, dlc_install, dlc_scan_drives, library_scan, copy_to_usb, mod_identify, mod_name_key, mod_copy, game_search, pick_path, pick_save, download_url, download_folder, list_archives_in_folder, notify_done, set_taskbar_progress, ftp_list, ftp_send, ftp_dest, builtin_menus, catalog, discord_set_activity, discord_set_enabled])
         .run(tauri::generate_context!())
         .expect("error while running Unpack");
+}
+
+/// Discord Rich Presence (local IPC to the Discord app; no network from Unpack). The page sends the
+/// current view and an optional short job label; the text shown is built in Rust.
+#[tauri::command]
+fn discord_set_activity(app: AppHandle, view: String, job: Option<String>) -> Result<(), String> {
+    let text = discord::activity_for(&view, job.as_deref());
+    if let Some(presence) = app.try_state::<discord::PresenceHandle>() {
+        presence.update(&text.details, &text.state);
+    }
+    Ok(())
+}
+
+/// The Settings toggle. Off clears the activity and closes the connection.
+#[tauri::command]
+fn discord_set_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    if let Some(presence) = app.try_state::<discord::PresenceHandle>() {
+        presence.set_enabled(enabled);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
