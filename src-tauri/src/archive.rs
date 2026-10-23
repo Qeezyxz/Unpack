@@ -588,6 +588,73 @@ mod tests {
     }
 
     #[test]
+    fn entries_that_climb_out_of_the_folder_stay_inside() {
+        if find_seven_zip().is_none() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("unpack-climb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // A zip written by hand (stored, no compression) with a "../" entry.
+        let zip = root.join("evil.zip");
+        std::fs::write(&zip, hand_made_zip(&[("../escaped.txt", b"nope"), ("fine.txt", b"ok")])).unwrap();
+        let dest = root.join("out");
+        let _ = extract_archives(&[zip], &dest);
+        assert!(!root.join("escaped.txt").exists(), "an entry escaped the destination");
+        assert_eq!(std::fs::read_to_string(dest.join("evil").join("fine.txt")).unwrap(), "ok");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn hand_made_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &b in data {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, data) in entries {
+            let offset = out.len() as u32;
+            let crc = crc32(data);
+            let mut local = Vec::new();
+            local.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            local.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            local.extend_from_slice(&crc.to_le_bytes());
+            local.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            local.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            local.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            local.extend_from_slice(&0u16.to_le_bytes());
+            local.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&local);
+            out.extend_from_slice(data);
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            central.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&[0u8; 12]);
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    #[test]
     fn unique_dir_adds_a_number() {
         let root = std::env::temp_dir().join(format!("unpack-unique-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
