@@ -807,3 +807,47 @@ fn r15_m2_nested_limits_budget_free_space_unknown() {
     // unknown size
     assert!(super::nested_refusal(1 << 20, &l(vec![e(0)]), 0, 1 << 40, None).unwrap_err().contains("can't be read"));
 }
+
+/// R16 MEDIUM-1: a .gz whose footer claims 1000 bytes but holds 512 MiB of zeros is stopped while
+/// 7-Zip runs; the peak written stays near the live cap (2x listed + 1 MB), far below the real size.
+#[test]
+fn r16_m1_forged_gz_size_is_capped_live() {
+    use std::io::Write;
+    let d = tmp("forged-gz");
+    let gz = d.join("zeros.gz");
+    let mut c = std::process::Command::new(exe())
+        .args(["a", "-tgzip", "-mx=1", "-sizeros.bin"]).arg(&gz)
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .spawn().unwrap();
+    {
+        let mut si = c.stdin.take().unwrap();
+        let z = vec![0u8; 1 << 20];
+        for _ in 0..512 { si.write_all(&z).unwrap(); }
+    }
+    assert!(c.wait().unwrap().success());
+    let mut b = fs::read(&gz).unwrap();
+    fs::remove_file(&gz).unwrap();
+    let n = b.len();
+    b[n - 4..].copy_from_slice(&1000u32.to_le_bytes()); // forged ISIZE footer
+    let outer = d.join("forged.zip");
+    write_zip(&outer, &[("zeros.gz", &b, 0)]);
+    let dest = d.join("out");
+    fs::create_dir_all(&dest).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (s2, d2) = (stop.clone(), dest.clone());
+    let peak = std::thread::spawn(move || {
+        let mut peak = 0u64;
+        while !s2.load(std::sync::atomic::Ordering::SeqCst) { peak = peak.max(super::tree_bytes(&d2)); std::thread::sleep(std::time::Duration::from_millis(2)); }
+        peak
+    });
+    let opts = ExtractOptions { archive: &outer, dest_parent: &dest, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: true };
+    let r = extract(&exe(), &opts, &Jobs::default(), "forged", &mut |_, _| {}).unwrap();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let peak = peak.join().unwrap();
+    assert_eq!((r.nested, r.inner_left), (0, 1), "{r:?}");
+    assert!(r.warnings.iter().any(|w| w.contains("zeros.gz was left closed") && w.contains("stopped")), "{:?}", r.warnings);
+    // outer gz (~0.5 MB) + cap (~1 MB) + what 7-Zip can write in one 20 ms poll
+    assert!(peak < 96 << 20, "peak {peak} bytes written");
+    assert!(super::tree_bytes(&dest) < 4 << 20, "partial output removed");
+    assert!(no_staging_left(&dest));
+}

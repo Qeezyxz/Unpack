@@ -651,6 +651,23 @@ fn entry_of<'a>(l: &'a Loaded, id: &str) -> Result<&'a Entry, String> {
 
 static CATALOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub(crate) fn catalog_lock() -> std::sync::MutexGuard<'static, ()> { CATALOG_LOCK.lock().unwrap_or_else(|p| p.into_inner()) }
+pub const CATALOG_WAIT_MESSAGE: &str = "Waiting for another catalog install to finish…";
+
+/// The catalog lock, waited for visibly and cancellably (R16 L2): while another job holds it the
+/// job shows `CATALOG_WAIT_MESSAGE` and a Cancel ends the wait with `ERR_CANCELLED`.
+pub(crate) fn catalog_lock_wait(progress: &mut dyn FnMut(u32, &str), cancelled: &dyn Fn() -> bool) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    let mut told = false;
+    loop {
+        match CATALOG_LOCK.try_lock() {
+            Ok(g) => return Ok(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Ok(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if cancelled() { return Err(crate::archive::ERR_CANCELLED.into()); }
+        if !told { progress(0, CATALOG_WAIT_MESSAGE); told = true; }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
 
 /// `cmd`: config_get | config_set | refresh | current | states | preflight | install | uninstall | journal
 pub fn call(ctx: &install::Ctx, cmd: &str, a: serde_json::Value, check_grant: &dyn Fn(&str) -> Result<PathBuf, String>, progress: &mut dyn FnMut(u32, &str), cancelled: &dyn Fn() -> bool) -> Result<serde_json::Value, String> {
@@ -660,8 +677,8 @@ pub fn call(ctx: &install::Ctx, cmd: &str, a: serde_json::Value, check_grant: &d
     // One catalog-wide lock for every target (R15 M1): install/uninstall/preflight do a
     // read-modify-write of launch.ini and journal.json, so local targets need it too.
     // Order: CATALOG_LOCK first, then the FTP lock for console targets.
-    let console_lock = |t: &target::Target| -> Result<(std::sync::MutexGuard<'static, ()>, Option<std::sync::MutexGuard<'static, ()>>), String> {
-        let g = catalog_lock();
+    let console_lock = |t: &target::Target, progress: &mut dyn FnMut(u32, &str)| -> Result<(std::sync::MutexGuard<'static, ()>, Option<std::sync::MutexGuard<'static, ()>>), String> {
+        let g = catalog_lock_wait(progress, cancelled)?;
         let f = if t.is_console() { Some(crate::ftp_lock()?) } else { None };
         Ok((g, f))
     };
@@ -688,20 +705,20 @@ pub fn call(ctx: &install::Ctx, cmd: &str, a: serde_json::Value, check_grant: &d
         "preflight" => {
             let l = loaded()?;
             let t = target_from(&a["target"], check_grant)?;
-            let _g = console_lock(&t)?;
+            let _g = console_lock(&t, &mut *progress)?;
             Ok(to_value(install::preflight(&ctx.store, &l, entry_of(&l, &s("id"))?, &t)).unwrap())
         }
         "install" => {
             let l = loaded()?;
             let t = target_from(&a["target"], check_grant)?;
             let opts: install::InstallOpts = serde_json::from_value(a["opts"].clone()).unwrap_or_default();
-            let _g = console_lock(&t)?;
+            let _g = console_lock(&t, &mut *progress)?;
             Ok(to_value(install::install(ctx, &l, &s("id"), &t, &opts, progress, cancelled)?).unwrap())
         }
         "uninstall" => {
             let l = current();
             let t = target_from(&a["target"], check_grant)?;
-            let _g = console_lock(&t)?;
+            let _g = console_lock(&t, &mut *progress)?;
             Ok(to_value(install::uninstall(ctx, l.as_ref(), &s("id"), &t, false)?).unwrap())
         }
         "journal" => Ok(to_value(ctx.store.journal()?).unwrap()),

@@ -280,6 +280,24 @@ pub fn run_with_progress(
     had_password: bool,
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<Vec<String>, String> {
+    run_capped(exe, args, jobs, job_id, had_password, progress, None)
+}
+
+/// 7-Zip was stopped because the folder it writes grew past its byte cap.
+pub const ERR_SIZE_CAP: &str = "SIZE_CAP";
+
+/// `run_with_progress`, optionally with a live byte cap: a watcher measures `cap.0` every 20 ms
+/// and kills 7-Zip as soon as it holds more than `cap.1` bytes (R16 MEDIUM-1), so a forged size
+/// in a header can't fill the drive. Returns `ERR_SIZE_CAP` then.
+fn run_capped(
+    exe: &Path,
+    args: &[std::ffi::OsString],
+    jobs: &Jobs,
+    job_id: &str,
+    had_password: bool,
+    progress: &mut dyn FnMut(u32, &str),
+    cap: Option<(PathBuf, u64)>,
+) -> Result<Vec<String>, String> {
     if jobs.is_cancelled(job_id) {
         return Err(ERR_CANCELLED.into());
     }
@@ -295,6 +313,22 @@ pub fn run_with_progress(
     if jobs.is_cancelled(job_id) {
         let _ = child.lock().unwrap().kill();
     }
+    let over = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = cap.map(|(dir, limit)| {
+        let (child, over, done) = (child.clone(), over.clone(), done.clone());
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering::SeqCst;
+            while !done.load(SeqCst) {
+                if tree_bytes(&dir) > limit {
+                    over.store(true, SeqCst);
+                    if let Ok(mut c) = child.lock() { let _ = c.kill(); }
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+    });
     let err_thread = std::thread::spawn(move || {
         let mut s = Vec::new();
         let _ = stderr.read_to_end(&mut s);
@@ -327,10 +361,23 @@ pub fn run_with_progress(
             }
         }
     }
-    let status = child.lock().unwrap().wait().map_err(|e| e.to_string())?;
+    // Poll instead of a blocking wait so the watcher can take the lock and kill 7-Zip.
+    let status = loop {
+        match child.lock().unwrap().try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(w) = watcher { let _ = w.join(); }
     let err_text = err_thread.join().unwrap_or_default();
     if jobs.is_cancelled(job_id) {
         return Err(ERR_CANCELLED.into());
+    }
+    if over.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(ERR_SIZE_CAP.into());
     }
     // 7-Zip exit codes: 0 ok, 1 warning (non-fatal), 2 fatal, 7 bad command line, 8 out of memory, 255 user stop
     match status.code() {
@@ -1040,7 +1087,11 @@ fn open_inner(
                     pw_arg(None).into(), out_arg, "--".into(), archive.as_os_str().to_owned(),
                 ];
                 progress(99, &format!("Opening inner archive {rel}"));
-                match run_with_progress(exe, &args, jobs, job_id, false, &mut |_, f| progress(99, &format!("{rel}: {f}"))) {
+                // Live cap: never trust the listed size (a .gz footer is forgeable). Stop 7-Zip as soon
+                // as the output passes twice the listed size, the remaining budget, or free space.
+                let free_cap = crate::god::free_space(parent).map(|f| f.saturating_sub(NESTED_FREE_MARGIN)).unwrap_or(u64::MAX);
+                let limit = expected.saturating_mul(2).saturating_add(1 << 20).min(budget.saturating_sub(used)).min(free_cap);
+                match run_capped(exe, &args, jobs, job_id, false, &mut |_, f| progress(99, &format!("{rel}: {f}")), Some((out.clone(), limit))) {
                     Ok(tolerated) => {
                         // The listing can understate (e.g. a forged header): check what was really written.
                         let actual = tree_bytes(&out);
@@ -1057,7 +1108,12 @@ fn open_inner(
                         inner.opened += 1;
                         next.push(out);
                     }
-                    Err(e) if e == ERR_CANCELLED => return Err(e),
+                    Err(e) if e == ERR_CANCELLED => { let _ = fs::remove_dir_all(&out); return Err(e) }
+                    Err(e) if e == ERR_SIZE_CAP => {
+                        let _ = fs::remove_dir_all(&out);
+                        inner.left += 1;
+                        warnings.push(format!("{rel} was left closed: it unpacked past {} (more than its listing or the size limit allows), so Unpack stopped it.", human(limit)));
+                    }
                     Err(e) => {
                         let _ = fs::remove_dir_all(&out);
                         inner.left += 1;

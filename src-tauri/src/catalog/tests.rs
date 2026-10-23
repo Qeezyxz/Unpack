@@ -1493,3 +1493,19 @@ fn r15_l2_unconfirmed_line_not_in_file_is_skipped() {
     assert!(u.ini.as_deref().unwrap_or("").contains("never added"), "{u:?}");
     assert_eq!(std::fs::read_to_string(usb.join("launch.ini")).unwrap(), INI);
 }
+
+/// R16 L2: waiting for the catalog lock shows a message and can be cancelled.
+#[test]
+fn r16_l2_catalog_lock_wait_is_visible_and_cancellable() {
+    let held = super::catalog_lock();
+    let start = std::time::Instant::now();
+    let mut msgs = Vec::new();
+    let r = super::catalog_lock_wait(&mut |_, m| msgs.push(m.to_string()), &|| start.elapsed() > std::time::Duration::from_millis(300));
+    assert_eq!(r.err().as_deref(), Some(crate::archive::ERR_CANCELLED));
+    assert_eq!(msgs, vec![super::CATALOG_WAIT_MESSAGE.to_string()]);
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    drop(held);
+    let mut n = 0;
+    assert!(super::catalog_lock_wait(&mut |_, _| n += 1, &|| false).is_ok());
+    assert_eq!(n, 0, "no message when the lock is free");
+}
