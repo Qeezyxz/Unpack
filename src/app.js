@@ -302,9 +302,9 @@ function bindConvert() {
 
 function convertPaths() {
   const listed = state.convertFiles.filter(Boolean);
-  if (listed.length) return listed;
   const one = $("iso-path").value.trim();
-  return one ? [one] : [];
+  if (one && !listed.includes(one)) listed.unshift(one);
+  return listed;
 }
 
 function bindLibrary() {

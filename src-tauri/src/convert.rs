@@ -262,32 +262,71 @@ fn expand_iso_set(
     Ok(out)
 }
 
+fn disc_number_of(path: &Path, info: Option<&IsoInfo>) -> u8 {
+    info.map(|i| i.disc_number)
+        .or_else(|| disc_hint_from_name(path))
+        .filter(|n| *n > 0)
+        .unwrap_or(1)
+}
+
 fn group_discs(paths: &[PathBuf]) -> Result<Vec<Vec<(PathBuf, Option<IsoInfo>)>>, String> {
-    let mut keyed: BTreeMap<String, Vec<(PathBuf, Option<IsoInfo>)>> = BTreeMap::new();
-    for path in paths {
-        let info = inspect_iso(path).ok();
-        let key = info
-            .as_ref()
-            .map(|i| format!("id:{}", i.title_id))
-            .unwrap_or_else(|| format!("stem:{}", stem_without_disc(path)));
-        keyed.entry(key).or_default().push((path.clone(), info));
-    }
-    let mut groups: Vec<_> = keyed.into_values().collect();
-    for group in &mut groups {
-        group.sort_by_key(|(path, info)| {
-            let n = info
-                .as_ref()
-                .map(|i| i.disc_number)
-                .or_else(|| disc_hint_from_name(path))
-                .unwrap_or(1);
-            (n, path.display().to_string())
-        });
-    }
-    groups.sort_by_key(|g| g.first().map(|(p, _)| p.display().to_string()).unwrap_or_default());
+    let items: Vec<(PathBuf, Option<IsoInfo>)> = paths
+        .iter()
+        .map(|path| (path.clone(), inspect_iso(path).ok()))
+        .collect();
+    let groups = group_disc_items(items);
     if groups.is_empty() {
         return Err("no ISOs to convert".into());
     }
     Ok(groups)
+}
+
+/// Disc 2 dumps without default.xex still join disc 1 when the filename stem matches.
+fn group_disc_items(
+    items: Vec<(PathBuf, Option<IsoInfo>)>,
+) -> Vec<Vec<(PathBuf, Option<IsoInfo>)>> {
+    let mut keyed: BTreeMap<String, Vec<(PathBuf, Option<IsoInfo>)>> = BTreeMap::new();
+    let mut ungrouped = Vec::new();
+    for (path, info) in items {
+        if let Some(ref iso) = info {
+            keyed
+                .entry(format!("id:{}", iso.title_id))
+                .or_default()
+                .push((path, info));
+        } else {
+            ungrouped.push((path, info));
+        }
+    }
+    for (path, info) in ungrouped {
+        let stem = stem_without_disc(&path);
+        let mut placed = false;
+        if !stem.is_empty() {
+            for group in keyed.values_mut() {
+                if group
+                    .iter()
+                    .any(|(p, _)| stem_without_disc(p) == stem)
+                {
+                    group.push((path.clone(), info.clone()));
+                    placed = true;
+                    break;
+                }
+            }
+        }
+        if !placed {
+            keyed
+                .entry(format!("stem:{}", stem_without_disc(&path)))
+                .or_default()
+                .push((path, info));
+        }
+    }
+    let mut groups: Vec<_> = keyed.into_values().collect();
+    for group in &mut groups {
+        group.sort_by_key(|(path, info)| {
+            (disc_number_of(path, info.as_ref()), path.display().to_string())
+        });
+    }
+    groups.sort_by_key(|g| g.first().map(|(p, _)| p.display().to_string()).unwrap_or_default());
+    groups
 }
 
 fn convert_god_set(
@@ -354,12 +393,17 @@ fn extract_xex_set(
         });
     let folder_name = paths::sanitize_xbox_folder_name(&name);
     let out = dest_dir.join(folder_name);
-    ensure_empty_dir(&out)?;
+    fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    // Do not wipe an existing extract: converting disc 2 later must keep disc 1's
+    // default.xex and extra files already in the folder.
+    let mut playable_exists =
+        out.join("default.xex").is_file() || out.join("default.xbe").is_file();
     let mut files = Vec::new();
     let mut infos = Vec::new();
     let disc_total = discs.len() as u64;
     for (i, (path, preview)) in discs.iter().enumerate() {
-        let merge = i > 0;
+        let n = disc_number_of(path, preview.as_ref());
+        let merge = i > 0 || (n > 1 && playable_exists);
         progress(
             format!(
                 "{} disc {}/{} into {}",
@@ -376,6 +420,8 @@ fn extract_xex_set(
         if let Some(info) = info {
             infos.push(info);
         }
+        playable_exists =
+            out.join("default.xex").is_file() || out.join("default.xbe").is_file();
     }
     if verify {
         let has_exe = out.join("default.xex").is_file() || out.join("default.xbe").is_file();
@@ -731,5 +777,173 @@ mod tests {
         let b = PathBuf::from("Game (Disc 1).iso");
         assert!(disc_hint_from_name(&a).unwrap() > disc_hint_from_name(&b).unwrap());
         assert_eq!(stem_without_disc(&a), stem_without_disc(&b));
+    }
+
+    #[test]
+    fn groups_unreadable_disc2_with_matching_stem() {
+        let disc1 = IsoInfo {
+            path: "Game (Disc 1).iso".into(),
+            title_id: "4D5307E6".into(),
+            title_id_num: 0x4D5307E6,
+            name: "Halo 3".into(),
+            content_kind: "Games on Demand".into(),
+            disc_number: 1,
+            disc_count: 2,
+            media_id: "11111111".into(),
+            used_bytes: 1,
+        };
+        let groups = group_disc_items(vec![
+            (PathBuf::from("Game (Disc 1).iso"), Some(disc1)),
+            (PathBuf::from("Game (Disc 2).iso"), None),
+        ]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 2);
+        assert!(groups[0][0].0.to_string_lossy().contains("Disc 1"));
+        assert!(groups[0][1].0.to_string_lossy().contains("Disc 2"));
+    }
+
+    fn minimal_xex(title_id: u32, disc_number: u8, disc_count: u8, media_id: u32, tag: &[u8]) -> Vec<u8> {
+        let mut xex = Vec::new();
+        xex.extend(b"XEX2");
+        xex.extend(0u32.to_be_bytes());
+        xex.extend(0u32.to_be_bytes());
+        xex.extend(0u32.to_be_bytes());
+        xex.extend(0u32.to_be_bytes());
+        xex.extend(1u32.to_be_bytes());
+        xex.extend(0x0004_0006u32.to_be_bytes());
+        xex.extend(32u32.to_be_bytes());
+        xex.extend(media_id.to_be_bytes());
+        xex.extend(0u32.to_be_bytes());
+        xex.extend(0u32.to_be_bytes());
+        xex.extend(title_id.to_be_bytes());
+        xex.push(0);
+        xex.push(0);
+        xex.push(disc_number);
+        xex.push(disc_count);
+        xex.extend(tag);
+        xex
+    }
+
+    fn dir_entry(name: &str, sector: u32, size: u32) -> Vec<u8> {
+        let mut entry = Vec::new();
+        entry.extend(0u16.to_le_bytes());
+        entry.extend(0u16.to_le_bytes());
+        entry.extend(sector.to_le_bytes());
+        entry.extend(size.to_le_bytes());
+        entry.push(0x80);
+        entry.push(name.len() as u8);
+        entry.extend(name.as_bytes());
+        while entry.len() % 4 != 0 {
+            entry.push(0);
+        }
+        entry
+    }
+
+    fn write_xsf_iso(path: &Path, files: &[(&str, Vec<u8>)]) {
+        const SECTOR: usize = 0x800;
+        let mut next_sector = 0x22u32;
+        let mut layout = Vec::new();
+        for (name, data) in files {
+            layout.push((*name, next_sector, data.clone()));
+            next_sector += (data.len() as u32).div_ceil(SECTOR as u32).max(1);
+        }
+        let mut dir = Vec::new();
+        for (name, sector, data) in &layout {
+            dir.extend(dir_entry(name, *sector, data.len() as u32));
+        }
+        dir.extend(0xffffu16.to_le_bytes());
+        dir.extend(0xffffu16.to_le_bytes());
+        let mut iso = vec![0u8; (next_sector as usize) * SECTOR];
+        let vol = 0x20 * SECTOR;
+        iso[vol..vol + 20].copy_from_slice(b"MICROSOFT*XBOX*MEDIA");
+        iso[vol + 20..vol + 24].copy_from_slice(&0x21u32.to_le_bytes());
+        iso[vol + 24..vol + 28].copy_from_slice(&(SECTOR as u32).to_le_bytes());
+        let dir_off = 0x21 * SECTOR;
+        iso[dir_off..dir_off + dir.len()].copy_from_slice(&dir);
+        for (_name, sector, data) in &layout {
+            let off = (*sector as usize) * SECTOR;
+            iso[off..off + data.len()].copy_from_slice(data);
+        }
+        fs::write(path, iso).unwrap();
+    }
+
+    #[test]
+    fn convert_merges_disc1_and_disc2_into_one_playable_folder() {
+        let root = std::env::temp_dir().join(format!("unpack-multidisc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let disc1 = root.join("Sample (Disc 1).iso");
+        let disc2 = root.join("Sample (Disc 2).iso");
+        let dest = root.join("out");
+        let title = 0x4D5307E6;
+        let xex1 = minimal_xex(title, 1, 2, 0x11111111, b"DISC1XEX");
+        let xex2 = minimal_xex(title, 2, 2, 0x22222222, b"DISC2XEX");
+        write_xsf_iso(
+            &disc1,
+            &[
+                ("default.xex", xex1.clone()),
+                ("shared.dat", b"from-disc-1".to_vec()),
+            ],
+        );
+        write_xsf_iso(
+            &disc2,
+            &[
+                ("default.xex", xex2),
+                ("shared.dat", b"from-disc-2".to_vec()),
+                ("extra.bin", b"only-on-disc-2".to_vec()),
+            ],
+        );
+
+        let reports = convert_isos(
+            &[disc1.clone(), disc2.clone()],
+            &dest,
+            "xex",
+            false,
+            true,
+            false,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].merged);
+        assert_eq!(reports[0].discs.len(), 2);
+        let folder = PathBuf::from(&reports[0].output);
+        let xex = fs::read(folder.join("default.xex")).unwrap();
+        assert!(xex.windows(b"DISC1XEX".len()).any(|w| w == b"DISC1XEX"));
+        assert!(!xex.windows(b"DISC2XEX".len()).any(|w| w == b"DISC2XEX"));
+        assert_eq!(fs::read(folder.join("extra.bin")).unwrap(), b"only-on-disc-2");
+        assert_eq!(fs::read(folder.join("shared.dat")).unwrap(), b"from-disc-2");
+        assert!(reports[0].info.name.to_lowercase().contains("halo"));
+
+        let found = convert_isos(&[disc1.clone()], &dest, "xex", false, true, true, |_, _, _| {}).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].merged, "auto companion scan should pick up Disc 2");
+
+        let god_dest = root.join("god");
+        let god = convert_isos(
+            &[disc1, disc2],
+            &god_dest,
+            "god",
+            true,
+            true,
+            false,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(god.len(), 1);
+        assert!(god[0].merged);
+        let title_dir = god_dest.join("4D5307E6").join("00007000");
+        assert!(title_dir.is_dir(), "GOD discs should share one TitleID folder");
+        let media: Vec<String> = fs::read_dir(&title_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            media.iter().any(|n| n == "11111111") && media.iter().any(|n| n == "22222222"),
+            "expected disc 1 and disc 2 GOD packages, got {media:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

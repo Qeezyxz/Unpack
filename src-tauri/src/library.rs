@@ -237,6 +237,45 @@ mod tests {
         );
     }
 
+    fn csv_title_ids(raw: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        for (i, line) in raw.lines().enumerate() {
+            if i == 0 || line.trim().is_empty() {
+                continue;
+            }
+            let tid = line.split('\t').next().unwrap_or("").trim().to_uppercase();
+            if tid.len() == 8 {
+                ids.push(tid);
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    #[test]
+    fn catalog_contains_every_uploaded_title_id() {
+        let xbox360 = csv_title_ids(include_str!(
+            "../vendor/iso2god/src/game_list/gamelist_xbox360.csv"
+        ));
+        let xbox = csv_title_ids(include_str!(
+            "../vendor/iso2god/src/game_list/gamelist_xbox.csv"
+        ));
+        assert!(xbox360.len() > 3000, "360 list too small: {}", xbox360.len());
+        assert!(xbox.len() > 1000, "Xbox list too small: {}", xbox.len());
+        for tid in xbox360.iter().chain(xbox.iter()) {
+            assert!(
+                lookup_title(tid).is_some(),
+                "TitleID {tid} from the uploaded game list is missing from the conversion catalog"
+            );
+            let num = u32::from_str_radix(tid, 16).unwrap();
+            assert!(
+                lookup_title_u32(num).is_some(),
+                "find_title_by_id missed {tid}"
+            );
+        }
+    }
+
     #[test]
     fn places_dlc_under_content_titleid() {
         let root = std::env::temp_dir().join(format!("unpack-lib-{}", std::process::id()));
