@@ -18,7 +18,7 @@ src-tauri/vendor/iso2god  Vendored ISO → GOD engine (MIT)
 LICENSE                   Terms for using and sharing the source
 ```
 
-Current version: **1.4.0**.
+Current version: **1.5.0**.
 
 ## Build from source
 
@@ -36,13 +36,13 @@ ISO conversion uses a vendored copy of [iso2god-rs](https://github.com/iliazeus/
 
 If you just want to run Unpack, Windows builds are attached to the [latest GitHub Release](https://github.com/Qeezyxz/Unpack/releases/latest). The source on `main` is still the real project.
 
-**Installer:** download `Unpack_1.4.0_x64-setup.exe`. Windows may show "Windows protected your PC" because the file isn't signed — **More info**, then **Run anyway**. No admin rights; it installs for your user account.
+**Installer:** download `Unpack_1.5.0_x64-setup.exe`. Windows may show "Windows protected your PC" because the file isn't signed — **More info**, then **Run anyway**. No admin rights; it installs for your user account.
 
 **Portable:** unzip `Unpack-portable.zip` and run `Unpack.exe`. Keep `7za.exe` and `WebView2Loader.dll` in the same folder.
 
 Requires WebView2 (already on Windows 10/11).
 
-Unsigned NSIS / Tauri builds are often flagged only by Trapmine (`Malicious.high.ml.score`). That is a common machine-learning false positive. Previous 1.3.0 reports: [installer](https://www.virustotal.com/gui/file/06d10c80350857f733c4a1bf864e799c68f0d5e4d6423410dc4264934fd0f2f8), [portable](https://www.virustotal.com/gui/file/1d6a4c0551bef9fc413fce2a773cd2a4752ee7ba86f754fa57af420691571b84).
+Unsigned NSIS / Tauri builds are often flagged only by Trapmine (`Malicious.high.ml.score`). That is a common machine-learning false positive. Older 1.3.0 reports: [installer](https://www.virustotal.com/gui/file/06d10c80350857f733c4a1bf864e799c68f0d5e4d6423410dc4264934fd0f2f8), [portable](https://www.virustotal.com/gui/file/1d6a4c0551bef9fc413fce2a773cd2a4752ee7ba86f754fa57af420691571b84).
 
 ## Features
 
@@ -54,12 +54,15 @@ Unsigned NSIS / Tauri builds are often flagged only by Trapmine (`Malicious.high
 - USB copy with FAT32 checks and verification
 - Auto-detect and place DLC / Title Updates
 - Mod Menus and Homebrew Tools
-- Send to Xbox (local network only, to Aurora / XeXMenu / DashLaunch). If Wi-Fi drops, Send again — it can continue the leftover `.part` file
+- Send to Xbox (local network only, to Aurora / XeXMenu / DashLaunch). If Wi-Fi drops, Send again — it can continue the leftover `.part` file. A full Xbox drive stops with a plain message instead of retrying forever
+- Clear errors: a red banner (with Copy) stays above dialogs. An unrecognized Title ID stops the convert and names the hex ID; a lone Disc 2 says to convert Disc 1 first
+- Jobs that write the same folder wait for each other
 - Discord Rich Presence (optional; talks only to the local Discord client, application ID `1562281261504929922`)
 - Installer + portable builds from this same source
 
 ## Status
 
+- **1.5.0** — Red error banner, unknown Title ID stops the convert, full-Xbox-drive and lone Disc 2 messages, same-folder jobs wait their turn
 - **1.4.0** — Safer copies and Send to Xbox, nested archives, jobs-at-once setting
 - **1.3.0** — Original dark UI and Unpack mark
 - **1.2.0** — Discord Rich Presence
