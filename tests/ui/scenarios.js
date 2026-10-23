@@ -211,6 +211,11 @@ const calls = (cmd) => window.__calls.filter((c) => c.cmd === cmd);
   check("empty port means 21", calls("xbox_test").length === t0 + 1 && calls("xbox_test")[t0].args.port === 21, JSON.stringify(calls("xbox_test").slice(-1)));
   $$("xbox-port").value = "21";
 
+  // A pasted path with quotes or spaces is cleaned up
+  $$("extract-dest").value = '  "C:\\Games\\Xbox 360"  ';
+  $$("extract-dest").dispatchEvent(new Event("change"));
+  check("quoted path is cleaned", $$("extract-dest").value === "C:\\Games\\Xbox 360", $$("extract-dest").value);
+
   document.title = "DONE";
   const pre = document.createElement("pre");
   pre.id = "results";

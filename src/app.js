@@ -677,6 +677,16 @@ async function init() {
     if (e.key === "Escape") closeModal();
   });
 
+  // "Copy as path" in Explorer wraps the path in quotes, and pasted paths often carry spaces.
+  ["extract-dest", "library-root", "usb-dest", "dl-dest", "content-root"].forEach((id) => {
+    const input = $(id);
+    if (!input) return;
+    input.addEventListener("change", () => {
+      const clean = input.value.trim().replace(/^"(.*)"$/, "$1").trim();
+      if (clean !== input.value) input.value = clean;
+    });
+  });
+
   syncIsoBadge();
   const preview = new URLSearchParams(location.search).get("modal");
   if (preview) {
