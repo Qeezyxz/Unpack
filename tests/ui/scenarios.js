@@ -143,6 +143,33 @@ const calls = (cmd) => window.__calls.filter((c) => c.cmd === cmd);
   await sleep(60);
   check("send with no files errors", /choose files/.test($$("job-error-text").textContent), $$("job-error-text").textContent);
 
+  // Install DLC: nothing chosen, then one good and one bad package
+  $$("content-root").value = "/lib";
+  $$("run-place").click();
+  await sleep(60);
+  check("place with no packages says so", /Choose DLC/.test($$("job-error-text").textContent), $$("job-error-text").textContent);
+  window.__behaviour.pick_files = () => Promise.resolve(["/p/good.bin", "/p/<i>bad</i>.bin"]);
+  window.__behaviour.place_content = (a) => /bad/.test(a.path) ? Promise.reject("not a Live/PIRS package") : Promise.resolve({ name: "Good DLC", detail: "placed" });
+  $$("pick-packages").click();
+  await sleep(50);
+  $$("run-place").click();
+  await sleep(100);
+  check("place keeps going after one bad package", document.querySelectorAll("#content-results li").length === 2 && /Good DLC/.test($$("content-results").textContent) && /not a Live/.test($$("content-results").textContent), $$("content-results").textContent);
+  check("place escapes names", !document.querySelector("#content-results i"), "");
+  check("place reports the failure", /1 of 2/.test($$("job-error-text").textContent), $$("job-error-text").textContent);
+
+  // Create archive shows its result inside the dialog
+  window.__behaviour.pick_files = () => Promise.resolve(["/m/a.txt"]);
+  window.__behaviour.pick_save = () => Promise.resolve("/o/out.7z");
+  window.__behaviour.create_archive = () => Promise.resolve({ archive: "/o/out.7z" });
+  $$("pick-archive-inputs").click();
+  await sleep(50);
+  $$("pick-archive-out").click();
+  await sleep(50);
+  $$("run-pack").click();
+  await sleep(100);
+  check("create archive confirms in the dialog", /Created \/o\/out\.7z/.test($$("pack-out").textContent), $$("pack-out").textContent);
+
   document.title = "DONE";
   const pre = document.createElement("pre");
   pre.id = "results";

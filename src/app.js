@@ -580,6 +580,7 @@ async function init() {
     if (!state.packFiles.length || !state.packOut) throw new Error("Choose files and an archive name.");
     const result = await invoke("create_archive", { inputs: state.packFiles, dest: state.packOut });
     log(`Created ${result.archive}`);
+    $("pack-out").textContent = `Created ${result.archive}`;
   });
 
   $("pick-packages").onclick = async () => {
@@ -591,15 +592,23 @@ async function init() {
     if (d) $("content-root").value = d;
   };
   $("run-place").onclick = () => job("Placing DLC / updates…", async () => {
+    if (!state.packageFiles.length) throw new Error("Choose DLC / TU files first.");
     if (!$("content-root").value) throw new Error("Choose a library or USB root.");
     const el = $("content-results");
     el.innerHTML = "";
+    let failed = 0;
     for (const path of state.packageFiles) {
-      const item = await invoke("place_content", { path, libraryRoot: $("content-root").value });
       const li = document.createElement("li");
-      li.innerHTML = `<span>${esc(item.name || path)}</span><span>${esc(item.detail)}</span>`;
+      try {
+        const item = await invoke("place_content", { path, libraryRoot: $("content-root").value });
+        li.innerHTML = `<span>${esc(item.name || path)}</span><span>${esc(item.detail)}</span>`;
+      } catch (e) {
+        failed++;
+        li.innerHTML = `<span>${esc(path)}</span><span>${esc(String(e && e.message || e))}</span>`;
+      }
       el.appendChild(li);
     }
+    if (failed) throw new Error(`${failed} of ${state.packageFiles.length} package(s) could not be placed. See the list.`);
   });
 
   $("max-jobs").onchange = remember;
