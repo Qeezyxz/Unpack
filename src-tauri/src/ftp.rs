@@ -209,11 +209,7 @@ impl FtpClient {
     fn size_of(&mut self, name: &str) -> Result<Option<u64>, String> {
         let (code, msg) = self.command(&format!("SIZE {name}"))?;
         if code == 213 {
-            let n = msg
-                .split_whitespace()
-                .find_map(|p| p.parse::<u64>().ok())
-                .ok_or_else(|| format!("bad SIZE reply: {msg}"))?;
-            Ok(Some(n))
+            Ok(parse_size_reply(&msg).ok())
         } else {
             // FSD/FileZilla-on-XeXMenu often lack SIZE. Skip rather than fail.
             Ok(None)
@@ -378,6 +374,17 @@ pub fn looks_like_drop(err: &str) -> bool {
         || e.contains("os error 104")
 }
 
+/// The reply text starts with the 3-digit code ("213 1048576"); the size is
+/// the number after it.
+fn parse_size_reply(msg: &str) -> Result<u64, String> {
+    msg.lines()
+        .find_map(|line| {
+            let rest = line.strip_prefix("213")?;
+            rest.split_whitespace().next()?.parse::<u64>().ok()
+        })
+        .ok_or_else(|| format!("bad SIZE reply: {}", msg.trim()))
+}
+
 /// A line break inside a command would let one FTP command smuggle in another.
 fn reject_line_break(text: &str) -> Result<(), String> {
     if text.contains('\r') || text.contains('\n') || text.contains('\0') {
@@ -532,6 +539,15 @@ mod tests {
         assert!(stalled(0));
         assert!(stalled(STALL_BYTES - 1));
         assert!(!stalled(STALL_BYTES));
+    }
+
+    #[test]
+    fn size_reply_is_the_number_after_the_code() {
+        assert_eq!(parse_size_reply("213 1048576\r\n").unwrap(), 1_048_576);
+        assert_eq!(parse_size_reply("213 0\r\n").unwrap(), 0);
+        assert_eq!(parse_size_reply("213-status\r\n213 77\r\n").unwrap(), 77);
+        assert!(parse_size_reply("213 lots\r\n").is_err());
+        assert!(parse_size_reply("213\r\n").is_err());
     }
 
     #[test]

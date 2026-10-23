@@ -12,6 +12,8 @@ mod net;
 mod paths;
 mod progress;
 mod stfs;
+#[cfg(test)]
+mod testftp;
 mod usb;
 mod xbox;
 

@@ -311,6 +311,185 @@ mod tests {
         assert!(err.contains("not found"));
     }
 
+    use crate::testftp::{Cfg, FakeFtp};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn scratch(tag: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "unpack-xbox-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn blob(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 31 % 251) as u8).collect()
+    }
+
+    fn send(
+        fake: &FakeFtp,
+        paths: &[PathBuf],
+        launch: bool,
+    ) -> Result<SendReport, String> {
+        send_paths(
+            "127.0.0.1",
+            fake.port,
+            "xbox",
+            "xbox",
+            "/Hdd1/Games",
+            paths,
+            launch,
+            |_, _, _| {},
+        )
+    }
+
+    #[test]
+    fn uploads_a_folder_and_renames_the_part_file() {
+        let fake = FakeFtp::start(Cfg::default());
+        let dir = scratch("ok");
+        let game = dir.join("Halo");
+        fs::create_dir_all(game.join("Data")).unwrap();
+        fs::write(game.join("default.xex"), blob(5000)).unwrap();
+        fs::write(game.join("Data/0000"), blob(70_000)).unwrap();
+        let report = send(&fake, &[game], false).unwrap();
+        assert_eq!(report.uploaded, 2);
+        assert_eq!(report.resumed, 0);
+        assert_eq!(fake.file("Hdd1/Games/Halo/default.xex").unwrap(), blob(5000));
+        assert_eq!(fake.file("Hdd1/Games/Halo/Data/0000").unwrap(), blob(70_000));
+        assert!(fake.names().iter().all(|n| !n.ends_with(".part")), "{:?}", fake.names());
+    }
+
+    #[test]
+    fn a_second_send_of_the_same_file_is_skipped() {
+        let fake = FakeFtp::start(Cfg::default());
+        let dir = scratch("again");
+        let file = dir.join("game.bin");
+        fs::write(&file, blob(9000)).unwrap();
+        send(&fake, &[file.clone()], false).unwrap();
+        let before = fake.stors();
+        let report = send(&fake, &[file], false).unwrap();
+        assert_eq!(fake.stors(), before, "nothing should be uploaded twice");
+        assert!(report.warnings.iter().any(|w| w.contains("already on the Xbox")));
+    }
+
+    #[test]
+    fn a_dropped_transfer_resumes_with_rest() {
+        let fake = FakeFtp::start(Cfg {
+            drop_stor: vec![Some(600_000)],
+            ..Cfg::default()
+        });
+        let dir = scratch("rest");
+        let file = dir.join("big.bin");
+        let body = blob(1_500_000);
+        fs::write(&file, &body).unwrap();
+        let report = send(&fake, &[file], false).unwrap();
+        assert_eq!(report.resumed, 1);
+        assert_eq!(fake.logins(), 2, "one reconnect expected");
+        assert!(fake.saw("REST "));
+        assert_eq!(fake.file("Hdd1/Games/big.bin").unwrap(), body);
+        assert!(!fake.has("Hdd1/Games/big.bin.part"));
+    }
+
+    #[test]
+    fn resume_falls_back_to_append_without_rest() {
+        let fake = FakeFtp::start(Cfg {
+            drop_stor: vec![Some(600_000)],
+            rest_ok: false,
+            ..Cfg::default()
+        });
+        let dir = scratch("appe");
+        let file = dir.join("big.bin");
+        let body = blob(1_500_000);
+        fs::write(&file, &body).unwrap();
+        let report = send(&fake, &[file], false).unwrap();
+        assert_eq!(report.resumed, 1);
+        assert!(fake.saw("APPE "));
+        assert_eq!(fake.file("Hdd1/Games/big.bin").unwrap(), body);
+    }
+
+    #[test]
+    fn a_server_without_size_still_receives_the_file() {
+        let fake = FakeFtp::start(Cfg {
+            size_ok: false,
+            ..Cfg::default()
+        });
+        let dir = scratch("nosize");
+        let file = dir.join("game.bin");
+        fs::write(&file, blob(12_345)).unwrap();
+        let report = send(&fake, &[file], false).unwrap();
+        assert_eq!(report.uploaded, 1);
+        assert_eq!(fake.file("Hdd1/Games/game.bin").unwrap(), blob(12_345));
+    }
+
+    #[test]
+    fn a_full_drive_stops_at_once_with_a_plain_message() {
+        let fake = FakeFtp::start(Cfg {
+            capacity: Some(400_000),
+            ..Cfg::default()
+        });
+        let dir = scratch("full");
+        let file = dir.join("big.bin");
+        fs::write(&file, blob(1_500_000)).unwrap();
+        let err = send(&fake, &[file], false).unwrap_err();
+        assert!(err.contains("drive is full"), "{err}");
+        assert_eq!(fake.logins(), 1, "a full drive is not a Wi-Fi drop, so no reconnect");
+        assert_eq!(fake.stors(), 1);
+    }
+
+    #[test]
+    fn a_connection_that_never_gets_going_gives_up_with_a_plain_message() {
+        let fake = FakeFtp::start(Cfg {
+            drop_stor: vec![Some(1000), Some(1000), Some(1000), Some(1000)],
+            ..Cfg::default()
+        });
+        let dir = scratch("stall");
+        let file = dir.join("big.bin");
+        fs::write(&file, blob(1_500_000)).unwrap();
+        let err = send(&fake, &[file], false).unwrap_err();
+        assert!(err.contains("stopped taking"), "{err}");
+        assert!(fake.logins() <= 3, "{} logins", fake.logins());
+    }
+
+    #[test]
+    fn launch_ini_is_skipped_unless_asked_and_replaced_atomically() {
+        let fake = FakeFtp::start(Cfg::default());
+        let dir = scratch("ini");
+        let ini = dir.join("launch.ini");
+        fs::write(&ini, b"[Paths]\nDefault = Hdd1:\\Games\n").unwrap();
+        let report = send(&fake, &[ini.clone()], false).unwrap();
+        assert_eq!(report.skipped_protected, 1);
+        assert!(!fake.has("Hdd1/Games/launch.ini"));
+        let report = send(&fake, &[ini], true).unwrap();
+        assert_eq!(report.uploaded, 1);
+        assert!(fake.has("Hdd1/Games/launch.ini"));
+        assert!(!fake.has("Hdd1/Games/launch.ini.part"));
+    }
+
+    #[test]
+    fn a_login_with_line_breaks_is_refused_before_it_is_sent() {
+        let fake = FakeFtp::start(Cfg::default());
+        let dir = scratch("crlf");
+        let file = dir.join("a.bin");
+        fs::write(&file, b"x").unwrap();
+        let err = send_paths(
+            "127.0.0.1",
+            fake.port,
+            "xbox\r\nDELE everything",
+            "xbox",
+            "/Hdd1/Games",
+            &[file],
+            false,
+            |_, _, _| {},
+        )
+        .unwrap_err();
+        assert!(err.contains("line breaks"), "{err}");
+        assert!(!fake.saw("DELE everything"));
+    }
+
     #[test]
     fn refuses_public_hosts() {
         let err = send_paths(
