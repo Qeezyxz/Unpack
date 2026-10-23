@@ -1,6 +1,10 @@
 // DO NOT EDIT; this file is auto-generated.
 // Run `python3 merge_gamelists.py` (or `./generate.bash titles.jsonl mod.rs`) to re-generate.
 
+/// Every (TitleID, name) pair, sorted by TitleID (added for Unpack's offline lookup).
+pub fn all() -> &'static [(u32, &'static str)] {
+    GAMES_BY_TITLE_ID
+}
 
 pub fn find_title_by_id(title_id: u32) -> Option<String> {
     GAMES_BY_TITLE_ID
@@ -10,7 +14,7 @@ pub fn find_title_by_id(title_id: u32) -> Option<String> {
 }
 
 #[rustfmt::skip]
-const GAMES_BY_TITLE_ID: &[(u32, &'static str)] = &[
+const GAMES_BY_TITLE_ID: &[(u32, &str)] = &[
     (0x00000001, "FX Menu"),
     (0x00000002, " Rent-A-Hero No. 1"),
     (0x00000111, "Snes360"),

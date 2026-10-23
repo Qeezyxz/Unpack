@@ -1,512 +1,1086 @@
-use serde::Serialize;
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+//! Native archive engine: drives the bundled 7-Zip command-line tool (7za).
+//!
+//! Everything here is plain Rust with no Tauri types so it can be unit-tested on Linux.
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ArchiveResult {
-    pub archive: String,
-    pub destination: String,
-    pub status: String,
-    #[serde(default)]
-    pub nested: u32,
-    /// Zip/rar/7z files inside the result that were left closed because
-    /// "open zips inside zips" is off.
-    #[serde(default)]
-    pub inner_left: u32,
-    #[serde(default)]
-    pub isos: Vec<String>,
+use std::collections::HashMap;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+
+#[cfg(windows)]
+const EXE_NAME: &str = "7za.exe";
+#[cfg(not(windows))]
+const EXE_NAME: &str = "7za";
+
+/// Passed when the user gave no password, so 7-Zip never stops to ask on stdin.
+const NO_PASSWORD: &str = "\u{1}unpack-no-password";
+
+pub const ERR_PASSWORD_REQUIRED: &str = "PASSWORD_REQUIRED";
+pub const ERR_WRONG_PASSWORD: &str = "WRONG_PASSWORD";
+pub const ERR_CANCELLED: &str = "CANCELLED";
+
+/// Find 7za: next to our own exe first (installed / bundled), then a few dev fallbacks.
+/// File names the app treats as archives (same list as ARCHIVE_RE in native.js).
+pub fn is_archive_name(path: &str) -> bool {
+    let l = path.to_lowercase();
+    [".zip", ".rar", ".7z", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".cab", ".arj", ".lzh", ".z", ".lzma", ".wim", ".zipx"]
+        .iter()
+        .any(|e| l.ends_with(e))
 }
 
-pub fn find_seven_zip() -> Option<PathBuf> {
-    if let Ok(custom) = std::env::var("UNPACK_7ZA") {
-        let p = PathBuf::from(custom);
-        if p.exists() {
+pub fn find_7za() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("UNPACK_7ZA") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
             return Some(p);
         }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for name in ["7za.exe", "7z.exe", "7za", "7z", "7zr"] {
-                let candidate = dir.join(name);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
+            let candidate = dir.join(EXE_NAME);
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }
-    for name in ["7za", "7z", "7zr"] {
-        if let Some(p) = on_path(name) {
-            return Some(p);
+    #[cfg(not(windows))]
+    for p in ["/usr/lib/7zip/7za", "/usr/bin/7za", "/usr/bin/7zz", "/usr/bin/7z"] {
+        if Path::new(p).is_file() {
+            return Some(PathBuf::from(p));
         }
     }
     None
 }
 
-fn on_path(name: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&paths) {
-        let p = dir.join(name);
-        if p.is_file() {
-            return Some(p);
-        }
+fn base_command(exe: &Path) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Add arguments to a 7-Zip command.
+///
+/// On Windows, 7-Zip splits its command line itself: a `"` only toggles quoting and
+/// backslashes are never escapes. Rust's default quoting (MSVC rules: `\"`, doubled
+/// trailing backslashes) would therefore corrupt passwords with spaces + backslashes.
+/// So we quote args ourselves, 7-Zip style. `"` can't be expressed at all, which is why
+/// passwords containing it are rejected up front (`check_password`).
+fn add_args<I, S>(cmd: &mut Command, args: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    for a in args {
         #[cfg(windows)]
         {
-            let p = dir.join(format!("{name}.exe"));
-            if p.is_file() {
-                return Some(p);
+            use std::os::windows::process::CommandExt;
+            let s = a.as_ref().to_string_lossy();
+            if s.is_empty() || s.contains(' ') || s.contains('\t') {
+                cmd.raw_arg(format!("\"{s}\""));
+            } else {
+                cmd.raw_arg(s.as_ref());
             }
         }
-    }
-    None
-}
-
-#[derive(Debug, Clone)]
-pub struct ExtractOptions {
-    pub skip_junk: bool,
-    pub existing: String,
-    /// Open zip/rar/7z files found inside an extracted folder (Xbox dumps
-    /// are often a zip that contains another rar that contains the ISO).
-    pub nested: bool,
-}
-
-impl Default for ExtractOptions {
-    fn default() -> Self {
-        Self {
-            skip_junk: true,
-            existing: "number".into(),
-            nested: true,
-        }
+        #[cfg(not(windows))]
+        cmd.arg(a);
     }
 }
 
-const MAX_NESTED_DEPTH: u32 = 3;
-const MAX_NESTED_ARCHIVES: usize = 40;
-
-#[cfg(test)]
-pub fn extract_archives(archives: &[PathBuf], dest: &Path) -> Result<Vec<ArchiveResult>, String> {
-    extract_archives_with(archives, dest, &ExtractOptions::default(), None)
+pub fn check_password(password: Option<&str>) -> Result<(), String> {
+    if cfg!(windows) && password.map_or(false, |p| p.contains('"')) {
+        return Err("Passwords containing a double quote (\") can't be passed to 7-Zip on Windows. Please use a password without it.".into());
+    }
+    Ok(())
 }
 
-pub fn extract_archives_with(
-    archives: &[PathBuf],
-    dest: &Path,
-    opts: &ExtractOptions,
-    mut progress: Option<&mut dyn FnMut(String, u64, u64)>,
-) -> Result<Vec<ArchiveResult>, String> {
-    let seven = find_seven_zip().ok_or_else(|| {
-        "7-Zip was not found. Put 7za.exe next to Unpack.exe, or install 7-Zip / p7zip and set UNPACK_7ZA.".to_string()
-    })?;
-    fs_create(dest)?;
-    let mut results = Vec::new();
-    let total = archives.len() as u64;
-    for (i, archive) in archives.iter().enumerate() {
-        emit_progress(
-            &mut progress,
-            format!("Extracting {}", archive_stem(archive)),
-            i as u64,
-            total.max(1),
-        );
-        let stem = archive_stem(archive);
-        let Some(out) = unique_dir(dest, &stem, &opts.existing)? else {
-            results.push(ArchiveResult {
-                archive: archive.display().to_string(),
-                destination: dest.join(&stem).display().to_string(),
-                status: "skipped (folder already exists)".into(),
-                nested: 0,
-                inner_left: 0,
-                isos: Vec::new(),
-            });
-            continue;
-        };
-        match extract_one(&seven, archive, &out, opts, true) {
-            Ok(status) => {
-                let mut nested = 0u32;
-                let mut inner_left = 0u32;
-                if opts.nested {
-                    nested = extract_nested(&seven, &out, opts, 1, &mut progress)?;
-                } else {
-                    inner_left = find_archives(&out).len() as u32;
-                }
-                results.push(ArchiveResult {
-                    archive: archive.display().to_string(),
-                    destination: out.display().to_string(),
-                    status: if nested > 0 {
-                        format!("{status} (opened {nested} inner archive{})", if nested == 1 { "" } else { "s" })
-                    } else {
-                        status
-                    },
-                    nested,
-                    inner_left,
-                    isos: find_isos(&out),
+fn pw_arg(password: Option<&str>) -> String {
+    match password {
+        Some(p) if !p.is_empty() => format!("-p{p}"),
+        _ => format!("-p{NO_PASSWORD}"),
+    }
+}
+
+/// Map 7-Zip error text to our error codes.
+fn classify_error(stderr: &str, had_password: bool) -> String {
+    let low = stderr.to_lowercase();
+    if low.contains("wrong password") || low.contains("cannot open encrypted archive") || low.contains("can not open encrypted archive") {
+        return if had_password { ERR_WRONG_PASSWORD.into() } else { ERR_PASSWORD_REQUIRED.into() };
+    }
+    let msg: Vec<&str> = stderr
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with("7-Zip") && !l.contains('%'))
+        .collect();
+    if msg.is_empty() {
+        "7-Zip could not open this archive.".into()
+    } else {
+        msg.join(" · ")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Entry {
+    pub path: String,
+    pub size: u64,
+    pub dir: bool,
+    pub encrypted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Listing {
+    pub entries: Vec<Entry>,
+    pub format: String,
+    pub encrypted: bool,
+}
+
+/// Normalise an archive entry name for display / comparisons: forward slashes,
+/// no empty, "." or ".." segments, no drive prefix.
+pub fn clean_entry_path(raw: &str) -> String {
+    raw.replace('\\', "/")
+        .split('/')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && *s != "." && *s != ".." && !s.ends_with(':'))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+pub fn list(exe: &Path, archive: &Path, password: Option<&str>) -> Result<Listing, String> {
+    let had_pw = password.map_or(false, |p| !p.is_empty());
+    check_password(password)?;
+    let mut cmd = base_command(exe);
+    add_args(&mut cmd, [std::ffi::OsString::from("l"), "-slt".into(), "-ba".into(), "-sccUTF-8".into(), pw_arg(password).into(), "--".into(), archive.as_os_str().into()]);
+    let out = cmd
+        .output()
+        .map_err(|e| format!("Could not start 7-Zip: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        return Err(classify_error(&format!("{stderr}\n{stdout}"), had_pw));
+    }
+    let mut entries = Vec::new();
+    let mut format = String::new();
+    let mut cur: HashMap<String, String> = HashMap::new();
+    let flush = |cur: &mut HashMap<String, String>, entries: &mut Vec<Entry>| {
+        if let Some(p) = cur.get("Path") {
+            let path = clean_entry_path(p);
+            if !path.is_empty() {
+                let attrs = cur.get("Attributes").cloned().unwrap_or_default();
+                entries.push(Entry {
+                    path,
+                    size: cur.get("Size").and_then(|s| s.parse().ok()).unwrap_or(0),
+                    dir: cur.get("Folder").map_or(false, |f| f == "+") || attrs.starts_with('D'),
+                    encrypted: cur.get("Encrypted").map_or(false, |f| f == "+"),
                 });
             }
+        }
+        cur.clear();
+    };
+    for line in stdout.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            flush(&mut cur, &mut entries);
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(" = ") {
+            cur.insert(k.to_string(), v.to_string());
+        } else if let Some(k) = line.strip_suffix(" =") {
+            cur.insert(k.to_string(), String::new());
+        }
+    }
+    flush(&mut cur, &mut entries);
+    // Format comes from the archive header block (only printed without -ba), so sniff the file.
+    if let Ok(mut f) = fs::File::open(archive) {
+        let mut head = [0u8; 8];
+        let n = f.read(&mut head).unwrap_or(0);
+        format = sniff_format(&head[..n], archive);
+    }
+    let encrypted = entries.iter().any(|e| e.encrypted);
+    Ok(Listing { entries, format, encrypted })
+}
+
+pub fn sniff_format(head: &[u8], path: &Path) -> String {
+    if head.starts_with(b"PK") {
+        return "zip".into();
+    }
+    if head.starts_with(b"Rar!") {
+        return "rar".into();
+    }
+    if head.starts_with(&[0x37, 0x7a, 0xbc, 0xaf]) {
+        return "7z".into();
+    }
+    if head.starts_with(&[0x1f, 0x8b]) {
+        return "gz".into();
+    }
+    path.extension().and_then(|e| e.to_str()).unwrap_or("archive").to_lowercase()
+}
+
+/// Running 7-Zip processes by job id, so they can be cancelled.
+#[derive(Default, Clone)]
+pub struct Jobs {
+    inner: Arc<Mutex<HashMap<String, JobHandle>>>,
+}
+
+struct JobHandle {
+    child: Option<Arc<Mutex<Child>>>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Jobs {
+    pub fn register(&self, id: &str) -> Arc<std::sync::atomic::AtomicBool> {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.inner.lock().unwrap().insert(id.to_string(), JobHandle { child: None, cancelled: flag.clone() });
+        flag
+    }
+    fn attach(&self, id: &str, child: Arc<Mutex<Child>>) {
+        if let Some(h) = self.inner.lock().unwrap().get_mut(id) {
+            h.child = Some(child);
+        }
+    }
+    pub fn finish(&self, id: &str) {
+        self.inner.lock().unwrap().remove(id);
+    }
+    pub fn cancel(&self, id: &str) -> bool {
+        let map = self.inner.lock().unwrap();
+        if let Some(h) = map.get(id) {
+            h.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(c) = &h.child {
+                let _ = c.lock().unwrap().kill();
+            }
+            true
+        } else {
+            false
+        }
+    }
+    pub fn is_cancelled(&self, id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .map_or(false, |h| h.cancelled.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+
+/// Run 7-Zip with `-bsp1`, calling `progress(percent, current_file)` at most ~8x per second.
+pub fn run_with_progress(
+    exe: &Path,
+    args: &[std::ffi::OsString],
+    jobs: &Jobs,
+    job_id: &str,
+    had_password: bool,
+    progress: &mut dyn FnMut(u32, &str),
+) -> Result<Vec<String>, String> {
+    if jobs.is_cancelled(job_id) {
+        return Err(ERR_CANCELLED.into());
+    }
+    let mut cmd = base_command(exe);
+    add_args(&mut cmd, args);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("Could not start 7-Zip: {e}"))?;
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let child = Arc::new(Mutex::new(child));
+    jobs.attach(job_id, child.clone());
+    // A cancel that arrived between the check above and attach() would have found no child.
+    if jobs.is_cancelled(job_id) {
+        let _ = child.lock().unwrap().kill();
+    }
+    let err_thread = std::thread::spawn(move || {
+        let mut s = Vec::new();
+        let _ = stderr.read_to_end(&mut s);
+        String::from_utf8_lossy(&s).into_owned()
+    });
+    let mut buf = [0u8; 4096];
+    let mut line = Vec::new();
+    let mut last_emit = Instant::now() - Duration::from_secs(1);
+    let mut last_pct = 0u32;
+    loop {
+        let n = match stdout.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        for &b in &buf[..n] {
+            if b == b'\r' || b == b'\n' || b == 8 {
+                if !line.is_empty() {
+                    let text = String::from_utf8_lossy(&line).into_owned();
+                    if let Some((pct, file)) = parse_progress(&text) {
+                        last_pct = pct;
+                        if last_emit.elapsed() >= Duration::from_millis(120) {
+                            progress(pct, &file);
+                            last_emit = Instant::now();
+                        }
+                    }
+                    line.clear();
+                }
+            } else {
+                line.push(b);
+            }
+        }
+    }
+    let status = child.lock().unwrap().wait().map_err(|e| e.to_string())?;
+    let err_text = err_thread.join().unwrap_or_default();
+    if jobs.is_cancelled(job_id) {
+        return Err(ERR_CANCELLED.into());
+    }
+    // 7-Zip exit codes: 0 ok, 1 warning (non-fatal), 2 fatal, 7 bad command line, 8 out of memory, 255 user stop
+    match status.code() {
+        Some(0) => {
+            progress(100.max(last_pct), "");
+            Ok(Vec::new())
+        }
+        Some(1) => {
+            progress(100, "");
+            Ok(Vec::new())
+        }
+        Some(2) if tolerable_errors(&err_text) => {
+            // e.g. a tar hard link pointing outside the archive: skip that entry, keep the rest.
+            progress(100, "");
+            Ok(err_text
+                .lines()
+                .filter(|l| l.contains("Cannot create hard link"))
+                .map(|l| format!("Skipped a hard link that points outside the archive ({})", l.split(" : ").nth(2).unwrap_or("?").trim()))
+                .collect())
+        }
+        _ => Err(classify_error(&err_text, had_password)),
+    }
+}
+
+/// True when 7-Zip's only errors were hard links it refused to create.
+fn tolerable_errors(err: &str) -> bool {
+    let errors: Vec<&str> = err.lines().filter(|l| l.trim_start().starts_with("ERROR:")).collect();
+    !errors.is_empty() && errors.iter().all(|l| l.contains("Cannot create hard link"))
+}
+
+/// Parse a 7-Zip progress line such as " 44% 3 - folder/file.bin".
+pub fn parse_progress(text: &str) -> Option<(u32, String)> {
+    let t = text.trim();
+    let pct_end = t.find('%')?;
+    let pct: u32 = t[..pct_end].trim().parse().ok()?;
+    let rest = t[pct_end + 1..].trim();
+    let file = rest.split_once("- ").map(|(_, f)| f.trim().to_string()).unwrap_or_default();
+    Some((pct.min(100), file))
+}
+
+/// What to do when the destination already has something with the same name.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Collision {
+    Number,
+    Replace,
+    Skip,
+}
+
+impl Collision {
+    pub fn parse(s: &str) -> Collision {
+        match s {
+            "replace" => Collision::Replace,
+            "skip" => Collision::Skip,
+            _ => Collision::Number,
+        }
+    }
+}
+
+/// Windows-safe single path segment.
+pub fn safe_segment(name: &str) -> String {
+    let mut s: String = name
+        .chars()
+        .map(|c| if "<>:\"/\\|?*".contains(c) || (c as u32) < 32 { '_' } else { c })
+        .collect();
+    while s.ends_with('.') || s.ends_with(' ') {
+        s.pop();
+    }
+    let s2 = s.trim().to_string();
+    s = if s2.is_empty() || s2 == "." || s2 == ".." { "file".into() } else { s2 };
+    // Same reserved-name rule as downloads (CONIN$, "nul .txt", COM¹, …).
+    if crate::download::is_windows_reserved_stem(s.split('.').next().unwrap_or("")) {
+        s = format!("_{s}");
+    }
+    s
+}
+
+pub fn archive_stem(path: &Path) -> String {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("archive");
+    let lower = name.to_lowercase();
+    for ext in [".tar.gz", ".tar.bz2", ".tar.xz", ".zip", ".rar", ".7z", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".iso"] {
+        if lower.ends_with(ext) && name.len() > ext.len() {
+            return safe_segment(&name[..name.len() - ext.len()]);
+        }
+    }
+    safe_segment(name)
+}
+
+/// Pick a free name in `parent` for `name` ("name-2", "name-3.ext", ...).
+pub fn free_name(parent: &Path, name: &str) -> PathBuf {
+    let first = parent.join(name);
+    if fs::symlink_metadata(&first).is_err() {
+        return first;
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    for n in 2.. {
+        let p = parent.join(format!("{stem}-{n}{ext}"));
+        if fs::symlink_metadata(&p).is_err() {
+            return p;
+        }
+    }
+    unreachable!()
+}
+
+/// Walk a freshly extracted tree: delete symlinks/junctions and anything that would
+/// resolve outside `root`. Returns warnings. (Defence in depth: 7-Zip already
+/// strips "../" and absolute paths.)
+pub fn sanitize_tree(root: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let canon_root = match fs::canonicalize(root) {
+        Ok(p) => p,
+        Err(_) => return warnings,
+    };
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd = match fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            let meta = match fs::symlink_metadata(&p) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
+            if meta.file_type().is_symlink() || is_reparse_point(&meta) {
+                let _ = fs::remove_file(&p).or_else(|_| fs::remove_dir(&p));
+                warnings.push(format!("{rel}: link removed for safety"));
+                continue;
+            }
+            match fs::canonicalize(&p) {
+                Ok(c) if c.starts_with(&canon_root) => {}
+                _ => {
+                    let _ = fs::remove_file(&p).or_else(|_| fs::remove_dir_all(&p));
+                    warnings.push(format!("{rel}: outside the destination, removed"));
+                    continue;
+                }
+            }
+            if meta.is_dir() {
+                stack.push(p);
+            }
+        }
+    }
+    warnings
+}
+
+#[cfg(windows)]
+fn is_reparse_point(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    meta.file_attributes() & 0x400 != 0
+}
+#[cfg(not(windows))]
+fn is_reparse_point(_meta: &fs::Metadata) -> bool {
+    false
+}
+
+/// Serialises "pick a name + move into place" across parallel jobs in this process.
+static PLACE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Atomically reserve a new, empty folder `name`, `name-2`, ... in `parent`.
+/// `create_dir` fails if anything already exists, so two jobs (or another program)
+/// can never end up sharing one folder.
+pub fn claim_dir(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let mut n = 1u32;
+    loop {
+        let candidate = if n == 1 { parent.join(name) } else { parent.join(format!("{name}-{n}")) };
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
             Err(e) => return Err(e),
         }
+        if n > 100_000 {
+            return Err(std::io::Error::other("no free folder name"));
+        }
     }
-    Ok(results)
 }
 
-fn extract_one(
-    seven: &Path,
-    archive: &Path,
-    out: &Path,
-    opts: &ExtractOptions,
-    created_fresh: bool,
-) -> Result<String, String> {
-    let fresh = created_fresh && !out.exists();
-    fs_create(out)?;
-    let mut args: Vec<OsString> = vec!["x".into(), "-y".into()];
-    if opts.existing == "overwrite" {
-        args.push("-aoa".into());
+/// Move the *contents* of `src_dir` into the freshly claimed, empty `dst_dir`.
+fn move_children(src_dir: &Path, dst_dir: &Path) -> std::io::Result<()> {
+    for e in fs::read_dir(src_dir)? {
+        let e = e?;
+        move_path(&e.path(), &dst_dir.join(e.file_name()))?;
     }
-    // 7-Zip wants `-oDIR` as one argv token so paths with spaces stay intact.
-    let mut out_arg = OsString::from("-o");
-    out_arg.push(out.as_os_str());
-    args.push(out_arg);
+    Ok(())
+}
+
+/// Move a file or folder to a free name next to `name` without ever overwriting:
+/// folders are claimed with `create_dir`, files with `create_new`.
+fn place_numbered(src: &Path, parent: &Path, name: &str) -> std::io::Result<PathBuf> {
+    if src.is_dir() {
+        let d = claim_dir(parent, name)?;
+        move_children(src, &d)?;
+        let _ = fs::remove_dir(src);
+        Ok(d)
+    } else {
+        let (stem, ext) = match name.rfind('.') {
+            Some(i) if i > 0 => (&name[..i], &name[i..]),
+            _ => (name, ""),
+        };
+        let mut n = 1u32;
+        loop {
+            let c = if n == 1 { parent.join(name) } else { parent.join(format!("{stem}-{n}{ext}")) };
+            match fs::OpenOptions::new().write(true).create_new(true).open(&c) {
+                Ok(f) => {
+                    drop(f); // close it first (Windows can't replace an open file)
+                    // we own the empty placeholder; replace it with the real file
+                    move_path(src, &c)?;
+                    return Ok(c);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+/// Move `src` to `dst`. Falls back to copy+delete across volumes.
+fn move_path(src: &Path, dst: &Path) -> std::io::Result<()> {
+    // Only ever called with a dst that doesn't exist or is our own empty placeholder file.
+    if src.is_file() && fs::symlink_metadata(dst).map(|m| m.is_file() && m.len() == 0).unwrap_or(false) {
+        let _ = fs::remove_file(dst);
+    }
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            copy_recursive(src, dst)?;
+            if src.is_dir() { fs::remove_dir_all(src) } else { fs::remove_file(src) }
+        }
+    }
+}
+
+fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        fs::create_dir_all(dst)?;
+        for e in fs::read_dir(src)? {
+            let e = e?;
+            copy_recursive(&e.path(), &dst.join(e.file_name()))?;
+        }
+        Ok(())
+    } else {
+        fs::copy(src, dst).map(|_| ())
+    }
+}
+
+/// Is `p` a symlink, or (on Windows) a junction/reparse point? Never follows it.
+fn is_link(p: &Path) -> bool {
+    fs::symlink_metadata(p).map(|m| m.file_type().is_symlink() || is_reparse_point(&m)).unwrap_or(false)
+}
+
+/// Remove a link itself (never its target).
+fn remove_link(p: &Path) -> std::io::Result<()> {
+    fs::remove_file(p).or_else(|_| fs::remove_dir(p))
+}
+
+/// Merge `src` into existing `dst`, replacing files with the same name.
+/// Links already in the destination are replaced by real files/folders, never followed,
+/// so "Replace" can't write outside the chosen folder.
+fn merge_replace(src: &Path, dst: &Path, warnings: &mut Vec<String>) -> std::io::Result<()> {
+    if is_link(dst) {
+        remove_link(dst)?;
+        warnings.push(format!(
+            "{} was a link (shortcut to another folder or file); the link was replaced with the extracted item. Nothing was written through it.",
+            dst.display()
+        ));
+    }
+    if src.is_dir() {
+        let dst_meta = fs::symlink_metadata(dst).ok();
+        if dst_meta.as_ref().map_or(false, |m| !m.is_dir()) {
+            fs::remove_file(dst)?;
+        }
+        if fs::symlink_metadata(dst).is_err() {
+            fs::create_dir(dst)?;
+        }
+        for e in fs::read_dir(src)? {
+            let e = e?;
+            merge_replace(&e.path(), &dst.join(e.file_name()), warnings)?;
+        }
+        fs::remove_dir(src)
+    } else {
+        match fs::symlink_metadata(dst) {
+            Ok(m) if m.is_dir() => fs::remove_dir_all(dst)?,
+            Ok(_) => fs::remove_file(dst)?,
+            Err(_) => {}
+        }
+        move_path(src, dst)
+    }
+}
+
+/// How the extracted files are laid out in the destination.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Layout {
+    /// Into a folder named after the archive (or its single top-level folder).
+    Folder,
+    /// Straight into the destination ("Extract here"): each top-level item placed individually.
+    Here,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtractResult {
+    /// Where the files ended up (folder, or destination dir for Layout::Here).
+    pub output: String,
+    pub skipped: bool,
+    pub warnings: Vec<String>,
+    pub files: usize,
+    /// Exact final paths of the .iso files this extraction placed (Folder layout only).
+    /// Auto ISO -> GOD only ever touches these paths.
+    pub isos: Vec<String>,
+    /// True when the files were merged into a folder that already existed (Replace):
+    /// the delete-ISO option is then disabled.
+    pub merged: bool,
+    /// One opaque token per entry of `isos`, issued by the Rust-side registry
+    /// (`god::register_extracted`). The page converts by token only; Rust decides whether
+    /// deleting is allowed and re-checks the file's identity.
+    pub iso_tokens: Vec<String>,
+    /// Exact final paths of files this extraction placed that look like Xbox 360 packages
+    /// (CON/LIVE/PIRS magic) — DLC candidates (Folder layout only).
+    pub dlcs: Vec<String>,
+    /// True only when this run created a brand-new folder via claim_dir (Folder layout).
+    /// Session grants use this; Skip / Replace-merge / Extract-here never set it.
+    pub created: bool,
+}
+
+/// .iso files under `root`, as paths relative to it (links never followed).
+fn iso_rel_paths(root: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let mut stack = vec![PathBuf::new()];
+    while let Some(rel) = stack.pop() {
+        let Ok(rd) = fs::read_dir(root.join(&rel)) else { continue };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            let r = rel.join(e.file_name());
+            if ft.is_dir() && !is_link(&e.path()) {
+                stack.push(r);
+            } else if ft.is_file() && r.extension().is_some_and(|x| x.eq_ignore_ascii_case("iso")) {
+                out.push(r);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+pub struct ExtractOptions<'a> {
+    pub archive: &'a Path,
+    pub dest_parent: &'a Path,
+    pub password: Option<&'a str>,
+    pub collision: Collision,
+    pub layout: Layout,
+    pub skip_junk: bool,
+}
+
+fn is_junk(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n == "__macosx" || n == ".ds_store" || n == "thumbs.db" || n == "desktop.ini"
+}
+
+fn remove_junk(root: &Path) -> usize {
+    let mut removed = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if let Ok(rd) = fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if is_junk(&e.file_name().to_string_lossy()) {
+                    let ok = if p.is_dir() { fs::remove_dir_all(&p) } else { fs::remove_file(&p) };
+                    if ok.is_ok() {
+                        removed += 1;
+                    }
+                } else if p.is_dir() {
+                    stack.push(p);
+                }
+            }
+        }
+    }
+    removed
+}
+
+fn count_files(root: &Path) -> usize {
+    let mut n = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(rd) = fs::read_dir(&d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() { stack.push(p) } else { n += 1 }
+            }
+        }
+    }
+    n
+}
+
+/// Removes the staging folder however we leave the function.
+struct StagingGuard(PathBuf);
+impl Drop for StagingGuard {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+/// Extract an archive: 7-Zip writes into a hidden staging folder next to the
+/// destination, which is then checked and moved into place (rename = instant on
+/// the same drive, so multi-GB archives aren't copied twice).
+pub fn extract(
+    exe: &Path,
+    opts: &ExtractOptions,
+    jobs: &Jobs,
+    job_id: &str,
+    progress: &mut dyn FnMut(u32, &str),
+) -> Result<ExtractResult, String> {
+    let parent = opts.dest_parent;
+    fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
+    let stem = archive_stem(opts.archive);
+
+    // Decide the final folder name up front so "Skip" can bail before doing any work.
+    let listing = list(exe, opts.archive, opts.password)?;
+    let tops: std::collections::BTreeSet<String> = listing
+        .entries
+        .iter()
+        .filter(|e| !(opts.skip_junk && e.path.split('/').any(is_junk)))
+        .filter_map(|e| e.path.split('/').next().map(|s| s.to_string()))
+        .collect();
+    let single_root_dir = if tops.len() == 1 {
+        let top = tops.iter().next().unwrap().clone();
+        let is_dir = listing.entries.iter().any(|e| e.path.starts_with(&format!("{top}/")) || (e.path == top && e.dir));
+        if is_dir { Some(top) } else { None }
+    } else {
+        None
+    };
+
+    if opts.layout == Layout::Folder && opts.collision == Collision::Skip {
+        let want = safe_segment(single_root_dir.as_deref().unwrap_or(&stem));
+        if fs::symlink_metadata(parent.join(&want)).is_ok() {
+            return Ok(ExtractResult { output: parent.join(want).display().to_string(), skipped: true, warnings: vec![], files: 0, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false });
+        }
+    }
+
+    let staging = free_name(parent, &format!(".unpack-tmp-{}", safe_segment(job_id)));
+    fs::create_dir_all(&staging).map_err(|e| format!("Cannot write to {}: {e}", parent.display()))?;
+    let _guard = StagingGuard(staging.clone());
+
+    check_password(opts.password)?;
+    let had_pw = opts.password.map_or(false, |p| !p.is_empty());
+    let mut out_arg = std::ffi::OsString::from("-o");
+    out_arg.push(staging.as_os_str());
+    let args: Vec<std::ffi::OsString> = vec![
+        "x".into(),
+        "-y".into(),
+        "-bso0".into(),
+        "-bse2".into(),
+        "-bsp1".into(),
+        "-snl-".into(), // never create symbolic links
+        "-sccUTF-8".into(),
+        pw_arg(opts.password).into(),
+        out_arg,
+        "--".into(),
+        opts.archive.as_os_str().to_owned(),
+    ];
+    let tolerated = run_with_progress(exe, &args, jobs, job_id, had_pw, progress)?;
+
+    let mut warnings = sanitize_tree(&staging);
+    warnings.extend(tolerated);
     if opts.skip_junk {
-        args.extend(junk_excludes().into_iter().map(OsString::from));
+        let n = remove_junk(&staging);
+        if n > 0 {
+            warnings.push(format!("{n} junk item(s) skipped"));
+        }
+    }
+    let files = count_files(&staging);
+    if files == 0 && fs::read_dir(&staging).map(|mut r| r.next().is_none()).unwrap_or(true) {
+        return Err("The archive opened, but no files were found.".into());
+    }
+
+    let place_err = |e: std::io::Error| format!("Could not move files into place: {e}");
+    // One job at a time decides names and moves files in (moves are renames, so this is quick).
+    let _place = PLACE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let output = match opts.layout {
+        Layout::Folder => {
+            // If the archive already wraps everything in one folder, use that folder
+            // instead of nesting it inside another one with the same name.
+            let (src, name) = match &single_root_dir {
+                Some(top) if staging.join(top).is_dir() => (staging.join(top), safe_segment(top)),
+                _ => (staging.clone(), stem.clone()),
+            };
+            let iso_rel = iso_rel_paths(&src);
+            let dlc_rel = crate::dlc::stfs_rel_paths(&src);
+            let target = parent.join(&name);
+            let exists = fs::symlink_metadata(&target).is_ok();
+            match (exists, opts.collision) {
+                (true, Collision::Replace) => {
+                    merge_replace(&src, &target, &mut warnings).map_err(place_err)?;
+                    let isos: Vec<String> = iso_rel.iter().map(|r| target.join(r).display().to_string()).collect();
+                    let iso_tokens = crate::god::register_extracted(&isos, &target, false);
+                    return Ok(ExtractResult { output: target.display().to_string(), skipped: false, warnings, files, isos, merged: true, iso_tokens, dlcs: dlc_rel.iter().map(|r| target.join(r).display().to_string()).collect(), created: false });
+                }
+                (true, Collision::Skip) => {
+                    return Ok(ExtractResult { output: target.display().to_string(), skipped: true, warnings, files: 0, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false });
+                }
+                _ => {}
+            }
+            // Claim a brand-new empty folder (atomic), then move the files into it.
+            // Never copies into a folder someone else owns.
+            let final_target = claim_dir(parent, &name).map_err(place_err)?;
+            move_children(&src, &final_target).map_err(place_err)?;
+            let isos: Vec<String> = iso_rel.iter().map(|r| final_target.join(r).display().to_string()).collect();
+            // Delete is never allowed in Replace mode: another archive in the batch may merge
+            // into this same folder later and swap the file (Overseer round-3 H1).
+            let iso_tokens = crate::god::register_extracted(&isos, &final_target, opts.collision != Collision::Replace);
+            return Ok(ExtractResult { output: final_target.display().to_string(), skipped: false, warnings, files, isos, merged: false, iso_tokens, dlcs: dlc_rel.iter().map(|r| final_target.join(r).display().to_string()).collect(), created: true });
+        }
+        Layout::Here => {
+            let items: Vec<_> = fs::read_dir(&staging).map_err(place_err)?.flatten().collect();
+            for item in items {
+                let name = item.file_name().to_string_lossy().into_owned();
+                let target = parent.join(&name);
+                if fs::symlink_metadata(&target).is_ok() {
+                    match opts.collision {
+                        Collision::Replace => merge_replace(&item.path(), &target, &mut warnings).map_err(place_err)?,
+                        Collision::Skip => warnings.push(format!("{name} already exists, skipped")),
+                        Collision::Number => {
+                            let t = place_numbered(&item.path(), parent, &name).map_err(place_err)?;
+                            warnings.push(format!("{name} saved as {}", t.file_name().unwrap().to_string_lossy()));
+                        }
+                    }
+                } else {
+                    let t = place_numbered(&item.path(), parent, &name).map_err(place_err)?;
+                    if t != target {
+                        warnings.push(format!("{name} saved as {}", t.file_name().unwrap().to_string_lossy()));
+                    }
+                }
+            }
+            parent.to_path_buf()
+        }
+    };
+    Ok(ExtractResult { output: output.display().to_string(), skipped: false, warnings, files, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false })
+}
+
+/// Temp list file naming exactly one entry. 7-Zip reads names from it literally
+/// (`-i@file -scsUTF-8 -spd`), so names with `"`, spaces, a leading `-` or `*` are
+/// requested exactly — no command-line quoting involved on any OS.
+struct ListFile(PathBuf);
+impl ListFile {
+    fn new(entry: &str) -> Result<ListFile, String> {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "unpack-entry-{}-{}.txt",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        fs::write(&p, format!("{entry}\n")).map_err(|e| format!("Cannot write temp file: {e}"))?;
+        Ok(ListFile(p))
+    }
+    fn arg(&self) -> std::ffi::OsString {
+        let mut a = std::ffi::OsString::from("-i@");
+        a.push(self.0.as_os_str());
+        a
+    }
+}
+impl Drop for ListFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// 7-Zip exits 0 with no output when nothing matches; make that an error instead of an empty file.
+fn ensure_entry(exe: &Path, archive: &Path, entry: &str, password: Option<&str>) -> Result<(), String> {
+    let listing = list(exe, archive, password)?;
+    let want = clean_entry_path(entry);
+    match listing.entries.iter().find(|e| e.path == want) {
+        Some(e) if e.dir => Err(format!("{entry} is a folder, not a file.")),
+        Some(_) => Ok(()),
+        None => Err(format!("{entry} was not found in the archive.")),
+    }
+}
+
+fn entry_command(exe: &Path, archive: &Path, list: &ListFile, password: Option<&str>) -> Command {
+    let mut cmd = base_command(exe);
+    add_args(&mut cmd, [
+        std::ffi::OsString::from("e"),
+        "-so".into(),
+        "-spd".into(), // no wildcards
+        "-scsUTF-8".into(),
+        "-sccUTF-8".into(),
+        pw_arg(password).into(),
+        list.arg(),
+        "--".into(),
+        archive.as_os_str().into(),
+    ]);
+    cmd
+}
+
+/// Read one entry's bytes (for previews), up to `max` bytes.
+pub fn read_entry(exe: &Path, archive: &Path, entry: &str, password: Option<&str>, max: usize) -> Result<Vec<u8>, String> {
+    let had_pw = password.map_or(false, |p| !p.is_empty());
+    check_password(password)?;
+    ensure_entry(exe, archive, entry, password)?;
+    let lf = ListFile::new(entry)?;
+    let mut child = entry_command(exe, archive, &lf, password)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not start 7-Zip: {e}"))?;
+    // drain stderr concurrently so a chatty 7-Zip can't block on a full pipe
+    let mut stderr = child.stderr.take().unwrap();
+    let err_thread = std::thread::spawn(move || { let mut s = String::new(); let _ = stderr.read_to_string(&mut s); s });
+    let mut out = Vec::new();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut buf = [0u8; 65536];
+    let mut truncated = false;
+    loop {
+        let n = stdout.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        if out.len() + n > max {
+            truncated = true;
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    if truncated {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = err_thread.join();
+        return Err("TOO_LARGE".into());
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let err = err_thread.join().unwrap_or_default();
+    if !status.success() {
+        return Err(classify_error(&err, had_pw));
+    }
+    Ok(out)
+}
+
+
+/// Create a ZIP or 7Z from files/folders, with optional password (AES-256).
+#[allow(clippy::too_many_arguments)]
+pub fn create(
+    exe: &Path,
+    sources: &[PathBuf],
+    out_file: &Path,
+    format: &str,
+    password: Option<&str>,
+    level: u32,
+    jobs: &Jobs,
+    job_id: &str,
+    progress: &mut dyn FnMut(u32, &str),
+) -> Result<String, String> {
+    if sources.is_empty() {
+        return Err("Nothing to add.".into());
+    }
+    check_password(password)?;
+    let fmt = match format {
+        "7z" => "7z",
+        "zip" => "zip",
+        _ => return Err("Only ZIP and 7Z can be created.".into()),
+    };
+    for s in sources {
+        if !s.exists() {
+            return Err(format!("{} no longer exists.", s.display()));
+        }
+        if out_file.starts_with(s) {
+            return Err("The new archive can't be saved inside a folder that is being archived.".into());
+        }
+    }
+    let parent = out_file.parent().ok_or("Bad output path")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    // Build into a temp file, then rename, so a cancelled/failed run never leaves a half archive
+    // and an existing archive with the same name is never "updated" by accident.
+    let tmp = free_name(parent, &format!(".unpack-new-{}.{fmt}", safe_segment(job_id)));
+    let _ = fs::remove_file(&tmp);
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "a".into(),
+        format!("-t{fmt}").into(),
+        format!("-mx={}", level.min(9)).into(),
+        "-y".into(),
+        "-bso0".into(),
+        "-bse2".into(),
+        "-bsp1".into(),
+        "-sccUTF-8".into(),
+    ];
+    let had_pw = password.map_or(false, |p| !p.is_empty());
+    if had_pw {
+        args.push(format!("-p{}", password.unwrap()).into());
+        if fmt == "7z" {
+            args.push("-mhe=on".into()); // hide file names too
+        } else {
+            args.push("-mem=AES256".into());
+        }
     }
     args.push("--".into());
-    args.push(archive.as_os_str().to_os_string());
-    match run_7z(seven, &args) {
-        Ok(status) => Ok(status),
-        Err(e) => {
-            if fresh {
-                let _ = std::fs::remove_dir_all(out);
-            }
-            Err(e)
-        }
+    args.push(tmp.as_os_str().to_owned());
+    for s in sources {
+        args.push(s.as_os_str().to_owned());
     }
-}
-
-fn emit_progress(
-    progress: &mut Option<&mut dyn FnMut(String, u64, u64)>,
-    message: String,
-    current: u64,
-    total: u64,
-) {
-    if let Some(cb) = progress {
-        cb(message, current, total);
+    let res = run_with_progress(exe, &args, jobs, job_id, had_pw, progress);
+    if let Err(e) = res.map(|_| ()) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
     }
-}
-
-fn extract_nested(
-    seven: &Path,
-    root: &Path,
-    opts: &ExtractOptions,
-    depth: u32,
-    progress: &mut Option<&mut dyn FnMut(String, u64, u64)>,
-) -> Result<u32, String> {
-    if depth > MAX_NESTED_DEPTH {
-        return Ok(0);
+    if out_file.exists() {
+        fs::remove_file(out_file).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("Could not replace {}: {e}", out_file.display())
+        })?;
     }
-    let nested = find_archives(root);
-    if nested.is_empty() {
-        return Ok(0);
-    }
-    if nested.len() > MAX_NESTED_ARCHIVES {
-        return Err(format!(
-            "stopped: found {} archives inside {} (limit is {MAX_NESTED_ARCHIVES})",
-            nested.len(),
-            root.display()
-        ));
-    }
-    let mut opened = 0u32;
-    for (i, archive) in nested.iter().enumerate() {
-        emit_progress(
-            progress,
-            format!("Opening inner {}", archive_stem(archive)),
-            i as u64,
-            nested.len() as u64,
-        );
-        let parent = archive.parent().unwrap_or(root);
-        let stem = archive_stem(archive);
-        let Some(out) = unique_dir(parent, &stem, "number")? else {
-            continue;
-        };
-        extract_one(seven, archive, &out, opts, true)?;
-        opened += 1;
-        opened += extract_nested(seven, &out, opts, depth + 1, progress)?;
-    }
-    Ok(opened)
-}
-
-fn is_archive_file(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if name.ends_with(".tar.gz") || name.ends_with(".tgz") || name.ends_with(".tar.xz") {
-        return true;
-    }
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str(),
-        "zip" | "rar" | "7z" | "tar" | "gz" | "xz" | "bz2"
-    )
-}
-
-fn is_iso_file(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str(),
-        "iso" | "000"
-    )
-}
-
-fn find_archives(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    walk_files(root, 0, 6, &mut |path| {
-        if is_archive_file(path) {
-            out.push(path.to_path_buf());
-        }
-    });
-    out
-}
-
-fn find_isos(root: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    walk_files(root, 0, 8, &mut |path| {
-        if is_iso_file(path) {
-            out.push(path.display().to_string());
-        }
-    });
-    out
-}
-
-fn walk_files(dir: &Path, depth: u32, max_depth: u32, visit: &mut dyn FnMut(&Path)) {
-    if depth > max_depth {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk_files(&path, depth + 1, max_depth, visit);
-        } else {
-            visit(&path);
-        }
-    }
-}
-
-fn archive_stem(path: &Path) -> String {
-    path.file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "archive".into())
-}
-
-fn unique_dir(parent: &Path, stem: &str, existing: &str) -> Result<Option<PathBuf>, String> {
-    let first = parent.join(stem);
-    if !first.exists() {
-        return Ok(Some(first));
-    }
-    match existing {
-        "skip" => Ok(None),
-        "overwrite" => Ok(Some(first)),
-        _ => {
-            let mut n = 2u32;
-            loop {
-                let candidate = parent.join(format!("{stem} ({n})"));
-                if !candidate.exists() {
-                    return Ok(Some(candidate));
-                }
-                n += 1;
-                if n > 9_999 {
-                    return Err(format!("too many existing folders named {stem}"));
-                }
-            }
-        }
-    }
-}
-
-fn junk_excludes() -> Vec<String> {
-    [
-        "-xr!__MACOSX",
-        "-x!Thumbs.db",
-        "-x!desktop.ini",
-        "-x!*.DS_Store",
-        "-x!*.nfo",
-        "-x!*.url",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
-}
-
-pub fn create_archive(inputs: &[PathBuf], dest: &Path) -> Result<ArchiveResult, String> {
-    let seven = find_seven_zip().ok_or_else(|| "7-Zip was not found".to_string())?;
-    if let Some(parent) = dest.parent() {
-        fs_create(parent)?;
-    }
-    let mut args: Vec<OsString> = vec!["a".into(), "-y".into(), dest.as_os_str().to_os_string()];
-    for input in inputs {
-        args.push(input.as_os_str().to_os_string());
-    }
-    let status = run_7z(&seven, &args)?;
-    Ok(ArchiveResult {
-        archive: dest.display().to_string(),
-        destination: dest.display().to_string(),
-        status,
-        nested: 0,
-        inner_left: 0,
-        isos: Vec::new(),
-    })
-}
-
-fn run_7z(bin: &Path, args: &[OsString]) -> Result<String, String> {
-    let output = Command::new(bin)
-        .args(args.iter().map(|a| a.as_os_str()))
-        .output()
-        .map_err(|e| format!("failed to run {}: {e}", bin.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = format!("{stderr}{stdout}");
-    if !output.status.success() {
-        if combined.to_ascii_lowercase().contains("wrong password")
-            || combined.to_ascii_lowercase().contains("encrypted")
-        {
-            return Err("this archive is password-protected; Unpack does not prompt for passwords".into());
-        }
-        if combined.to_ascii_lowercase().contains("cannot open")
-            || combined.to_ascii_lowercase().contains("is not supported")
-            || combined.to_ascii_lowercase().contains("crc failed")
-            || combined.to_ascii_lowercase().contains("data error")
-        {
-            return Err(format!(
-                "archive is unreadable or corrupted: {}",
-                combined.trim()
-            ));
-        }
-        return Err(format!(
-            "7-Zip failed ({:?}): {stderr}{stdout}",
-            output.status.code()
-        ));
-    }
-    Ok(if stdout.trim().is_empty() { stderr } else { stdout })
-}
-
-fn fs_create(path: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(path).map_err(|e| format!("create {}: {e}", path.display()))
+    fs::rename(&tmp, out_file).map_err(|e| e.to_string())?;
+    Ok(out_file.display().to_string())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
+mod tests;
 
-    #[test]
-    fn extract_roundtrip_when_7zip_present() {
-        let Some(bin) = find_seven_zip() else {
-            eprintln!("skipping archive test: 7-Zip not installed");
-            return;
-        };
-        let root = std::env::temp_dir().join(format!("unpack-arc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let src = root.join("src");
-        let dest = root.join("out with spaces");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::File::create(src.join("note.txt"))
-            .unwrap()
-            .write_all(b"unpack-archive")
-            .unwrap();
-        let archive = root.join("pack.zip");
-        run_7z(
-            &bin,
-            &[
-                OsString::from("a"),
-                OsString::from("-y"),
-                archive.as_os_str().to_os_string(),
-                src.join("note.txt").as_os_str().to_os_string(),
-            ],
-        )
-        .unwrap();
-        extract_archives(&[archive.clone()], &dest).unwrap();
-        let folder = dest.join("pack");
-        let extracted = std::fs::read_to_string(folder.join("note.txt"))
-            .or_else(|_| std::fs::read_to_string(folder.join("src").join("note.txt")))
-            .unwrap();
-        assert_eq!(extracted, "unpack-archive");
-        extract_archives(&[archive], &dest).unwrap();
-        assert!(dest.join("pack (2)").is_dir());
-        let _ = std::fs::remove_dir_all(&root);
+/// Extract a single entry straight to `out_file` (streams; works for huge files).
+pub fn extract_entry_to(exe: &Path, archive: &Path, entry: &str, password: Option<&str>, out_file: &Path, jobs: &Jobs, job_id: &str) -> Result<(), String> {
+    let had_pw = password.map_or(false, |p| !p.is_empty());
+    check_password(password)?;
+    ensure_entry(exe, archive, entry, password)?;
+    let parent = out_file.parent().ok_or("Bad output path")?;
+    let tmp = free_name(parent, &format!(".unpack-part-{}", safe_segment(job_id)));
+    let mut file = fs::File::create(&tmp).map_err(|e| format!("Cannot write {}: {e}", out_file.display()))?;
+    let lf = match ListFile::new(entry) {
+        Ok(l) => l,
+        Err(e) => { drop(file); let _ = fs::remove_file(&tmp); return Err(e); }
+    };
+    let mut child = entry_command(exe, archive, &lf, password)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not start 7-Zip: {e}"))?;
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let err_thread = std::thread::spawn(move || { let mut s = String::new(); let _ = stderr.read_to_string(&mut s); s });
+    let child = Arc::new(Mutex::new(child));
+    jobs.attach(job_id, child.clone());
+    if jobs.is_cancelled(job_id) {
+        let _ = child.lock().unwrap().kill(); // cancel that arrived before attach()
     }
-
-    #[test]
-    fn opens_zip_inside_zip_when_nested() {
-        let Some(bin) = find_seven_zip() else {
-            eprintln!("skipping nested archive test: 7-Zip not installed");
-            return;
-        };
-        let root = std::env::temp_dir().join(format!("unpack-nested-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let note = root.join("note.txt");
-        std::fs::write(&note, b"inner-secret").unwrap();
-        let inner = root.join("inner.zip");
-        run_7z(
-            &bin,
-            &[
-                OsString::from("a"),
-                OsString::from("-y"),
-                inner.as_os_str().to_os_string(),
-                note.as_os_str().to_os_string(),
-            ],
-        )
-        .unwrap();
-        let outer = root.join("outer.zip");
-        run_7z(
-            &bin,
-            &[
-                OsString::from("a"),
-                OsString::from("-y"),
-                outer.as_os_str().to_os_string(),
-                inner.as_os_str().to_os_string(),
-            ],
-        )
-        .unwrap();
-        let dest = root.join("out");
-        let mut opts = ExtractOptions::default();
-        opts.nested = true;
-        extract_archives_with(&[outer.clone()], &dest, &opts, None).unwrap();
-        let text = std::fs::read_to_string(dest.join("outer").join("inner").join("note.txt"))
-            .or_else(|_| {
-                std::fs::read_to_string(dest.join("outer").join("inner").join("src").join("note.txt"))
-            })
-            .or_else(|_| std::fs::read_to_string(dest.join("outer").join("note.txt")))
-            .unwrap();
-        assert_eq!(text, "inner-secret");
-
-        let dest2 = root.join("out2");
-        opts.nested = false;
-        let closed = extract_archives_with(&[outer], &dest2, &opts, None).unwrap();
-        assert_eq!(closed[0].nested, 0);
-        assert_eq!(
-            closed[0].inner_left, 1,
-            "turning nested off must still report the inner zip it left closed"
-        );
-        assert!(!dest2.join("outer").join("inner").is_dir(), "inner zip must stay closed");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn unique_dir_adds_a_number() {
-        let root = std::env::temp_dir().join(format!("unpack-unique-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("Game")).unwrap();
-        let next = unique_dir(&root, "Game", "number").unwrap().unwrap();
-        assert_eq!(next.file_name().unwrap(), "Game (2)");
-        assert!(unique_dir(&root, "Game", "skip").unwrap().is_none());
-        let _ = std::fs::remove_dir_all(&root);
-    }
+    let copied = std::io::copy(&mut stdout, &mut file);
+    let status = child.lock().unwrap().wait().map_err(|e| e.to_string())?;
+    let err = err_thread.join().unwrap_or_default();
+    drop(file);
+    let fail = |msg: String| { let _ = fs::remove_file(&tmp); Err(msg) };
+    if jobs.is_cancelled(job_id) { return fail(ERR_CANCELLED.into()); }
+    if let Err(e) = copied { return fail(e.to_string()); }
+    if !status.success() { return fail(classify_error(&err, had_pw)); }
+    if out_file.exists() { let _ = fs::remove_file(out_file); }
+    fs::rename(&tmp, out_file).map_err(|e| e.to_string())
 }

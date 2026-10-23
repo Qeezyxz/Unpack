@@ -1,12 +1,16 @@
-use byteorder::{ReadBytesExt, LE};
+use byteorder::{LE, ReadBytesExt};
 
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
 use bitflags::bitflags;
 
-use anyhow::Error;
+use anyhow::{bail, Error};
 
 use super::*;
+
+/// Refuse pathological nesting / cycles (crafted ISOs) instead of overflowing the stack.
+const MAX_DIR_DEPTH: u32 = 64;
 
 pub struct DirectoryTable {
     pub sector: u32,
@@ -42,11 +46,14 @@ impl DirectoryTable {
         mut reader: R,
         volume: &VolumeDescriptor,
     ) -> Result<DirectoryTable, Error> {
+        let mut visited = HashSet::new();
         Self::read(
             &mut reader,
             volume,
             volume.root_directory_sector,
             volume.root_directory_size,
+            0,
+            &mut visited,
         )
     }
 
@@ -55,7 +62,17 @@ impl DirectoryTable {
         volume: &VolumeDescriptor,
         sector: u32,
         size: u32,
+        depth: u32,
+        visited: &mut HashSet<(u32, u32)>,
     ) -> Result<DirectoryTable, Error> {
+        if depth > MAX_DIR_DEPTH {
+            bail!("Xbox ISO directory nesting is too deep (max {MAX_DIR_DEPTH})");
+        }
+        // Cycle / revisit of the same directory table extent.
+        if !visited.insert((sector, size)) {
+            bail!("Xbox ISO directory table cycle detected at sector {sector}");
+        }
+
         let mut entries = Vec::<DirectoryEntry>::new();
 
         let sector_count = size.div_ceil(SECTOR_SIZE as u32);
@@ -64,7 +81,7 @@ impl DirectoryTable {
                 ((sector + sector_index) as u64) * volume.sector_size + volume.root_offset;
             reader.seek(SeekFrom::Start(sector_position))?;
 
-            while let Some(entry) = DirectoryEntry::read(reader, volume)? {
+            while let Some(entry) = DirectoryEntry::read(reader, volume, depth, visited)? {
                 entries.push(entry);
             }
         }
@@ -87,6 +104,8 @@ impl DirectoryEntry {
     fn read<R: Read + Seek>(
         reader: &mut R,
         volume: &VolumeDescriptor,
+        depth: u32,
+        visited: &mut HashSet<(u32, u32)>,
     ) -> Result<Option<DirectoryEntry>, Error> {
         let subtree_left = reader.read_u16::<LE>()?;
         let subtree_right = reader.read_u16::<LE>()?;
@@ -98,12 +117,17 @@ impl DirectoryEntry {
         let sector = reader.read_u32::<LE>()?;
         let size = reader.read_u32::<LE>()?;
 
+        // This entry is empty
+        if size == 0 {
+            return Ok(None);
+        }
+
         let attributes = DirectoryEntryAttributes::from_bits_truncate(reader.read_u8()?);
 
         let name_length = reader.read_u8()?;
 
         let mut name = vec![0_u8; name_length as usize];
-        reader.by_ref().take(name_length as u64).read(&mut name)?;
+        reader.read_exact(&mut name)?;
         let name = String::from_utf8_lossy(&name).into_owned();
 
         let alignment_mismatch = ((4 - reader.stream_position()? % 4) % 4) as i64;
@@ -112,7 +136,7 @@ impl DirectoryEntry {
         let is_directory = attributes.contains(DirectoryEntryAttributes::DIRECTORY);
         let subdirectory = if is_directory {
             let reader_position = reader.stream_position()?;
-            let subdir = DirectoryTable::read(reader, &volume, sector, size)?;
+            let subdir = DirectoryTable::read(reader, volume, sector, size, depth + 1, visited)?;
             reader.seek(SeekFrom::Start(reader_position))?;
             Some(subdir)
         } else {
