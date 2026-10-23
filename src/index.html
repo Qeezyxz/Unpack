@@ -301,6 +301,18 @@
       </footer>
     </section>
 
+    <div class="alert hidden" id="job-error" role="alert" aria-live="assertive">
+      <span class="alert-icon" aria-hidden="true">!</span>
+      <div class="alert-body">
+        <strong>Error</strong>
+        <p id="job-error-text"></p>
+      </div>
+      <div class="alert-actions">
+        <button type="button" id="copy-error" class="ghost">Copy</button>
+        <button type="button" id="dismiss-error" class="ghost" aria-label="Dismiss error">Dismiss</button>
+      </div>
+    </div>
+
     <script src="app.js"></script>
   </body>
 </html>

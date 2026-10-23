@@ -376,3 +376,39 @@ code { font-size: 12px; }
   .split { grid-template-columns: 1fr; }
   h1 { font-size: 32px; }
 }
+
+.alert {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  width: min(720px, calc(100% - 48px));
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--danger) 14%, var(--panel));
+  border: 1px solid var(--danger);
+  border-left-width: 5px;
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  z-index: 50;
+  text-align: left;
+}
+.alert.hidden { display: none; }
+.alert-icon {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--danger);
+  color: #fff;
+  font-weight: 800;
+  line-height: 24px;
+  text-align: center;
+}
+.alert-body { flex: 1; min-width: 0; }
+.alert-body strong { display: block; color: var(--danger); letter-spacing: .02em; }
+.alert-body p { margin: 2px 0 0; color: var(--text); overflow-wrap: anywhere; user-select: text; }
+.alert-actions { flex: none; display: flex; gap: 6px; }
+.alert-actions button { padding: 5px 10px; font-size: 12px; }
