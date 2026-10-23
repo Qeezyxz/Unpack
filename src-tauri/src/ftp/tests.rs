@@ -86,6 +86,8 @@ pub(crate) struct Fs {
     pub(crate) no_rest: bool,
     pub(crate) huge_list: bool,
     pub(crate) rnto_truncate: bool,
+    /// 1: the final STOR reply is 552 (drive full); 2: STOR itself is refused with 452.
+    pub(crate) disk_full: u8,
     /// RNTO to this exact path answers 550, `rnto_fail_times` times (R12 HIGH-1).
     pub(crate) rnto_fail_to: Option<String>,
     pub(crate) rnto_fail_times: usize,
@@ -223,6 +225,7 @@ fn serve(c: TcpStream, fs: &Arc<Mutex<Fs>>, size_cmd: bool, unix_list: bool) {
                 let _ = d.write_all(out.as_bytes());
                 "226 done".into()
             }
+            "STOR" if fs.lock().unwrap().disk_full == 2 => { pasv = None; "452 Insufficient storage space".into() }
             "STOR" => {
                 let _ = w.write_all(b"150 send\r\n");
                 let (mut d, _) = pasv.take().unwrap().accept().unwrap();
@@ -234,7 +237,7 @@ fn serve(c: TcpStream, fs: &Arc<Mutex<Fs>>, size_cmd: bool, unix_list: bool) {
                 e.truncate(rest);
                 e.extend(buf);
                 rest = 0;
-                "226 stored".into()
+                if f.disk_full == 1 { f.files.remove(&abs(&cwd, &arg)); "552 Requested file action aborted, exceeded storage allocation".into() } else { "226 stored".into() }
             }
             "DELE" => { let p = abs(&cwd, &arg); if fs.lock().unwrap().files.remove(&p).is_some() { "250 deleted".into() } else { "550 no such file".into() } }
             "QUIT" => { let _ = w.write_all(b"221 bye\r\n"); return; }
@@ -626,4 +629,45 @@ fn r11_size_is_verified_after_rename() {
     std::fs::write(d.join("a.bin"), vec![7u8; 5000]).unwrap();
     let e = send(&con(f.port), &d.join("a.bin"), &segs("/Usb0"), false, false, &mut |_, _| {}, &|| false).err().unwrap();
     assert!(e.contains("after the rename") && e.contains("1 bytes"), "{e}");
+}
+
+#[test]
+fn full_drive_reply_is_recognised() {
+    assert!(reply_means_full(552, "Requested file action aborted"));
+    assert!(reply_means_full(452, "Insufficient storage space"));
+    assert!(reply_means_full(550, "No space left on device"));
+    assert!(!reply_means_full(550, "File unavailable"));
+    assert!(!reply_means_full(226, "stored"));
+    assert!(storage_full_message("game.xex").contains("drive is full"));
+    assert!(stalled_message("game.xex", 2).contains("Wi-Fi"));
+    assert!(stalled(0) && stalled(STALL_BYTES - 1) && !stalled(STALL_BYTES));
+}
+
+#[test]
+fn full_drive_final_reply_gives_full_message_not_generic_failure() {
+    let f = fake(true, true);
+    f.fs.lock().unwrap().disk_full = 1;
+    let d = tmp("full-final");
+    std::fs::write(d.join("big.bin"), vec![1u8; 4000]).unwrap();
+    let e = send(&con(f.port), &d.join("big.bin"), &segs("/Usb0"), false, false, &mut |_, _| {}, &|| false).err().unwrap();
+    assert!(e.contains("drive is full") && e.contains("big.bin.part"), "{e}");
+    assert!(!f.fs.lock().unwrap().files.contains_key("/Usb0/big.bin"));
+}
+
+#[test]
+fn full_drive_refused_stor_gives_full_message() {
+    let f = fake(true, true);
+    f.fs.lock().unwrap().disk_full = 2;
+    let d = tmp("full-refuse");
+    std::fs::write(d.join("big.bin"), vec![1u8; 4000]).unwrap();
+    let e = send(&con(f.port), &d.join("big.bin"), &segs("/Usb0"), false, false, &mut |_, _| {}, &|| false).err().unwrap();
+    assert!(e.contains("drive is full"), "{e}");
+}
+
+#[test]
+fn dropped_connection_is_called_a_drop() {
+    for k in [std::io::ErrorKind::BrokenPipe, std::io::ErrorKind::ConnectionReset, std::io::ErrorKind::ConnectionAborted] {
+        let m = io_err(std::io::Error::from(k));
+        assert!(m.contains("dropped") && m.contains("resumes"), "{m}");
+    }
 }

@@ -161,6 +161,7 @@ async fn extract_archive(
         }
     };
     let exe = seven_zip()?;
+    let fat_dest = dest_path.clone();
     let registry = jobs.inner().clone();
     registry.register(&id);
     let jobs = registry.clone();
@@ -190,7 +191,7 @@ async fn extract_archive(
     .map_err(|e| e.to_string());
     // Unregister on every exit path (success, error, panic in the worker).
     registry.finish(&id);
-    let r = res??;
+    let r = res?.map_err(|e| safecopy::with_fat32_hint(e, &fat_dest))?;
     // Overseer R5 addendum: only session-grant folders we actually created this run.
     // Skip / Replace-merge / Extract-here never create a new claim_dir folder.
     if r.created && !r.skipped {
@@ -255,7 +256,9 @@ async fn create_archive(
         let mut cb = |percent: u32, file: &str| {
             let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
         };
-        archive::create(&exe, &srcs, &PathBuf::from(out_file), &format, opt_pw(&password), level, &j, &jid, &mut cb)
+        let out_file = PathBuf::from(out_file);
+        let _dest_lock = out_file.parent().map(|p| destlock::acquire(p, || cb(0, destlock::WAIT_MESSAGE)));
+        archive::create(&exe, &srcs, &out_file, &format, opt_pw(&password), level, &j, &jid, &mut cb)
     })
     .await
     .map_err(|e| e.to_string());
@@ -311,6 +314,7 @@ async fn copy_to_usb(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, sa
         let mut cb = |percent: u32, file: &str| {
             let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
         };
+        let _dest_lock = destlock::acquire(&target, || cb(0, destlock::WAIT_MESSAGE));
         library::copy_to_usb(&game, &target, &mut cb, &|| j.is_cancelled(&jid))
     })
     .await
@@ -477,6 +481,7 @@ async fn mod_copy(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safec
         let mut cb = |percent: u32, file: &str| {
             let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
         };
+        let _dest_lock = destlock::acquire(&target, || cb(0, destlock::WAIT_MESSAGE));
         mods::copy_mod(&path, &target, &mode, &mut cb, &|| j.is_cancelled(&jid))
     })
     .await
@@ -612,6 +617,16 @@ async fn iso_info(path: String) -> Result<god::IsoInfo, String> {
     tauri::async_runtime::spawn_blocking(move || god::iso_info(&PathBuf::from(path))).await.map_err(|e| e.to_string())?
 }
 
+/// Other discs of the same game found next to `path` (same folder, Disc/CD/DVD n naming), so the
+/// page can offer to convert them together. Read-only; only inside a granted folder.
+#[tauri::command]
+async fn iso_companions(grants: State<'_, safecopy::Grants>, path: String) -> Result<Vec<String>, String> {
+    let p = grants.check(&path)?;
+    tauri::async_runtime::spawn_blocking(move || discs::companions(&p).map(|v| v.into_iter().map(|x| x.display().to_string()).collect()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn iso_to_god(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safecopy::Grants>, id: String, path: String, dest: String, title: Option<String>) -> Result<god::GodResult, String> {
     let dest = grants.check(&dest)?;
@@ -734,7 +749,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![native_info, file_info, list_archive, read_entry, extract_archive, extract_entry, read_file, cancel_job, take_launch_requests, create_archive, iso_info, iso_to_god, iso_to_xex, god_extracted, xex_extracted, dlc_install, dlc_scan_drives, library_scan, copy_to_usb, mod_identify, mod_name_key, mod_copy, game_search, pick_path, pick_save, download_url, download_folder, list_archives_in_folder, notify_done, set_taskbar_progress, ftp_list, ftp_send, ftp_dest, builtin_menus, catalog, discord_set_activity, discord_set_enabled])
+        .invoke_handler(tauri::generate_handler![native_info, file_info, list_archive, read_entry, extract_archive, extract_entry, read_file, cancel_job, take_launch_requests, create_archive, iso_info, iso_companions, iso_to_god, iso_to_xex, god_extracted, xex_extracted, dlc_install, dlc_scan_drives, library_scan, copy_to_usb, mod_identify, mod_name_key, mod_copy, game_search, pick_path, pick_save, download_url, download_folder, list_archives_in_folder, notify_done, set_taskbar_progress, ftp_list, ftp_send, ftp_dest, builtin_menus, catalog, discord_set_activity, discord_set_enabled])
         .run(tauri::generate_context!())
         .expect("error while running Unpack");
 }

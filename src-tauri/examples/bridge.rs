@@ -90,6 +90,7 @@ fn main() {
     }
 }
 
+static DISCORD: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 static LAUNCH: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 // Same path-grant gate as the app (Overseer R5 L2). The page's pickers are faked by the test shim,
 // which calls __test_grant with what it "picked".
@@ -126,6 +127,22 @@ fn extra(cmd: &str, a: &Value, exe: &std::path::Path, jobs: &Jobs, events: &Arc<
             r.map(|v| json!(v))
         }
         "iso_info" => unpack_lib::god::iso_info(&PathBuf::from(a["path"].as_str().unwrap())).map(|v| serde_json::to_value(v).unwrap()),
+        "iso_companions" => {
+            let p = GRANTS.check(a["path"].as_str().unwrap_or(""))?;
+            unpack_lib::discs::companions(&p).map(|v| json!(v.into_iter().map(|x| x.display().to_string()).collect::<Vec<_>>()))
+        }
+        // Discord is a local IPC the headless harness can't reach: the bridge builds the same
+        // text as the app and records it, so tests can assert what would be shown (and that it stops when off).
+        "discord_set_activity" => {
+            let t = unpack_lib::discord::activity_for(a["view"].as_str().unwrap_or(""), a["job"].as_str());
+            DISCORD.lock().unwrap().push(json!({"call": "activity", "details": t.details, "state": t.state}));
+            Ok(Value::Null)
+        }
+        "discord_set_enabled" => {
+            DISCORD.lock().unwrap().push(json!({"call": "enabled", "enabled": a["enabled"].as_bool().unwrap_or(false)}));
+            Ok(Value::Null)
+        }
+        "__discord_calls" => Ok(Value::Array(DISCORD.lock().unwrap().clone())),
         "iso_to_god" => {
             let id = a["id"].as_str().unwrap().to_string();
             jobs.register(&id);

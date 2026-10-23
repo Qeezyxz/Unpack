@@ -182,8 +182,34 @@ fn io_err(e: std::io::Error) -> String {
     match e.kind() {
         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => "The console stopped answering (timed out). Check it's on and the FTP server is running.".into(),
         std::io::ErrorKind::ConnectionRefused => "The console refused the connection. Is the FTP server on (Aurora: Settings > Network > FTP)?".into(),
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::UnexpectedEof => {
+            "The connection to the console dropped. Check the Wi-Fi or cable and that the console is still on, then send again; the partial .part file is kept and the upload resumes.".into()
+        }
         _ => format!("Network error: {e}"),
     }
+}
+
+/// A reply (or text) that means the console's drive has no room left.
+pub fn reply_means_full(code: u32, msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    code == 552 || code == 452 || m.contains("no space") || m.contains("disk full") || m.contains("not enough space") || m.contains("insufficient")
+}
+
+pub fn storage_full_message(name: &str) -> String {
+    format!("The Xbox drive is full, so {name} was not finished. Free some space on the console and send again; the partial .part file is kept.")
+}
+
+/// Uploads that move less than this between two tries made no real progress.
+pub const STALL_BYTES: u64 = 256 * 1024;
+
+pub fn stalled(sent: u64) -> bool {
+    sent < STALL_BYTES
+}
+
+pub fn stalled_message(name: &str, tries: u32) -> String {
+    format!(
+        "The Xbox stopped taking {name} (no progress after {tries} tries). Its drive may be full, or the Wi-Fi keeps dropping. Free some space or move closer to the router, then send again; the partial .part file is kept."
+    )
 }
 
 impl Ftp {
@@ -409,6 +435,9 @@ impl Ftp {
         let mut d = self.pasv()?;
         let (c, t) = self.cmd(&format!("STOR {}", join_remote(remote)))?;
         if c != 150 && c != 125 {
+            if reply_means_full(c, &t) {
+                return Err(storage_full_message(&remote.last().cloned().unwrap_or_default()));
+            }
             return Err(format!("Upload refused for {}: {c} {t}", join_remote(remote)));
         }
         let mut buf = vec![0u8; CHUNK];
@@ -425,7 +454,19 @@ impl Ftp {
             if k == 0 {
                 break;
             }
-            d.write_all(&buf[..k]).map_err(io_err)?;
+            if let Err(e) = d.write_all(&buf[..k]) {
+                // A full drive makes the server close the data connection and say why on the
+                // control connection; look before calling it a network drop.
+                let _ = self.r.get_ref().set_read_timeout(Some(Duration::from_secs(3)));
+                let said = self.reply();
+                let _ = self.r.get_ref().set_read_timeout(Some(IO_TIMEOUT));
+                if let Ok((c, t)) = said {
+                    if reply_means_full(c, &t) {
+                        return Err(storage_full_message(&remote.last().cloned().unwrap_or_default()));
+                    }
+                }
+                return Err(io_err(e));
+            }
             progress(k as u64);
         }
         d.flush().ok();
@@ -433,6 +474,9 @@ impl Ftp {
         drop(d);
         let (c, t) = self.reply()?;
         if c / 100 != 2 {
+            if reply_means_full(c, &t) {
+                return Err(storage_full_message(&remote.last().cloned().unwrap_or_default()));
+            }
             return Err(format!("Upload failed for {}: {c} {t}", join_remote(remote)));
         }
         Ok(offset)

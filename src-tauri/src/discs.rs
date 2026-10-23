@@ -66,6 +66,10 @@ pub fn stem_without_disc(path: &Path) -> String {
             format!("_disk{n}"),
             format!(" disc {n}"),
             format!(" disk {n}"),
+            format!(" disc{n}"),
+            format!(" disk{n}"),
+            format!(" cd{n}"),
+            format!(" cd {n}"),
             format!("-d{n}"),
             format!("_d{n}"),
         ] {

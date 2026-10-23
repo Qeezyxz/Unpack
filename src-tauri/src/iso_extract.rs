@@ -208,6 +208,7 @@ fn extract_inner(
     let need: u64 = planned.iter().map(|p| p.size).sum();
     fs::create_dir_all(dest_dir).map_err(ioerr("Cannot create output folder"))?;
     let _dest_lock = crate::destlock::acquire(dest_dir, || progress(0, crate::destlock::WAIT_MESSAGE));
+    crate::safecopy::fat_check(dest_dir, planned.iter().map(|p| (p.rel.clone(), p.size)))?;
     if let Some(free) = free_space(dest_dir) {
         if free < need + 64 * 1024 * 1024 {
             return Err(format!(

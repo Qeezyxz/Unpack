@@ -719,3 +719,42 @@ fn nested_archive_name_list_is_narrow() {
     assert!(is_nested_archive("Pack.ZIP") && is_nested_archive("a.tar.gz") && is_nested_archive("a.7z") && is_nested_archive("a.rar"));
     assert!(!is_nested_archive("data.cab") && !is_nested_archive("disc.iso") && !is_nested_archive("readme.txt"));
 }
+
+#[test]
+fn replacing_a_file_keeps_the_old_one_when_the_swap_fails() {
+    let d = tmp("replace-safe");
+    let dst = d.join("out.zip");
+    fs::write(&dst, "old").unwrap();
+    // the temp file vanished: the swap fails, the previous file is still there and nothing is left over
+    let e = replace_file_safely(&d.join(".unpack-new-x.zip"), &dst).unwrap_err();
+    assert!(e.contains("Could not save"), "{e}");
+    assert_eq!(fs::read_to_string(&dst).unwrap(), "old");
+    assert_eq!(fs::read_dir(&d).unwrap().count(), 1, "no aside file left behind");
+    // success path replaces, leaves no aside
+    let t = d.join(".unpack-new-y.zip");
+    fs::write(&t, "new").unwrap();
+    replace_file_safely(&t, &dst).unwrap();
+    assert_eq!(fs::read_to_string(&dst).unwrap(), "new");
+    assert_eq!(fs::read_dir(&d).unwrap().count(), 1);
+    // a folder is never swapped for a file, and the temp file is cleaned up
+    let folder = d.join("folder");
+    fs::create_dir(&folder).unwrap();
+    let t = d.join(".unpack-new-z.zip");
+    fs::write(&t, "x").unwrap();
+    assert!(replace_file_safely(&t, &folder).unwrap_err().contains("is a folder"));
+    assert!(folder.is_dir() && !t.exists());
+    // a link at the destination is moved aside, its target is untouched
+    #[cfg(unix)]
+    {
+        let victim = d.join("victim.txt");
+        fs::write(&victim, "victim").unwrap();
+        let link = d.join("link.zip");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let t = d.join(".unpack-new-w.zip");
+        fs::write(&t, "fresh").unwrap();
+        replace_file_safely(&t, &link).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "victim");
+        assert!(!fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&link).unwrap(), "fresh");
+    }
+}

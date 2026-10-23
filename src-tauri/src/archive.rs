@@ -1164,13 +1164,7 @@ pub fn create(
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
-    if out_file.exists() {
-        fs::remove_file(out_file).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            format!("Could not replace {}: {e}", out_file.display())
-        })?;
-    }
-    fs::rename(&tmp, out_file).map_err(|e| e.to_string())?;
+    replace_file_safely(&tmp, out_file)?;
     Ok(out_file.display().to_string())
 }
 
@@ -1210,6 +1204,45 @@ pub fn extract_entry_to(exe: &Path, archive: &Path, entry: &str, password: Optio
     if jobs.is_cancelled(job_id) { return fail(ERR_CANCELLED.into()); }
     if let Err(e) = copied { return fail(e.to_string()); }
     if !status.success() { return fail(classify_error(&err, had_pw)); }
-    if out_file.exists() { let _ = fs::remove_file(out_file); }
-    fs::rename(&tmp, out_file).map_err(|e| e.to_string())
+    replace_file_safely(&tmp, out_file)
+}
+
+/// Put the finished temp file at `dst`. An existing file is renamed aside first and deleted only once
+/// the new one is in place; if the move fails it is put back, so a failed save never loses the old
+/// file (the old code deleted it before renaming). A link at `dst` is moved aside, never written through.
+/// The temp file is removed on failure.
+pub fn replace_file_safely(tmp: &Path, dst: &Path) -> Result<(), String> {
+    let fail = |msg: String| {
+        let _ = fs::remove_file(tmp);
+        Err(msg)
+    };
+    let existing = fs::symlink_metadata(dst).ok();
+    if existing.as_ref().is_some_and(|m| m.is_dir()) {
+        return fail(format!("{} is a folder, so it can't be replaced by a file.", dst.display()));
+    }
+    let parent = dst.parent().unwrap_or(Path::new("."));
+    let aside = match existing {
+        Some(_) => {
+            let a = free_name(parent, &format!(".unpack-old-{}", std::process::id()));
+            if let Err(e) = fs::rename(dst, &a) {
+                return fail(format!("Could not replace {}: {e}", dst.display()));
+            }
+            Some(a)
+        }
+        None => None,
+    };
+    match fs::rename(tmp, dst) {
+        Ok(()) => {
+            if let Some(a) = aside {
+                let _ = fs::remove_file(a);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if let Some(a) = aside {
+                let _ = fs::rename(a, dst);
+            }
+            fail(format!("Could not save {}: {e}", dst.display()))
+        }
+    }
 }
