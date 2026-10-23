@@ -98,15 +98,7 @@ const OWN: [&str; 4] = ["catalog", "grants.json", "ftp-resume", MOVED];
 /// True when `new` holds data the user made under the new identifier: Unpack's own files, or a
 /// WebView localStorage that contains Unpack keys. WebView caches alone don't count (R17 M1).
 fn has_own_data(new: &Path) -> bool {
-    if OWN.iter().any(|n| fs::symlink_metadata(new.join(n)).is_ok()) { return true; }
-    let Ok(profiles) = fs::read_dir(new.join("EBWebView")) else { return false };
-    for p in profiles.flatten() {
-        let Ok(files) = fs::read_dir(p.path().join("Local Storage/leveldb")) else { continue };
-        for f in files.flatten() {
-            if fs::read(f.path()).is_ok_and(|b| b.windows(7).any(|w| w == b"unpack.")) { return true; }
-        }
-    }
-    false
+    OWN.iter().any(|n| fs::symlink_metadata(new.join(n)).is_ok()) || has_own_data_webview(&new.join("EBWebView"))
 }
 
 /// Copy `old` into `new` when `old` exists and `new` has not been migrated yet and holds no data
@@ -158,8 +150,13 @@ pub fn migrate_dir(old: &Path, new: &Path) -> std::io::Result<bool> {
     if new.exists() {
         // Whatever is there was written after an earlier failed run (or is empty): keep it aside.
         let bak = backup_of(new);
-        if bak.exists() { fs::remove_dir_all(&bak)?; }
-        fs::rename(new, &bak)?;
+        if bak.exists() {
+            // A backup from an earlier attempt: merge the (newer) current folder into it.
+            merge_newer(new, &bak)?;
+            fs::remove_dir_all(new)?;
+        } else {
+            fs::rename(new, &bak)?;
+        }
     }
     fs::rename(&stage, new)?;
     finish(old, new)?;
@@ -167,23 +164,183 @@ pub fn migrate_dir(old: &Path, new: &Path) -> std::io::Result<bool> {
 }
 
 fn finish(old: &Path, new: &Path) -> std::io::Result<()> {
-    // Unpack's own files written after a failed run (installs journaled, grants) are newer than
-    // the old folder's: put them back over the migrated copy. WebView data stays the old profile.
-    let bak = backup_of(new);
-    for n in OWN.iter().filter(|n| **n != MOVED) {
-        let from = bak.join(n);
-        match fs::symlink_metadata(&from) {
-            Ok(m) if m.is_dir() => overlay(&from, &new.join(n))?,
-            Ok(m) if m.is_file() => { fs::copy(&from, new.join(n))?; }
-            _ => {}
-        }
-    }
     move_downloads(&old.join(MOVED), &new.join(MOVED))?;
-    move_downloads(&bak.join(MOVED), &new.join(MOVED))?;
+    // Data written under the new identifier after a failed run is newer than the old folder's:
+    // merge it in (R18 M1), then drop the backup.
+    let bak = backup_of(new);
+    if fs::symlink_metadata(&bak).is_ok_and(|m| m.is_dir()) {
+        merge_newer(&bak, new)?;
+        fs::remove_dir_all(&bak)?;
+    }
     fs::write(new.join(MARKER), format!("copied from {}\n", old.display()))?;
     let _ = fs::remove_file(new.join(PENDING));
     let _ = fs::remove_file(retry_marker(new));
     Ok(())
+}
+
+fn log(msg: String) { eprintln!("migration: {msg}"); }
+
+/// Merge the folder `src` (written later) into `dst` (R18 M1/L1). Idempotent, so a kill part-way
+/// is safe (finish() reruns it):
+/// - catalog/journal.json: union of installs by (target, entry_id); on a clash the later
+///   `installed_at` wins.
+/// - catalog/seen.json: highest version per catalog (rollback floor never lowered).
+/// - other JSON: arrays are unioned; objects take `src`'s value per key (logged when it differs).
+/// - other files present on both sides with different content: `src` wins, the `dst` one is kept
+///   as `<name>.old-version`.
+/// - Downloads: files are moved in, renamed `name (2).ext` on a clash.
+/// - EBWebView: localStorage can't be merged per key, so whichever profile has Unpack settings
+///   made later wins: `src`'s if it has any (the other is kept as `EBWebView.old-version`).
+/// - WebView caches and other non-Unpack files: copied only when missing.
+pub(crate) fn merge_newer(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for e in fs::read_dir(src)?.flatten() {
+        let name = e.file_name();
+        let (from, to) = (e.path(), dst.join(&name));
+        let m = fs::symlink_metadata(&from)?;
+        if crate::safecopy::is_link(&m) || name == PENDING || name == MARKER { continue; }
+        let n = name.to_string_lossy();
+        if n == MOVED {
+            if m.is_dir() { merge_downloads(&from, &to)?; }
+        } else if n == "EBWebView" {
+            if m.is_dir() && has_own_data_webview(&from) {
+                if to.exists() {
+                    let keep = sibling(&to, ".old-version");
+                    if keep.exists() { fs::remove_dir_all(&keep)?; }
+                    fs::rename(&to, &keep)?;
+                }
+                rename_or_copy(&from, &to)?;
+                log(format!("kept the settings made after the failed start; the 1.5 profile is saved as {}", sibling(&to, ".old-version").display()));
+            } else if !to.exists() && m.is_dir() {
+                rename_or_copy(&from, &to)?;
+            }
+        } else if OWN.contains(&n.as_ref()) {
+            merge_tree(&from, &to)?;
+        } else if fs::symlink_metadata(&to).is_err() {
+            rename_or_copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn rename_or_copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    if fs::rename(from, to).is_ok() { return Ok(()); }
+    let mut n = 0;
+    if fs::symlink_metadata(from)?.is_dir() { copy_tree(from, to, false, &mut n) } else { fs::copy(from, to).map(|_| ()) }
+}
+
+fn merge_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let m = fs::symlink_metadata(src)?;
+    if crate::safecopy::is_link(&m) { return Ok(()); }
+    if m.is_dir() {
+        if fs::symlink_metadata(dst).is_ok_and(|d| !d.is_dir()) { return Ok(()); }
+        fs::create_dir_all(dst)?;
+        for e in fs::read_dir(src)?.flatten() { merge_tree(&e.path(), &dst.join(e.file_name()))?; }
+        return Ok(());
+    }
+    if !m.is_file() { return Ok(()); }
+    let new_b = fs::read(src)?;
+    let Ok(old_b) = fs::read(dst) else { return write_atomic(dst, &new_b) };
+    if old_b == new_b { return Ok(()); }
+    let name = dst.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let parse = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).ok();
+    if let (Some(o), Some(n)) = (parse(&old_b), parse(&new_b)) {
+        if let Some(v) = merge_json(name, o, n, dst) {
+            return write_atomic(dst, &serde_json::to_vec_pretty(&v).unwrap());
+        }
+    }
+    let keep = sibling(dst, ".old-version");
+    write_atomic(&keep, &old_b)?;
+    log(format!("{} differed: kept the newer one, the older is {}", dst.display(), keep.display()));
+    write_atomic(dst, &new_b)
+}
+
+/// `o` = migrated (older), `n` = written later. None: not mergeable, treat as an unknown file.
+fn merge_json(name: &str, o: serde_json::Value, n: serde_json::Value, at: &Path) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    match (name, o, n) {
+        ("journal.json", Value::Object(mut om), Value::Object(nm)) if om.get("installs").is_some_and(|v| v.is_array()) && nm.get("installs").is_some_and(|v| v.is_array()) => {
+            let key = |r: &Value| (r["target"].as_str().unwrap_or("").to_string(), r["entry_id"].as_str().unwrap_or("").to_string());
+            let at_of = |r: &Value| r["installed_at"].as_u64().unwrap_or(0);
+            let mut out: Vec<Value> = om["installs"].as_array().cloned().unwrap_or_default();
+            for r in nm["installs"].as_array().unwrap() {
+                match out.iter().position(|x| key(x) == key(r)) {
+                    Some(i) => { if at_of(r) >= at_of(&out[i]) { out[i] = r.clone(); } }
+                    None => out.push(r.clone()),
+                }
+            }
+            log(format!("merged install journals ({} records)", out.len()));
+            om.insert("installs".into(), Value::Array(out));
+            Some(Value::Object(om))
+        }
+        ("seen.json", Value::Object(mut om), Value::Object(nm)) => {
+            for (k, v) in nm {
+                let hi = v.as_u64().unwrap_or(0).max(om.get(&k).and_then(|x| x.as_u64()).unwrap_or(0));
+                om.insert(k, Value::from(hi));
+            }
+            Some(Value::Object(om))
+        }
+        (_, Value::Array(mut oa), Value::Array(na)) => {
+            for v in na { if !oa.contains(&v) { oa.push(v); } }
+            Some(Value::Array(oa))
+        }
+        (_, Value::Object(mut om), Value::Object(nm)) => {
+            for (k, v) in nm {
+                if om.get(&k).is_some_and(|x| *x != v) { log(format!("{}: \"{k}\" set after the failed start kept (was {})", at.display(), om[&k])); }
+                om.insert(k, v);
+            }
+            Some(Value::Object(om))
+        }
+        _ => None,
+    }
+}
+
+fn write_atomic(p: &Path, b: &[u8]) -> std::io::Result<()> {
+    if let Some(d) = p.parent() { fs::create_dir_all(d)?; }
+    let tmp = sibling(p, ".merge-tmp");
+    fs::write(&tmp, b)?;
+    fs::rename(&tmp, p)
+}
+
+/// Move every file of `src` into `dst`, renaming on a clash (identical files are just dropped).
+fn merge_downloads(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for e in fs::read_dir(src)?.flatten() {
+        let from = e.path();
+        let m = fs::symlink_metadata(&from)?;
+        if crate::safecopy::is_link(&m) { continue; }
+        let mut to = dst.join(e.file_name());
+        if m.is_dir() { merge_downloads(&from, &to)?; continue; }
+        if !m.is_file() { continue; }
+        if let Ok(t) = fs::symlink_metadata(&to) {
+            if t.len() == m.len() && fs::read(&to).ok() == fs::read(&from).ok() { continue; }
+            let p = Path::new(&e.file_name()).to_path_buf();
+            let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let ext = p.extension().map(|x| format!(".{}", x.to_string_lossy())).unwrap_or_default();
+            let mut i = 2;
+            while fs::symlink_metadata(&to).is_ok() { to = dst.join(format!("{stem} ({i}){ext}")); i += 1; }
+            log(format!("{} was renamed to {} (name taken)", from.display(), to.display()));
+        }
+        // copy then remove (never a cut-off file under the final name)
+        if fs::rename(&from, &to).is_err() {
+            let part = sibling(&to, ".migrating");
+            fs::copy(&from, &part)?;
+            fs::rename(&part, &to)?;
+            let _ = fs::remove_file(&from);
+        }
+    }
+    Ok(())
+}
+
+fn has_own_data_webview(ebw: &Path) -> bool {
+    let Ok(profiles) = fs::read_dir(ebw) else { return false };
+    for p in profiles.flatten() {
+        let Ok(files) = fs::read_dir(p.path().join("Local Storage/leveldb")) else { continue };
+        for f in files.flatten() {
+            if fs::read(f.path()).is_ok_and(|b| b.windows(7).any(|w| w == b"unpack.")) { return true; }
+        }
+    }
+    false
 }
 
 /// Move `from` (a Downloads folder) to `to` when `to` doesn't exist. Across drives: copy into
@@ -207,17 +364,6 @@ fn move_downloads(from: &Path, to: &Path) -> std::io::Result<()> {
     }
     fs::rename(&part, to)?;
     let _ = fs::remove_dir_all(from);
-    Ok(())
-}
-
-/// Copy every file of `src` over `dst` (overwriting), links skipped.
-fn overlay(src: &Path, dst: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for e in fs::read_dir(src)?.flatten() {
-        let m = fs::symlink_metadata(e.path())?;
-        if crate::safecopy::is_link(&m) { continue; }
-        if m.is_dir() { overlay(&e.path(), &dst.join(e.file_name()))?; } else if m.is_file() { fs::copy(e.path(), dst.join(e.file_name()))?; }
-    }
     Ok(())
 }
 
@@ -395,7 +541,7 @@ mod tests {
         assert_eq!(fs::read_to_string(new.join("catalog/seen.json")).unwrap(), "S");
         assert!(fs::read_to_string(new.join("EBWebView/Default/Local Storage/leveldb/000003.log")).unwrap().contains("unpack.consoles"));
         assert_eq!(fs::read_to_string(new.join("grants.json")).unwrap(), "[\"newer\"]", "own file written after the failure kept");
-        assert!(backup_of(&new).join("hsts-storage.sqlite").is_file(), "post-failure data kept aside, not deleted");
+        assert!(new.join("hsts-storage.sqlite").is_file() && !backup_of(&new).exists(), "post-failure data merged in, backup removed");
         assert!(new.join(MARKER).exists() && !retry_marker(&new).exists());
         assert!(!migrate_dir(&old, &new).unwrap(), "done: no further runs");
     }
@@ -439,5 +585,69 @@ mod tests {
         assert_eq!(fs::read_to_string(new.join("Downloads/a.zip")).unwrap(), "AAAA");
         assert!(!new.join("Downloads.migrating").exists() && !old.join("Downloads").exists());
         assert!(new.join(MARKER).exists());
+    }
+
+    fn journal(recs: &[(&str, u64)]) -> String {
+        let v: Vec<_> = recs.iter().map(|(id, at)| serde_json::json!({"target": "usb", "entry_id": id, "installed_at": at})).collect();
+        serde_json::json!({"installs": v}).to_string()
+    }
+
+    /// R18 M1 (reviewer's repro): after a failed start the user installs NEWMOD, a catalog is seen
+    /// at v3 and settings change. The retry keeps OLDMOD and NEWMOD, seen stays at v7, and the
+    /// newer settings profile wins (old one kept). R18 L1: post-failure Downloads are merged
+    /// (renamed on a clash) and the .pre-migration backup is removed.
+    #[test]
+    fn r18_m1_retry_merges_instead_of_overwriting() {
+        let d = crate::testutil::TmpDir::new("migrate-r18");
+        let (old, new) = (d.join(OLD_ID), d.join(NEW_ID));
+        put(&old, &[("catalog/journal.json", &journal(&[("OLDMOD", 100), ("BOTH", 100)])), ("catalog/seen.json", r#"{"v":7,"w":1}"#),
+            ("catalog/config.json", r#"{"source":"url","url":"OLD"}"#), ("catalog/backups/x.ini", "old"),
+            ("grants.json", r#"["a"]"#), ("EBWebView/Default/Local Storage/leveldb/000003.log", "unpack.consoles=OLD"),
+            ("Downloads/game.zip", "GAME"), ("Downloads/same.zip", "S")]);
+        FAIL_NAME.with(|f| *f.borrow_mut() = Some("seen.json".into()));
+        assert!(migrate_dir(&old, &new).is_err());
+        FAIL_NAME.with(|f| *f.borrow_mut() = None);
+        put(&new, &[("catalog/journal.json", &journal(&[("NEWMOD", 200), ("BOTH", 300)])), ("catalog/seen.json", r#"{"v":3,"z":2}"#),
+            ("catalog/config.json", r#"{"source":"url","url":"NEW"}"#), ("catalog/backups/x.ini", "new"),
+            ("grants.json", r#"["b"]"#), ("EBWebView/Default/Local Storage/leveldb/000005.log", "unpack.consoles=NEWSETTINGS"),
+            ("Downloads/new.zip", "NEW"), ("Downloads/game.zip", "OTHER"), ("Downloads/same.zip", "S")]);
+        assert!(migrate_dir(&old, &new).unwrap());
+        let j: serde_json::Value = serde_json::from_str(&fs::read_to_string(new.join("catalog/journal.json")).unwrap()).unwrap();
+        let ids: Vec<(String, u64)> = j["installs"].as_array().unwrap().iter().map(|r| (r["entry_id"].as_str().unwrap().into(), r["installed_at"].as_u64().unwrap())).collect();
+        assert_eq!(ids, vec![("OLDMOD".into(), 100), ("BOTH".into(), 300), ("NEWMOD".into(), 200)]);
+        let seen: serde_json::Value = serde_json::from_str(&fs::read_to_string(new.join("catalog/seen.json")).unwrap()).unwrap();
+        assert_eq!(seen, serde_json::json!({"v":7,"w":1,"z":2}), "rollback floor never lowered");
+        let cfg: serde_json::Value = serde_json::from_str(&fs::read_to_string(new.join("catalog/config.json")).unwrap()).unwrap();
+        assert_eq!(cfg["url"], "NEW", "newer setting kept");
+        assert_eq!(fs::read_to_string(new.join("grants.json")).unwrap().replace([' ', '\n'], ""), r#"["a","b"]"#);
+        assert_eq!(fs::read_to_string(new.join("catalog/backups/x.ini")).unwrap(), "new");
+        assert_eq!(fs::read_to_string(new.join("catalog/backups/x.ini.old-version")).unwrap(), "old");
+        assert!(fs::read_to_string(new.join("EBWebView/Default/Local Storage/leveldb/000005.log")).unwrap().contains("NEWSETTINGS"));
+        assert!(fs::read_to_string(new.join("EBWebView.old-version/Default/Local Storage/leveldb/000003.log")).unwrap().contains("OLD"));
+        assert_eq!(fs::read_to_string(new.join("Downloads/game.zip")).unwrap(), "GAME");
+        assert_eq!(fs::read_to_string(new.join("Downloads/game (2).zip")).unwrap(), "OTHER");
+        assert_eq!(fs::read_to_string(new.join("Downloads/new.zip")).unwrap(), "NEW");
+        assert!(!new.join("Downloads/same (2).zip").exists(), "identical file not duplicated");
+        assert!(!backup_of(&new).exists() && new.join(MARKER).exists() && !retry_marker(&new).exists());
+        // merging again (a resume) changes nothing
+        let before = fs::read(new.join("catalog/journal.json")).unwrap();
+        merge_newer(&new.join("catalog"), &new.join("catalog")).unwrap();
+        assert_eq!(fs::read(new.join("catalog/journal.json")).unwrap(), before);
+    }
+
+    /// R18 L1: a backup left by an earlier attempt is merged, not deleted.
+    #[test]
+    fn r18_l1_earlier_backup_is_merged() {
+        let d = crate::testutil::TmpDir::new("migrate-r18b");
+        let (old, new) = (d.join(OLD_ID), d.join(NEW_ID));
+        put(&old, &[("catalog/journal.json", &journal(&[("OLDMOD", 1)]))]);
+        put(&backup_of(&new), &[("catalog/journal.json", &journal(&[("EARLY", 2)])), ("Downloads/early.zip", "E")]);
+        put(&new, &[("catalog/journal.json", &journal(&[("LATER", 3)])), ("Downloads/later.zip", "L")]);
+        fs::write(retry_marker(&new), "").unwrap();
+        assert!(migrate_dir(&old, &new).unwrap());
+        let j = fs::read_to_string(new.join("catalog/journal.json")).unwrap();
+        assert!(j.contains("OLDMOD") && j.contains("EARLY") && j.contains("LATER"), "{j}");
+        assert!(new.join("Downloads/early.zip").is_file() && new.join("Downloads/later.zip").is_file());
+        assert!(!backup_of(&new).exists());
     }
 }

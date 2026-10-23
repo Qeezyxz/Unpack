@@ -785,7 +785,9 @@ mod launch_tests {
     use super::*;
     #[test]
     fn parses_explorer_args() {
-        let d = std::env::temp_dir();
+        // Own folder per process: parallel test runs shared fixed names in the temp dir (R18 flake).
+        let tmpd = crate::testutil::TmpDir::new("launch-args");
+        let d = tmpd.path().to_path_buf();
         let f = d.join("unpack-launch-test.zip");
         std::fs::write(&f, b"x").unwrap();
         let r = parse_args(&["--extract-here".into(), f.display().to_string()], &d).unwrap();

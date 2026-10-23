@@ -851,3 +851,46 @@ fn r16_m1_forged_gz_size_is_capped_live() {
     assert!(super::tree_bytes(&dest) < 4 << 20, "partial output removed");
     assert!(no_staging_left(&dest));
 }
+
+/// R18 L2: an inner tar with 100,500 tiny files is refused from its listing (file cap), before
+/// anything is written.
+#[test]
+fn r18_l2_inner_file_count_cap_from_listing() {
+    fn hdr(name: &str, size: usize) -> [u8; 512] {
+        let mut h = [0u8; 512];
+        h[..name.len()].copy_from_slice(name.as_bytes());
+        h[100..108].copy_from_slice(b"0000644\0");
+        h[108..116].copy_from_slice(b"0000000\0");
+        h[116..124].copy_from_slice(b"0000000\0");
+        h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+        h[136..148].copy_from_slice(b"00000000000\0");
+        h[156] = b'0';
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        h[148..156].copy_from_slice(b"        ");
+        let sum: u32 = h.iter().map(|&b| b as u32).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        h
+    }
+    let n = super::NESTED_MAX_FILES + 500;
+    let mut tar = Vec::with_capacity(n * 1024 + 1024);
+    for i in 0..n {
+        tar.extend_from_slice(&hdr(&format!("f/{i}"), 1));
+        let mut b = [0u8; 512];
+        b[0] = b'x';
+        tar.extend_from_slice(&b);
+    }
+    tar.extend_from_slice(&[0u8; 1024]);
+    let d = tmp("filecap");
+    let outer = d.join("many.zip");
+    write_zip(&outer, &[("many.tar", &tar, 0)]);
+    drop(tar);
+    let dest = d.join("out");
+    fs::create_dir_all(&dest).unwrap();
+    let opts = ExtractOptions { archive: &outer, dest_parent: &dest, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: true };
+    let r = extract(&exe(), &opts, &Jobs::default(), "filecap", &mut |_, _| {}).unwrap();
+    assert_eq!((r.nested, r.inner_left), (0, 1), "{r:?}");
+    assert!(r.warnings.iter().any(|w| w.contains("many.tar") && w.contains("100500 files")), "{:?}", r.warnings);
+    assert!(super::count_files(&dest) < 5, "nothing unpacked from the tar");
+    assert!(no_staging_left(&dest));
+}

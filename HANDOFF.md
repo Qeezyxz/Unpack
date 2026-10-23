@@ -264,3 +264,8 @@ FTP benchmark: `tests/fake_aurora.py ROOT PORT [--limit MBPS] [--cons N] [--no-s
 - migrate.rs: a sibling `<new>.migration-incomplete` marker is written before every attempt and removed only on full success; while it exists, new-folder contents (WebView caches written after a failed run) are moved aside to `<new>.pre-migration` and the migration retried. Unpack's own files from that backup (catalog/, grants.json, ftp-resume/, Downloads) are put back over the migrated copy; the WebView profile comes from the old folder. "Has data" now means Unpack's own files or a localStorage containing `unpack.` keys.
 - Cross-drive Downloads: copied into `Downloads.migrating`, size-verified, renamed; a leftover partial is redone on resume.
 - Inner archives: the live watcher also stops 7-Zip past NESTED_MAX_FILES (100,000) files.
+
+## Round 18 fixes
+- migrate.rs: the retry merges `.pre-migration` into the migrated copy instead of overwriting (`merge_newer`): journal union by (target, entry_id), later `installed_at` wins; seen.json max per key; JSON arrays unioned, objects newer-per-key (logged); other differing files newer wins, older kept as `<name>.old-version`; Downloads merged with `name (2).ext` on clashes; an earlier backup is merged, not dropped; `.pre-migration` removed after the merge. WebView localStorage (leveldb) can't be merged per key: the profile with Unpack settings made after the failed start wins, the 1.5 profile is kept as `EBWebView.old-version` and the choice is logged.
+- archive.rs: the 100k inner file cap is also checked from the listing (before extracting) and recounted after 7-Zip finishes.
+- lib.rs: parses_explorer_args uses its own temp folder (flaked under parallel runs).

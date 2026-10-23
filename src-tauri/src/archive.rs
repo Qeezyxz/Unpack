@@ -1003,6 +1003,9 @@ const NESTED_FREE_MARGIN: u64 = 256 << 20;
 /// Why an inner archive must stay closed, judged from its listing before anything is written.
 fn nested_refusal(packed: u64, listing: &Listing, used: u64, budget: u64, free: Option<u64>) -> Result<u64, String> {
     let files: Vec<&Entry> = listing.entries.iter().filter(|e| !e.dir).collect();
+    if files.len() > NESTED_MAX_FILES {
+        return Err(format!("it holds {} files (more than {NESTED_MAX_FILES})", files.len()));
+    }
     let unpacked = files.iter().fold(0u64, |a, e| a.saturating_add(e.size));
     if unpacked == 0 && !files.is_empty() && packed > 4096 {
         return Err("its unpacked size can't be read".into());
@@ -1113,7 +1116,13 @@ fn open_inner(
                 match run_capped(exe, &args, jobs, job_id, false, &mut |_, f| progress(99, &format!("{rel}: {f}")), Some((out.clone(), limit))) {
                     Ok(tolerated) => {
                         // The listing can understate (e.g. a forged header): check what was really written.
-                        let actual = tree_bytes(&out);
+                        let (actual, nfiles) = tree_stats(&out);
+                        if nfiles > NESTED_MAX_FILES {
+                            let _ = fs::remove_dir_all(&out);
+                            inner.left += 1;
+                            warnings.push(format!("{rel} was left closed: it unpacked to {nfiles} files, more than {NESTED_MAX_FILES}."));
+                            continue;
+                        }
                         if actual > expected.saturating_mul(2).saturating_add(1 << 20) || used.saturating_add(actual) > budget {
                             let _ = fs::remove_dir_all(&out);
                             inner.left += 1;

@@ -1138,3 +1138,64 @@ Commit 74f60aa on v1.6.0-merge (local). The reviewer changed no source files. Sc
 - Downloads that is itself a symlink or junction is skipped and left in the old folder, by design.
 - The copied journal and seen.json are honoured: the copies match byte for byte (run), and the store paths are identical (read).
 - The race between instances (see MEDIUM-1): one 3-instance run succeeded. The failure order is inferred from the code.
+
+## Round 18 — 2026-10-23 (CDT)
+
+Commit 98c6c08 on v1.6.0-merge (local). Reviewer did not change source; scratch was in /tmp and has been removed.
+
+**Verdict: FAIL.** R17's M1 (never retried) and the cross-drive Low are fixed. The new merge-back loses data: one Medium and two Lows.
+
+### What was run
+| Suite | Result |
+|---|---|
+| cargo test --release --lib ×20 (4 batches of 5) | 20/20 runs: 243 passed, 0 failed, 1 ignored. No flakes |
+| Wine (x86_64-pc-windows-gnu lib tests, fresh prefix) | 233 passed, 0 failed, 1 ignored |
+| node e2e / autogod / dlc / download / mods / builtin / catalog / xbox / v160 | 42/42, 15, 16, 28, 40, 9/9, 36/36, 52/52, 40: all pass |
+| npm test (theme) / tests/gamelists.py | 7/7 / PASS |
+
+### Bugs (ranked)
+
+**MEDIUM-1: the retry merge overwrites whole files, so either the old or the new data is lost.**
+- Where: src-tauri/src/migrate.rs:172-182 (finish → overlay), and lines 176/179 in particular.
+- Impact:
+  1. **Old install records are lost.** After a failed migration, a single install in 1.6.0 writes a new catalog/journal.json. On retry that file replaces the migrated 1.5.x journal entirely. Every 1.5.x catalog install drops out of the journal, so Unpack can't uninstall or update those mods or detect conflicts with them, and their launch.ini lines are no longer tracked.
+  2. **Rollback protection can be weakened.** seen.json from the backup also wins, even when it holds a *lower* catalog version than the old one: v3 beat v7 in the repro, so catalogs v4-v6 would be accepted again.
+  3. **New-version settings are discarded.** Settings the user changed in the new version (localStorage) are thrown away because the WebView profile comes from the old folder.
+- Repro (HOME sandbox, target/debug/unpack):
+  - Old folder: journal `OLDMOD`, seen `{"v":7}`, localStorage `consoles=OLD`.
+  - chmod 000 seen.json and start: migration fails.
+  - Write new catalog/journal.json `NEWMOD`, seen `{"v":3}` and localStorage `NEWSETTINGS`, then chmod 644 and restart.
+  - Result: journal=`NEWMOD` only (OLDMOD gone), seen=`{"v":3}`, ls=`OLD`.
+- Fix:
+  - Merge the journal by entry id: keep both, and on a clash keep the record with the newer timestamp.
+  - Take seen.json as max(version) per catalog.
+  - grants.json: union.
+  - For WebView: keep the newer profile, or migrate only the `unpack.*` keys, or at least tell the user that settings made since the failed start were replaced.
+
+**LOW-1: Downloads made after a failed start are hidden in `.pre-migration`, which is never cleaned up.**
+- Where: migrate.rs:182; see also 160-161.
+- Cause: `move_downloads(bak/Downloads → new/Downloads)` does nothing once the old Downloads has been moved in, because `to` already exists.
+- Impact: files the user downloaded during the failed run disappear from Unpack. They still exist in `com.qeezyxz.unpack.pre-migration/Downloads`, but nothing points the user there, and the folder is never removed.
+- Repro: as in MEDIUM-1, plus `new/Downloads/new.zip` (5 MB). After the retry, new/Downloads holds only game.zip, and new.zip is under .pre-migration.
+- Fix: merge files from bak/Downloads into new/Downloads, renaming on a name clash. Remove `.pre-migration` once it has been merged (or after N days), or name it in the marker file.
+- Severity of `.pre-migration` never being cleaned: **Low**. There is only ever one; each retry replaces it. In 3 back-to-back retries it stayed at 168 KB of WebView cache. It only grows large through the hidden Downloads above, and line 161 deletes the previous backup without merging it, which could drop an earlier backup's data. That last path was only read; it needs rename(stage→new) to fail.
+
+**LOW-2: the 100k file-count cap is only checked by the live watcher, so a fast archive slips past it.**
+- Where: src-tauri/src/archive.rs:324, with no check at the completion point around 1116.
+- Repro:
+  - A zip holding a tar of **100,500** one-byte files: opened fully, 100,501 files left, no warning.
+  - A zip holding 300,000 one-byte files: stopped ("past … 100000 files"), 1 file left, no 7za left running.
+  - A tar of empty files is refused earlier ("size can't be read").
+- Fix: refuse before extracting when the listing's file count is over the cap, and re-check the count after 7-Zip finishes, alongside `tree_bytes`.
+
+### R17 items
+| R17 item | Status | How checked |
+|---|---|---|
+| M1 failed migration never retried | **Fixed (with the new MEDIUM-1)** | Ran the chmod 000 seen.json repro: after the fix and a restart, journal OLDMOD, seen v7, grants, localStorage, Downloads and big.bin all arrived, with the marker "copied". Ran the low-space repro (1.5 GB on a 2.6 GB tmpfs): refused, then grown to 4 GB and restarted: everything recovered. Killing the retry at 0.5, 1.5 and 3 s, and a manual "moved aside, before stage→new" state, each finished on the next start. Hand-deleted marker: behaves like the first run. Hand-planted marker on a healthy folder: forces a re-merge; the new journal was kept, but localStorage was replaced by the old one. Symlinks in .pre-migration (dir and grants.json link pointing outside): skipped. 3 instances at once on a retry: one finished cleanly |
+| L1 cut-off cross-drive Downloads accepted | **Fixed** | Ran: tmpfs-mounted old/Downloads (2000 MB), killed at 0.5 s, leaving `Downloads.migrating` and `.migration-pending`. On restart, game.zip arrived at the full 2,097,152,000 bytes, the old copy was removed, and no siblings were left |
+| Optional 100k file cap | **Partly works** | See LOW-2 |
+
+### Checked by reading only
+- has_own_data looks only at `EBWebView/*/Local Storage/leveldb`. That is the Windows layout; on Linux and macOS a settings-only new profile isn't seen. Harmless now that the retry marker drives the decision.
+- Line 161 removes an existing .pre-migration without merging it.
+- A kill in the middle of overlay is safe: `.migration-pending` makes finish() rerun it, and every overlay is a plain copy.
