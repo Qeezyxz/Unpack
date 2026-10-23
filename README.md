@@ -1,28 +1,26 @@
-# Unpack
+# Unpack: desktop edition
 
-Windows tool for extracting, organizing, and transferring Xbox 360 games, DLC, title updates, mods, and homebrew.
+Unpack opens and extracts **ZIP, RAR, 7Z** (plus TAR, GZ, BZ2, XZ and more), makes **ZIP and 7Z** archives, and converts **Xbox 360 ISOs to Games on Demand**. It looks the same as your web page, but now it's a real Windows program. It works offline, handles huge archives, and adds right-click menu entries in Explorer.
+
+## Install
+
+**Option A (recommended): the installer**
+1. Run `Unpack_1.0.0_x64-setup.exe`.
+2. Windows may show "Windows protected your PC" because the file isn't signed. Click **More info**, then **Run anyway**.
+3. The installer doesn't need admin rights. It installs only for your user account.
+
+**Option B: portable (no install)**
+Unzip `Unpack-portable.zip` anywhere and run `Unpack.exe`. Keep `7za.exe` and `WebView2Loader.dll` in the same folder. The portable copy has **no** right-click menu entries (those come from the installer).
+
+Unpack needs Microsoft's WebView2 runtime. Windows 10 and 11 already have it.
 
 ## Features
 
-- **Archive extraction** — Opens ZIP, RAR, 7Z and other archives using real 7-Zip. Drop in a pile of archives or folders and extract them all into one folder.
-- **ISO conversion** — Automatically converts extracted Xbox 360 ISOs to Games on Demand format or an extracted XEX folder with `default.xex`. Optional delete of original ISO after byte-for-byte verification.
-- **Library** — Every extracted/converted game appears with its real name (built-in list of ~4,900 Xbox 360 TitleIDs).
-- **USB copy** — Copy a game to a USB drive’s `Games` folder. Respects FAT32 4 GB limit, skips shortcuts/junctions, and verifies every file.
-- **DLC & Title Updates** — Auto-detects DLC and title update files by reading headers, matches them to the correct game, and places them in the right folder. Unmatched items are marked “game not found”.
-- **Mod Menus** — Organizes menu files by game. Auto-detects using game + alias list plus names you’ve taught it. Learns confirmed menus (e.g. Jiggy Menu) for future versions. Import/export names list. Includes an empty built-in menus folder.
-- **Link downloader** — Downloads from URL, resumes, optional SHA-256 check, extracts, detects game, and files it. Import/export saved links list.
-- **Homebrew Tools** — Lists Aurora, XeXMenu, DashLaunch, Horizon, save editors, etc. with descriptions and links. Import your own list.
-- **Send to Xbox** — Connect over WiFi or cable to Aurora, XeXMenu, or DashLaunch. Browse drives and send games, DLC, updates, plugins, or anything else. Live speed + ETA, resume/cancel, never overwrites a different existing file, home network only.
-- **Extras** — Windows notifications on long jobs, drag-and-drop, keyboard shortcuts (e.g. Ctrl+Shift+X for Send to Xbox), custom icons/art, installer + portable version + cleanup tool.
-
-## Requirements
-
-- Windows
-- 7-Zip
+(Full feature list from your description is preserved in the previous version; this is the desktop edition overview. See HANDOFF.md and source for details.)
 
 ## Status
 
-Newest features are currently in review. Build will be added once it passes.
+Source uploaded. Builds and binaries are separate (installer and portable zip).
 
 ## License
 
