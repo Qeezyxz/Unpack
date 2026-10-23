@@ -170,6 +170,19 @@ const calls = (cmd) => window.__calls.filter((c) => c.cmd === cmd);
   await sleep(100);
   check("create archive confirms in the dialog", /Created \/o\/out\.7z/.test($$("pack-out").textContent), $$("pack-out").textContent);
 
+  // Save buttons say what happened
+  window.__behaviour.save_settings = () => Promise.resolve(null);
+  $$("xbox-save").click();
+  await sleep(40);
+  check("save console says Saved", $$("xbox-save").textContent === "Saved", $$("xbox-save").textContent);
+  await sleep(1700);
+  check("save button label comes back", $$("xbox-save").textContent === "Save console", $$("xbox-save").textContent);
+  window.__behaviour.save_settings = () => Promise.reject("disk full");
+  $$("save-settings").click();
+  await sleep(40);
+  check("failed save says so", /Could not save/.test($$("save-settings").textContent), $$("save-settings").textContent);
+  window.__behaviour.save_settings = () => Promise.resolve(null);
+
   document.title = "DONE";
   const pre = document.createElement("pre");
   pre.id = "results";

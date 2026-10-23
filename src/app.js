@@ -72,8 +72,23 @@ async function pickDir(title) {
 }
 
 async function remember() {
-  if (!native()) return;
-  try { await invoke("save_settings", { settings: collectSettings() }); } catch (_) { /* ignore */ }
+  if (!native()) return true;
+  try {
+    await invoke("save_settings", { settings: collectSettings() });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function saveButton(id) {
+  const btn = $(id);
+  const label = btn.textContent;
+  btn.onclick = async () => {
+    const ok = await remember();
+    btn.textContent = ok ? "Saved" : "Could not save";
+    setTimeout(() => { btn.textContent = label; }, 1500);
+  };
 }
 
 function maxJobs() {
@@ -554,7 +569,7 @@ async function init() {
     });
     log(msg);
   });
-  $("xbox-save").onclick = remember;
+  saveButton("xbox-save");
   $("run-send").onclick = () => job("Sending to Xbox…", async () => {
     const report = await invoke("send_to_xbox", {
       host: $("xbox-host").value,
@@ -621,7 +636,7 @@ async function init() {
     await invoke("discord_set_enabled", { enabled }).catch(() => {});
     await remember();
   };
-  $("save-settings").onclick = remember;
+  saveButton("save-settings");
 
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
