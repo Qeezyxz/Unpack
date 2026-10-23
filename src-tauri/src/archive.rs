@@ -97,6 +97,7 @@ pub fn extract_archives_with(
     let seven = find_seven_zip().ok_or_else(|| {
         "7-Zip was not found. Put 7za.exe next to Unpack.exe, or install 7-Zip / p7zip and set UNPACK_7ZA.".to_string()
     })?;
+    crate::fileops::check_output_folder(dest)?;
     fs_create(dest)?;
     let mut results = Vec::new();
     let total = archives.len() as u64;
@@ -652,6 +653,21 @@ mod tests {
         out.extend_from_slice(&cd_offset.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out
+    }
+
+    #[test]
+    fn extracting_into_a_file_says_so() {
+        if find_seven_zip().is_none() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("unpack-intofile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let blocker = root.join("blocker");
+        std::fs::write(&blocker, b"file").unwrap();
+        let err = extract_archives(&[root.join("x.zip")], &blocker.join("deeper")).unwrap_err();
+        assert!(err.contains("is a file, not a folder"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
