@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: unpack-release-1-1-0
+  group: unpack-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -37,11 +37,20 @@ jobs:
       - name: Build NSIS installer
         run: npx tauri build --bundles nsis
 
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unpack-nsis
+          if-no-files-found: error
+          path: src-tauri/target/release/bundle/nsis/*.exe
+
       - name: Pack portable zip
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
           $releaseDir = Join-Path (Get-Location) "src-tauri\target\release"
+          Get-ChildItem (Join-Path $releaseDir "bundle\nsis") | Format-Table Name, Length
           $exe = @(
             (Join-Path $releaseDir "Unpack.exe"),
             (Join-Path $releaseDir "unpack.exe")
@@ -57,32 +66,65 @@ jobs:
 
           $fetch = Join-Path (Get-Location) "7zip-fetch"
           New-Item -ItemType Directory -Force -Path $fetch | Out-Null
-          $sevenZip = "https://github.com/ip7z/7zip/releases/download/26.05"
-          curl.exe -fsSL -L -o (Join-Path $fetch "7zr.exe") "$sevenZip/7zr.exe"
-          curl.exe -fsSL -L -o (Join-Path $fetch "extra.7z") "$sevenZip/7z2605-extra.7z"
-          & (Join-Path $fetch "7zr.exe") x (Join-Path $fetch "extra.7z") "-o$fetch\out" -y
-          Copy-Item (Join-Path $fetch "out\7za.exe") (Join-Path $portable "7za.exe") -Force
-          $license = Join-Path $fetch "out\license.txt"
-          if (Test-Path $license) {
-            Copy-Item $license (Join-Path $portable "7-Zip-license.txt") -Force
+          $extraUrls = @(
+            "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-extra.7z",
+            "https://github.com/ip7z/7zip/releases/download/25.01/7z2501-extra.7z",
+            "https://www.7-zip.org/a/7z2501-extra.7z"
+          )
+          $zrUrls = @(
+            "https://github.com/ip7z/7zip/releases/download/26.05/7zr.exe",
+            "https://www.7-zip.org/a/7zr.exe"
+          )
+          $zr = Join-Path $fetch "7zr.exe"
+          $gotZr = $false
+          foreach ($url in $zrUrls) {
+            try {
+              Write-Host "Downloading $url"
+              curl.exe -fsSL -L -o $zr $url
+              $gotZr = $true
+              break
+            } catch {
+              Write-Host "missed $url : $_"
+            }
+          }
+          if (-not $gotZr) { throw "could not download 7zr.exe" }
+          $extra = Join-Path $fetch "extra.7z"
+          $got = $false
+          foreach ($url in $extraUrls) {
+            try {
+              Write-Host "Downloading $url"
+              curl.exe -fsSL -L -o $extra $url
+              $got = $true
+              break
+            } catch {
+              Write-Host "missed $url : $_"
+            }
+          }
+          if (-not $got) { throw "could not download 7-Zip Extra" }
+          $out = Join-Path $fetch "out"
+          & $zr x $extra "-o$out" -y
+          $seven = Get-ChildItem -Path $out -Filter "7za.exe" -Recurse | Select-Object -First 1
+          if (-not $seven) { throw "7za.exe missing from Extra package" }
+          Copy-Item $seven.FullName (Join-Path $portable "7za.exe") -Force
+          $license = Get-ChildItem -Path $out -Filter "license.txt" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($license) {
+            Copy-Item $license.FullName (Join-Path $portable "7-Zip-license.txt") -Force
           }
 
           if (Test-Path "Unpack-portable.zip") { Remove-Item "Unpack-portable.zip" -Force }
           Compress-Archive -Path (Join-Path $portable "*") -DestinationPath "Unpack-portable.zip"
-          Get-ChildItem "src-tauri\target\release\bundle\nsis" | Format-Table Name, Length
           Get-Item "Unpack-portable.zip" | Format-List Name, Length
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.0
-          name: Unpack 1.1.0
-          target_commitish: 014cf01724cdc328cae6d95417dcddf474a97bfc
-          body_path: .github/release-notes-1.1.0.md
+          tag_name: v1.1.1
+          name: Unpack 1.1.1
+          target_commitish: ${{ github.sha }}
+          body_path: .github/release-notes-1.1.1.md
           draft: false
           prerelease: false
           make_latest: true
-          overwrite_files: true
           fail_on_unmatched_files: true
           files: |
             src-tauri/target/release/bundle/nsis/*.exe

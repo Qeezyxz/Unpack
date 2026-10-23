@@ -38,7 +38,7 @@ Currently flagged only by Trapmine (`Malicious.high.ml.score`). This is a common
 Windows builds are attached to the [latest GitHub Release](https://github.com/Qeezyxz/Unpack/releases/latest).
 
 **Option A (recommended): the installer**
-1. Download and run `Unpack_1.1.1_x64-setup.exe` (or `Unpack_1.1.0_x64-setup.exe` until 1.1.1 is built).
+1. Download and run `Unpack_1.1.1_x64-setup.exe`.
 2. Windows may show "Windows protected your PC" because the file isn't signed. Click **More info**, then **Run anyway**.
 3. The installer doesn't need admin rights. It installs only for your user account.
 
