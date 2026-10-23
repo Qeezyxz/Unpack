@@ -87,6 +87,7 @@ fn local_ipv4() -> Option<Ipv4Addr> {
 }
 
 pub fn test_login(host: &str, port: u16, user: &str, pass: &str) -> Result<String, String> {
+    let host = host.trim();
     if !net::is_lan_host(host) {
         return Err("Send to Xbox only accepts local network addresses".into());
     }
@@ -105,7 +106,8 @@ pub fn send_paths(
     include_launch_ini: bool,
     mut progress: impl FnMut(String, u64, u64),
 ) -> Result<SendReport, String> {
-    if host.trim().is_empty() {
+    let host = host.trim();
+    if host.is_empty() {
         return Err("Xbox IP is required".into());
     }
     if !net::is_lan_host(host) {
@@ -441,6 +443,18 @@ mod tests {
         let report = send(&fake, &[file], false).unwrap();
         assert_eq!(report.uploaded, 1);
         assert_eq!(fake.file("Hdd1/Games/game.bin").unwrap(), blob(12_345));
+    }
+
+    #[test]
+    fn a_pasted_ip_with_spaces_still_connects() {
+        let fake = FakeFtp::start(Cfg::default());
+        let msg = test_login("  127.0.0.1\t", fake.port, "xbox", "xbox").unwrap();
+        assert!(msg.starts_with("Connected to 127.0.0.1:"), "{msg}");
+        let dir = scratch("spaces");
+        let file = dir.join("a.bin");
+        fs::write(&file, blob(100)).unwrap();
+        let report = send_paths(" 127.0.0.1 ", fake.port, "xbox", "xbox", "/Hdd1/Games", &[file], false, |_, _, _| {}).unwrap();
+        assert_eq!(report.uploaded, 1);
     }
 
     #[test]
