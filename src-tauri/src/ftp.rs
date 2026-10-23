@@ -1,3 +1,4 @@
+use crate::net;
 use crate::paths;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -48,6 +49,7 @@ impl FtpClient {
     }
 
     pub fn command(&mut self, line: &str) -> Result<(u16, String), String> {
+        reject_line_break(line)?;
         self.writer
             .write_all(format!("{line}\r\n").as_bytes())
             .map_err(|e| e.to_string())?;
@@ -254,6 +256,7 @@ impl FtpClient {
                 return Err(format!("REST {offset} rejected: {code} {msg}"));
             }
         }
+        reject_line_break(name)?;
         self.writer
             .write_all(format!("{cmd} {name}\r\n").as_bytes())
             .map_err(|e| e.to_string())?;
@@ -375,12 +378,26 @@ pub fn looks_like_drop(err: &str) -> bool {
         || e.contains("os error 104")
 }
 
+/// A line break inside a command would let one FTP command smuggle in another.
+fn reject_line_break(text: &str) -> Result<(), String> {
+    if text.contains('\r') || text.contains('\n') || text.contains('\0') {
+        Err("FTP commands cannot contain line breaks (check the Xbox login and file names)".into())
+    } else {
+        Ok(())
+    }
+}
+
 fn connect_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
     let addrs: Vec<SocketAddr> = addr.to_socket_addrs().map_err(|e| e.to_string())?.collect();
     if addrs.is_empty() {
         return Err(format!("could not resolve {addr}"));
     }
-    TcpStream::connect_timeout(&addrs[0], timeout).map_err(|e| format!("{addr}: {e}"))
+    let Some(local) = addrs.iter().find(|a| net::is_lan_ip(a.ip())) else {
+        return Err(format!(
+            "{addr} points outside your local network. Send to Xbox only talks to a local address."
+        ));
+    };
+    TcpStream::connect_timeout(local, timeout).map_err(|e| format!("{addr}: {e}"))
 }
 
 fn xbox_path_candidates(path: &str) -> Vec<String> {
@@ -485,6 +502,20 @@ mod tests {
         assert_eq!(resume_action(1000, None, Some(0)), ResumeAction::Restart);
         assert!(looks_like_drop("transfer dropped while sending game.xex: reset"));
         assert!(!looks_like_drop("CWD /Hdd1 failed: 550"));
+    }
+
+    #[test]
+    fn line_breaks_cannot_smuggle_ftp_commands() {
+        assert!(reject_line_break("game.xex").is_ok());
+        assert!(reject_line_break("a.xex\r\nDELE launch.ini").is_err());
+        assert!(reject_line_break("a\nb").is_err());
+        assert!(reject_line_break("a\0b").is_err());
+    }
+
+    #[test]
+    fn public_resolution_is_refused() {
+        let err = connect_timeout("8.8.8.8:21", Duration::from_millis(50)).unwrap_err();
+        assert!(err.contains("outside your local network"), "{err}");
     }
 
     #[test]
