@@ -25,6 +25,7 @@ impl FtpClient {
             writer,
         };
         client.read_response()?; // greeting
+        let user = if user.trim().is_empty() { "anonymous" } else { user };
         client.command(&format!("USER {user}"))?;
         let (code, msg) = client.command(&format!("PASS {pass}"))?;
         if code >= 400 {
@@ -82,15 +83,30 @@ impl FtpClient {
     }
 
     pub fn mkdir_p(&mut self, path: &str) -> Result<(), String> {
-        let normalized = path.replace('\\', "/");
+        let mut last_err = String::new();
+        for candidate in xbox_path_candidates(path) {
+            match self.mkdir_p_one(&candidate) {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
+    }
+
+    fn mkdir_p_one(&mut self, normalized: &str) -> Result<(), String> {
         let mut current = String::new();
-        for part in normalized.split('/').filter(|p| !p.is_empty()) {
-            current.push('/');
-            current.push_str(part);
+        let sep = if normalized.contains('\\') { '\\' } else { '/' };
+        for part in normalized.split(['/', '\\']).filter(|p| !p.is_empty()) {
+            if current.is_empty() && !normalized.starts_with(['/', '\\']) {
+                current.push_str(part);
+            } else {
+                current.push(sep);
+                current.push_str(part);
+            }
             let _ = self.command(&format!("MKD {current}"));
         }
         if !normalized.is_empty() {
-            self.cwd(&normalized)?;
+            self.cwd(normalized)?;
         }
         Ok(())
     }
@@ -163,6 +179,19 @@ fn connect_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
     TcpStream::connect_timeout(&addrs[0], timeout).map_err(|e| format!("{addr}: {e}"))
 }
 
+fn xbox_path_candidates(path: &str) -> Vec<String> {
+    let n = path.replace('\\', "/");
+    let mut out = vec![n.clone()];
+    if n.starts_with('/') {
+        let trimmed = n.trim_start_matches('/').to_string();
+        out.push(trimmed.clone());
+        if let Some((vol, rest)) = trimmed.split_once('/') {
+            out.push(format!("{vol}:\\{}", rest.replace('/', "\\")));
+        }
+    }
+    out
+}
+
 fn parse_pasv(msg: &str) -> Result<String, String> {
     let start = msg.find('(').ok_or_else(|| "bad PASV response".to_string())?;
     let end = msg.find(')').ok_or_else(|| "bad PASV response".to_string())?;
@@ -197,5 +226,13 @@ mod tests {
     #[test]
     fn protected_upload_skips_without_flag() {
         assert!(paths::is_protected_filename("launch.ini"));
+    }
+
+    #[test]
+    fn xbox_paths_include_drive_style() {
+        let c = xbox_path_candidates("/Hdd1/Games");
+        assert!(c.contains(&"/Hdd1/Games".into()));
+        assert!(c.contains(&"Hdd1/Games".into()));
+        assert!(c.iter().any(|p| p.contains("Hdd1:\\Games")));
     }
 }

@@ -59,9 +59,19 @@ pub fn copy_tree(
     if src.is_file() {
         copy_one(src, &dest_dir.join(file_name(src)), verify, overwrite_protected, &mut report)?;
     } else {
-        copy_dir(src, dest_dir, verify, overwrite_protected, &mut report)?;
+        // Keep the folder name so USB:\Halo\default.xex, not USB:\default.xex.
+        let nested = dest_dir.join(file_name(src));
+        copy_dir(src, &nested, verify, overwrite_protected, &mut report)?;
     }
     Ok(report)
+}
+
+pub fn merge_reports(into: &mut CopyReport, other: CopyReport) {
+    into.copied += other.copied;
+    into.skipped_protected += other.skipped_protected;
+    into.bytes += other.bytes;
+    into.verified = into.verified && other.verified;
+    into.warnings.extend(other.warnings);
 }
 
 fn file_name(path: &Path) -> String {
@@ -126,11 +136,8 @@ fn copy_one(
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    // Copy to a sibling temp name, then rename, so a crash never leaves a truncated launch.ini.
-    let tmp = dest.with_extension(format!(
-        "{}.unpack-tmp",
-        dest.extension().and_then(|e| e.to_str()).unwrap_or("tmp")
-    ));
+    // Hidden sibling temp file, then rename, so a crash never leaves a truncated launch.ini.
+    let tmp = dest.with_file_name(format!(".{}.unpack-tmp", file_name(dest)));
     fs::copy(src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
     if verify {
         let a = hashutil::sha256_file(src)?;
@@ -258,10 +265,17 @@ mod tests {
         fs::create_dir_all(&dest_dir).unwrap();
         fs::write(src_dir.join("game.xex"), b"new").unwrap();
         fs::write(src_dir.join("launch.ini"), b"new-ini").unwrap();
-        fs::write(dest_dir.join("launch.ini"), b"keep-me").unwrap();
+        fs::create_dir_all(dest_dir.join("src")).unwrap();
+        fs::write(dest_dir.join("src").join("launch.ini"), b"keep-me").unwrap();
         let report = copy_tree(&src_dir, &dest_dir, true, false).unwrap();
-        assert_eq!(fs::read_to_string(dest_dir.join("launch.ini")).unwrap(), "keep-me");
-        assert_eq!(fs::read_to_string(dest_dir.join("game.xex")).unwrap(), "new");
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("src").join("launch.ini")).unwrap(),
+            "keep-me"
+        );
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("src").join("game.xex")).unwrap(),
+            "new"
+        );
         assert_eq!(report.skipped_protected, 1);
         let _ = fs::remove_dir_all(&root);
     }

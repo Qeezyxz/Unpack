@@ -5,6 +5,7 @@ mod download;
 mod ftp;
 mod hashutil;
 mod library;
+mod net;
 mod paths;
 mod progress;
 mod stfs;

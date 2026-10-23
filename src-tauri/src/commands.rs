@@ -2,9 +2,16 @@ use crate::{archive, convert, download, hashutil, library, progress, stfs, usb, 
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
+
+fn dialog_path(p: FilePath) -> Option<String> {
+    p.into_path()
+        .ok()
+        .map(|pb| pb.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+}
 
 #[derive(Debug, Serialize)]
 pub struct AppMeta {
@@ -71,7 +78,7 @@ pub fn pick_files(app: AppHandle, title: Option<String>, extensions: Option<Vec<
         .blocking_pick_files()
         .unwrap_or_default()
         .into_iter()
-        .map(|p| p.to_string())
+        .filter_map(dialog_path)
         .collect())
 }
 
@@ -81,7 +88,7 @@ pub fn pick_folder(app: AppHandle, title: Option<String>) -> Result<Option<Strin
     if let Some(title) = title {
         dialog = dialog.set_title(&title);
     }
-    Ok(dialog.blocking_pick_folder().map(|p| p.to_string()))
+    Ok(dialog.blocking_pick_folder().and_then(dialog_path))
 }
 
 #[tauri::command]
@@ -93,7 +100,7 @@ pub fn pick_save(app: AppHandle, title: Option<String>, default_name: Option<Str
     if let Some(name) = default_name {
         dialog = dialog.set_file_name(&name);
     }
-    Ok(dialog.blocking_save_file().map(|p| p.to_string()))
+    Ok(dialog.blocking_save_file().and_then(dialog_path))
 }
 
 #[tauri::command]
@@ -114,27 +121,41 @@ pub fn open_path(app: AppHandle, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn extract_archives(app: AppHandle, archives: Vec<String>, dest: String) -> Result<Vec<archive::ArchiveResult>, String> {
+pub async fn extract_archives(app: AppHandle, archives: Vec<String>, dest: String) -> Result<Vec<archive::ArchiveResult>, String> {
+    if dest.trim().is_empty() {
+        return Err("choose a destination folder".into());
+    }
     progress::emit(&app, "extract", "Extracting archives", 0, archives.len() as u64);
-    let paths: Vec<PathBuf> = archives.into_iter().map(PathBuf::from).collect();
-    let result = archive::extract_archives(&paths, &PathBuf::from(dest))?;
-    progress::emit(&app, "extract", "Done", 1, 1);
+    let app2 = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let paths: Vec<PathBuf> = archives.into_iter().map(PathBuf::from).collect();
+        archive::extract_archives(&paths, &PathBuf::from(dest))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    progress::emit(&app2, "extract", "Done", 1, 1);
     Ok(result)
 }
 
 #[tauri::command]
-pub fn create_archive(inputs: Vec<String>, dest: String) -> Result<archive::ArchiveResult, String> {
-    let paths: Vec<PathBuf> = inputs.into_iter().map(PathBuf::from).collect();
-    archive::create_archive(&paths, &PathBuf::from(dest))
+pub async fn create_archive(inputs: Vec<String>, dest: String) -> Result<archive::ArchiveResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths: Vec<PathBuf> = inputs.into_iter().map(PathBuf::from).collect();
+        archive::create_archive(&paths, &PathBuf::from(dest))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn inspect_iso(path: String) -> Result<convert::IsoInfo, String> {
-    convert::inspect_iso(&PathBuf::from(path))
+pub async fn inspect_iso(path: String) -> Result<convert::IsoInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || convert::inspect_iso(&PathBuf::from(path)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn convert_iso(
+pub async fn convert_iso(
     app: AppHandle,
     path: String,
     dest: String,
@@ -142,15 +163,22 @@ pub fn convert_iso(
     trim: bool,
     verify: bool,
 ) -> Result<convert::ConvertReport, String> {
+    if path.trim().is_empty() || dest.trim().is_empty() {
+        return Err("choose an ISO and an output folder".into());
+    }
     let app2 = app.clone();
-    convert::convert_iso(
-        &PathBuf::from(path),
-        &PathBuf::from(dest),
-        &mode,
-        trim,
-        verify,
-        move |message, current, total| progress::emit(&app2, "convert", message, current, total),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        convert::convert_iso(
+            &PathBuf::from(path),
+            &PathBuf::from(dest),
+            &mode,
+            trim,
+            verify,
+            move |message, current, total| progress::emit(&app2, "convert", message, current, total),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -164,8 +192,13 @@ pub fn lookup_title(title_id: String) -> Option<library::TitleRecord> {
 }
 
 #[tauri::command]
-pub fn scan_library(root: String) -> Result<Vec<library::LibraryItem>, String> {
-    library::scan_library(&PathBuf::from(root), 4)
+pub async fn scan_library(root: String) -> Result<Vec<library::LibraryItem>, String> {
+    if root.trim().is_empty() {
+        return Err("choose a library folder".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || library::scan_library(&PathBuf::from(root), 4))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -184,23 +217,35 @@ pub fn volume_info(path: String) -> Result<usb::VolumeInfo, String> {
 }
 
 #[tauri::command]
-pub fn copy_to_usb(
+pub async fn copy_to_usb(
     sources: Vec<String>,
     dest: String,
     verify: bool,
     overwrite_protected: bool,
 ) -> Result<usb::CopyReport, String> {
-    let dest = PathBuf::from(dest);
-    let mut last = None;
-    for src in sources {
-        last = Some(usb::copy_tree(
-            &PathBuf::from(src),
-            &dest,
-            verify,
-            overwrite_protected,
-        )?);
+    if dest.trim().is_empty() {
+        return Err("choose a USB / destination folder".into());
     }
-    last.ok_or_else(|| "no files selected".to_string())
+    if sources.is_empty() {
+        return Err("no files selected".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let dest = PathBuf::from(dest);
+        let mut report = usb::CopyReport {
+            copied: 0,
+            skipped_protected: 0,
+            bytes: 0,
+            verified: verify,
+            warnings: Vec::new(),
+        };
+        for src in sources {
+            let one = usb::copy_tree(&PathBuf::from(src), &dest, verify, overwrite_protected)?;
+            usb::merge_reports(&mut report, one);
+        }
+        Ok(report)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -213,29 +258,38 @@ pub fn hash_file(path: String) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn download_url(
+pub async fn download_url(
     app: AppHandle,
     url: String,
     dest_dir: String,
     expected_hash: Option<String>,
 ) -> Result<download::DownloadReport, String> {
+    if dest_dir.trim().is_empty() {
+        return Err("choose a download folder".into());
+    }
     let dest = download::dest_for_url(&PathBuf::from(dest_dir), &url);
     let app2 = app.clone();
-    download::download_url(
-        &url,
-        &dest,
-        expected_hash.as_deref(),
-        move |message, current, total| progress::emit(&app2, "download", message, current, total),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        download::download_url(
+            &url,
+            &dest,
+            expected_hash.as_deref(),
+            move |message, current, total| progress::emit(&app2, "download", message, current, total),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn discover_xbox(port: Option<u16>) -> Vec<xbox::XboxHost> {
-    xbox::discover(port.unwrap_or(21), 180)
+pub async fn discover_xbox(port: Option<u16>) -> Vec<xbox::XboxHost> {
+    tauri::async_runtime::spawn_blocking(move || xbox::discover(port.unwrap_or(21), 180))
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
-pub fn send_to_xbox(
+pub async fn send_to_xbox(
     app: AppHandle,
     host: String,
     port: Option<u16>,
@@ -245,18 +299,25 @@ pub fn send_to_xbox(
     paths: Vec<String>,
     include_launch_ini: bool,
 ) -> Result<xbox::SendReport, String> {
+    if paths.is_empty() {
+        return Err("choose files or folders to send".into());
+    }
     let app2 = app.clone();
-    let files: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    xbox::send_paths(
-        &host,
-        port.unwrap_or(21),
-        &user,
-        &pass,
-        &dest,
-        &files,
-        include_launch_ini,
-        move |message, current, total| progress::emit(&app2, "xbox", message, current, total),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        let files: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+        xbox::send_paths(
+            &host,
+            port.unwrap_or(21),
+            &user,
+            &pass,
+            &dest,
+            &files,
+            include_launch_ini,
+            move |message, current, total| progress::emit(&app2, "xbox", message, current, total),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
