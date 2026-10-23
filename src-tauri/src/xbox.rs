@@ -244,7 +244,7 @@ fn expand_files(paths_in: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     for p in paths_in {
         if p.is_dir() {
-            collect_files(p, &mut out)?;
+            collect_files(p, &mut out, 0)?;
         } else if p.exists() {
             out.push(p.clone());
         } else {
@@ -254,13 +254,16 @@ fn expand_files(paths_in: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) -> Result<(), String> {
+    if depth > crate::fileops::MAX_FOLDER_DEPTH {
+        return Err(crate::fileops::too_deep_message(dir));
+    }
     let entries = fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_files(&path, out)?;
+            collect_files(&path, out, depth + 1)?;
         } else {
             out.push(path);
         }
@@ -488,6 +491,17 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("line breaks"), "{err}");
         assert!(!fake.saw("DELE everything"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_loop_in_the_folder_is_an_error() {
+        let dir = scratch("loop");
+        fs::create_dir_all(dir.join("game/sub")).unwrap();
+        fs::write(dir.join("game/sub/a.bin"), b"a").unwrap();
+        std::os::unix::fs::symlink(dir.join("game"), dir.join("game/sub/back")).unwrap();
+        let err = expand_files(&[dir.join("game")]).unwrap_err();
+        assert!(err.contains("nested too deeply"), "{err}");
     }
 
     #[test]

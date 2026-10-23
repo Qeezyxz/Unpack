@@ -102,10 +102,10 @@ fn walk(dir: &Path, depth: u32, max_depth: u32, items: &mut Vec<LibraryItem>) ->
         Err(e) => return Err(format!("{}: {e}", dir.display())),
     };
     for entry in entries {
-        let entry = entry.map_err(|e| e.to_string())?;
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if path.is_dir() {
+        if fileops::is_plain_dir(&path) {
             if looks_like_title_id(&name) {
                 if let Some(item) = scan_title_folder(&path, &name) {
                     items.push(item);
@@ -117,7 +117,8 @@ fn walk(dir: &Path, depth: u32, max_depth: u32, items: &mut Vec<LibraryItem>) ->
                 continue;
             }
             if depth < max_depth {
-                walk(&path, depth + 1, max_depth, items)?;
+                // One unreadable folder should not hide the rest of the library.
+                let _ = walk(&path, depth + 1, max_depth, items);
             }
         } else {
             let ext = path
@@ -125,15 +126,12 @@ fn walk(dir: &Path, depth: u32, max_depth: u32, items: &mut Vec<LibraryItem>) ->
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if matches!(ext.as_str(), "iso" | "000" | "bin") {
-                items.push(LibraryItem {
-                    path: path.display().to_string(),
-                    kind: "iso".into(),
-                    title_id: None,
-                    name,
-                    detail: "Disc image".into(),
-                });
-            } else if let Ok(info) = stfs::parse_stfs_file(&path) {
+            let package = if ext == "iso" {
+                None
+            } else {
+                stfs::parse_stfs_file(&path).ok()
+            };
+            if let Some(info) = package {
                 items.push(LibraryItem {
                     path: path.display().to_string(),
                     kind: info.content_label.to_lowercase().replace(' ', "_"),
@@ -146,6 +144,14 @@ fn walk(dir: &Path, depth: u32, max_depth: u32, items: &mut Vec<LibraryItem>) ->
                         info.display_name
                     },
                     detail: format!("{} · {}", info.content_label, info.title_id),
+                });
+            } else if matches!(ext.as_str(), "iso" | "000" | "bin") {
+                items.push(LibraryItem {
+                    path: path.display().to_string(),
+                    kind: "iso".into(),
+                    title_id: None,
+                    name,
+                    detail: "Disc image".into(),
                 });
             }
         }
@@ -275,6 +281,33 @@ mod tests {
                 "find_title_by_id missed {tid}"
             );
         }
+    }
+
+    #[test]
+    fn scan_finds_packages_discs_and_survives_odd_folders() {
+        let root = std::env::temp_dir().join(format!("unpack-scan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("deep/er")).unwrap();
+        let mut pkg = vec![0u8; 0x500];
+        pkg[0..4].copy_from_slice(b"LIVE");
+        pkg[0x344..0x348].copy_from_slice(&2u32.to_be_bytes());
+        pkg[0x360..0x364].copy_from_slice(&0x41560817u32.to_be_bytes());
+        fs::write(root.join("dlc.bin"), &pkg).unwrap();
+        fs::write(root.join("game.iso"), b"not really an iso").unwrap();
+        fs::write(root.join("junk.bin"), b"hello").unwrap();
+        fs::write(root.join("deep/er/notes.txt"), b"x").unwrap();
+        fs::write(root.join("short"), b"LI").unwrap();
+        fs::create_dir_all(root.join("41560817/00007000")).unwrap();
+        fs::create_dir_all(root.join("NotATitle/00007000")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, root.join("deep/loop")).unwrap();
+        let items = scan_library(&root, 6).unwrap();
+        let kinds: Vec<&str> = items.iter().map(|i| i.kind.as_str()).collect();
+        assert!(kinds.contains(&"dlc"), "{kinds:?}");
+        assert_eq!(kinds.iter().filter(|k| **k == "iso").count(), 2, "{kinds:?}");
+        assert!(kinds.contains(&"god"), "{kinds:?}");
+        assert!(items.len() < 20, "a symlink loop must not multiply items: {}", items.len());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

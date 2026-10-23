@@ -291,7 +291,7 @@ fn walk_files(dir: &Path, depth: u32, max_depth: u32, visit: &mut dyn FnMut(&Pat
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if crate::fileops::is_plain_dir(&path) {
             walk_files(&path, depth + 1, max_depth, visit);
         } else {
             visit(&path);

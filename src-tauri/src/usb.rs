@@ -85,9 +85,18 @@ pub fn copy_tree(
             &mut report,
         )?;
     } else {
+        if let (Ok(from), Ok(into)) = (fs::canonicalize(src), fs::canonicalize(dest_dir)) {
+            if into.starts_with(&from) {
+                return Err(format!(
+                    "Cannot copy {} into a folder inside itself ({}). Pick a destination outside it.",
+                    src.display(),
+                    dest_dir.display()
+                ));
+            }
+        }
         // Keep the folder name so USB:\Halo\default.xex, not USB:\default.xex.
         let nested = dest_dir.join(file_name(src));
-        copy_dir(src, &nested, verify, overwrite_protected, vol.as_ref(), &mut report)?;
+        copy_dir(src, &nested, verify, overwrite_protected, vol.as_ref(), &mut report, 0)?;
     }
     Ok(report)
 }
@@ -113,14 +122,18 @@ fn copy_dir(
     overwrite_protected: bool,
     vol: Option<&VolumeInfo>,
     report: &mut CopyReport,
+    depth: u32,
 ) -> Result<(), String> {
+    if depth > fileops::MAX_FOLDER_DEPTH {
+        return Err(fileops::too_deep_message(src));
+    }
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     for entry in fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let from = entry.path();
         let to = dest.join(entry.file_name());
         if from.is_dir() {
-            copy_dir(&from, &to, verify, overwrite_protected, vol, report)?;
+            copy_dir(&from, &to, verify, overwrite_protected, vol, report, depth + 1)?;
         } else {
             copy_one(&from, &to, verify, overwrite_protected, vol, report)?;
         }
@@ -335,6 +348,31 @@ mod tests {
         let report = copy_tree(&src, &dest, true, false).unwrap();
         assert_eq!(report.copied, 1);
         assert!(report.verified);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copying_a_folder_into_itself_is_refused() {
+        let root = std::env::temp_dir().join(format!("unpack-usb-self-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("games/inner")).unwrap();
+        fs::write(root.join("games/a.bin"), b"a").unwrap();
+        let err = copy_tree(&root.join("games"), &root.join("games/inner"), false, false).unwrap_err();
+        assert!(err.contains("inside itself"), "{err}");
+        assert!(!root.join("games/inner/games").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_loop_ends_with_an_error_not_a_crash() {
+        let root = std::env::temp_dir().join(format!("unpack-usb-loop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/sub")).unwrap();
+        fs::write(root.join("src/sub/a.bin"), b"a").unwrap();
+        std::os::unix::fs::symlink(root.join("src"), root.join("src/sub/back")).unwrap();
+        let err = copy_tree(&root.join("src"), &root.join("out"), false, false).unwrap_err();
+        assert!(err.contains("nested too deeply"), "{err}");
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -97,6 +97,21 @@ pub fn copy_replace(src: &Path, dest: &Path) -> Result<(), String> {
     replace_file(&tmp, dest)
 }
 
+/// A real folder, not a symlink or junction that could point back up the tree.
+pub fn is_plain_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).map(|m| m.is_dir()).unwrap_or(false)
+}
+
+/// Folders nested deeper than this are almost certainly a link loop.
+pub const MAX_FOLDER_DEPTH: u32 = 48;
+
+pub fn too_deep_message(path: &Path) -> String {
+    format!(
+        "{} is nested too deeply (is there a shortcut or link that points back up the folder tree?)",
+        path.display()
+    )
+}
+
 pub fn clear_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
