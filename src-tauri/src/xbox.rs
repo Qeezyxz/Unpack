@@ -317,7 +317,22 @@ mod tests {
     use crate::testftp::{Cfg, FakeFtp};
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    fn scratch(tag: &str) -> PathBuf {
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "unpack-xbox-{tag}-{}-{}",
@@ -326,7 +341,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     fn blob(len: usize) -> Vec<u8> {
