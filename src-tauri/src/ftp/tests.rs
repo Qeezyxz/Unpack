@@ -639,8 +639,6 @@ fn full_drive_reply_is_recognised() {
     assert!(!reply_means_full(550, "File unavailable"));
     assert!(!reply_means_full(226, "stored"));
     assert!(storage_full_message("game.xex").contains("drive is full"));
-    assert!(stalled_message("game.xex", 2).contains("Wi-Fi"));
-    assert!(stalled(0) && stalled(STALL_BYTES - 1) && !stalled(STALL_BYTES));
 }
 
 #[test]
@@ -670,4 +668,25 @@ fn dropped_connection_is_called_a_drop() {
         let m = io_err(std::io::Error::from(k));
         assert!(m.contains("dropped") && m.contains("resumes"), "{m}");
     }
+}
+
+/// An existing DashLaunch launch.ini on the console is never replaced, and nothing else is sent either.
+#[test]
+fn existing_different_launch_ini_is_never_replaced() {
+    let f = fake(true, true);
+    let d = tmp("launch-ini");
+    std::fs::write(d.join("launch.ini"), b"new ini, longer").unwrap();
+    std::fs::write(d.join("a.xex"), b"aaa").unwrap();
+    let name = d.file_name().unwrap().to_string_lossy().into_owned();
+    {
+        let mut fs = f.fs.lock().unwrap();
+        fs.dirs.insert("/Hdd1/Apps".into());
+        fs.dirs.insert(format!("/Hdd1/Apps/{name}"));
+        fs.files.insert(format!("/Hdd1/Apps/{name}/launch.ini"), b"mine".to_vec());
+    }
+    let e = send(&con(f.port), &d, &segs("/Hdd1/Apps"), false, false, &mut |_, _| {}, &|| false).err().unwrap();
+    assert!(e.contains("different size"), "{e}");
+    let fs = f.fs.lock().unwrap();
+    assert_eq!(fs.files[&format!("/Hdd1/Apps/{name}/launch.ini")], b"mine");
+    assert!(!fs.log.iter().any(|l| l.starts_with("STOR") || l.starts_with("DELE") || l.starts_with("RNTO")), "{:?}", fs.log);
 }

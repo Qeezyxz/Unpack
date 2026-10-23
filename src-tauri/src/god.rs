@@ -344,6 +344,17 @@ pub fn convert(
         return Err("The ISO changed while it was being converted. Try again.".into());
     }
     verify_package(&layout, part_count, iso_len, root_offset)?;
+    // Another disc of this game is already in the TitleID folder: this disc joins it.
+    let joined_other_disc = {
+        let mine = final_layout.con_header_file_path().file_name().map(|n| n.to_os_string());
+        final_layout.con_header_file_path().parent().and_then(|d| fs::read_dir(d).ok()).map_or(false, |rd| {
+            rd.flatten().any(|e| {
+                let name = e.file_name();
+                let stem = std::path::Path::new(&name).file_stem().map(|n| n.to_os_string());
+                Some(&name) != mine.as_ref() && stem != mine && !name.to_string_lossy().starts_with('.')
+            })
+        })
+    };
     install(&layout, &final_layout, job_id).map_err(|e| format!("Could not move the GOD package into place: {e}"))?;
     verify_package(&final_layout, part_count, iso_len, root_offset)?;
     // L1: a cancel that arrives after the package was placed keeps the package but reports
@@ -362,7 +373,7 @@ pub fn convert(
         parts: part_count,
         disc_number,
         disc_count,
-        merged: false,
+        merged: joined_other_disc,
         warning,
     })
 }

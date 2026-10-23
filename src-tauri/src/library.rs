@@ -321,6 +321,24 @@ mod tests {
         assert!(usb.join("Games/My Halo/default.xex").is_file());
         fs::remove_dir_all(&d).unwrap();
     }
+    /// A DashLaunch `launch.ini` that is already on the drive is never replaced or removed by a copy.
+    #[test]
+    fn copy_to_usb_never_clobbers_an_existing_launch_ini() {
+        let d = tmp("usb-ini");
+        let game = d.join("My Halo");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(game.join("default.xex"), crate::iso_extract::tests::minimal_xex(0x4156_0817)).unwrap();
+        fs::write(game.join("launch.ini"), b"new-ini").unwrap();
+        let usb = d.join("usb");
+        let dest = usb.join("Games/My Halo");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("launch.ini"), b"keep-me").unwrap();
+        let e = copy_to_usb(&game, &usb, &mut |_, _| {}, &|| false).unwrap_err();
+        assert!(e.contains("different content"), "{e}");
+        assert_eq!(fs::read(dest.join("launch.ini")).unwrap(), b"keep-me");
+        assert!(!dest.join("default.xex").exists(), "nothing is copied when a file would be replaced");
+        fs::remove_dir_all(&d).unwrap();
+    }
     #[test]
     fn copy_to_usb_never_overwrites_and_skips_identical() {
         let d = tmp("usb");

@@ -606,6 +606,23 @@ fn god_discs_merge_into_one_folder_in_any_order() {
     }
 }
 
+/// The manual flow (iso_to_god into a picked folder) puts both discs under one TitleID folder and
+/// says so on the second one.
+#[test]
+fn manual_convert_reports_a_second_disc_as_merged() {
+    let d = tmp("god-manual-merge");
+    let ext = d.join("isos");
+    fs::create_dir_all(&ext).unwrap();
+    let out = d.join("out");
+    let isos = [disc(&ext, "Halo (Disc 1).iso", 0xAA01, 1), disc(&ext, "Halo (Disc 2).iso", 0xAA02, 2)];
+    let a = convert(&isos[0], &out, None, &Jobs::default(), "m1", &mut |_, _| {}).unwrap();
+    let b = convert(&isos[1], &out, None, &Jobs::default(), "m2", &mut |_, _| {}).unwrap();
+    assert!(!a.merged && b.merged, "first {} second {}", a.merged, b.merged);
+    assert_eq!(a.output, b.output);
+    let again = convert(&isos[1], &out, None, &Jobs::default(), "m3", &mut |_, _| {}).unwrap();
+    assert!(again.merged, "disc 1 is still there");
+}
+
 /// Converting the very same disc again is a re-run, not a merge: it gets its own folder, and an
 /// unrelated single-disc game is never merged.
 #[test]
@@ -670,4 +687,28 @@ fn install_rolls_back_when_the_header_swap_fails() {
     assert_eq!(fs::read_to_string(fin.data_dir_path().join("Data0000")).unwrap(), "new");
     assert_eq!(fs::read_to_string(fin.con_header_file_path()).unwrap(), "new");
     assert_eq!(names_in(fin.con_header_file_path().parent().unwrap()).len(), 2);
+}
+
+/// The full Xbox 360 and original Xbox TitleID lists are merged into the built-in game list: every
+/// TitleID in the two CSVs resolves to a name, so no listed disc looks "unknown".
+#[test]
+fn every_csv_title_id_resolves_to_a_name() {
+    let mut seen = 0usize;
+    for csv in [include_str!("../../vendor/iso2god/src/game_list/gamelist_xbox360.csv"), include_str!("../../vendor/iso2god/src/game_list/gamelist_xbox.csv")] {
+        let mut rows = csv.lines();
+        let header: Vec<&str> = rows.next().unwrap().trim_start_matches('\u{feff}').split('\t').collect();
+        let (i_id, i_name) = (header.iter().position(|h| *h == "title_id").unwrap(), header.iter().position(|h| *h == "title_name").unwrap());
+        for row in rows.filter(|r| !r.trim().is_empty()) {
+            let cols: Vec<&str> = row.split('\t').collect();
+            let (Some(id), Some(name)) = (cols.get(i_id), cols.get(i_name)) else { continue };
+            let (id, name) = (id.trim(), name.trim());
+            let Ok(tid) = u32::from_str_radix(id, 16) else { continue };
+            if id.len() != 8 || name.is_empty() {
+                continue;
+            }
+            assert!(iso2god::game_list::find_title_by_id(tid).is_some_and(|n| !n.trim().is_empty()), "TitleID {id} ({name}) is missing from the game list");
+            seen += 1;
+        }
+    }
+    assert!(seen > 5000, "only {seen} CSV rows were checked");
 }

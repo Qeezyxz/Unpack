@@ -199,19 +199,6 @@ pub fn storage_full_message(name: &str) -> String {
     format!("The Xbox drive is full, so {name} was not finished. Free some space on the console and send again; the partial .part file is kept.")
 }
 
-/// Uploads that move less than this between two tries made no real progress.
-pub const STALL_BYTES: u64 = 256 * 1024;
-
-pub fn stalled(sent: u64) -> bool {
-    sent < STALL_BYTES
-}
-
-pub fn stalled_message(name: &str, tries: u32) -> String {
-    format!(
-        "The Xbox stopped taking {name} (no progress after {tries} tries). Its drive may be full, or the Wi-Fi keeps dropping. Free some space or move closer to the router, then send again; the partial .part file is kept."
-    )
-}
-
 impl Ftp {
     /// Connect, retrying a few times on "421 too many connections": Xbox servers allow one
     /// connection and free the previous one a moment after it closes.

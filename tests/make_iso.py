@@ -1,5 +1,5 @@
 import struct, sys
-def make(path, title_id, pad):
+def make(path, title_id, pad, media=0x12345678, disc=1, discs=1):
     S=0x800
     with open(path,'wb') as f:
         f.seek(32*S); f.write(b"MICROSOFT*XBOX*MEDIA"+struct.pack('<II',33,S)+b'\0'*8)
@@ -14,7 +14,8 @@ def make(path, title_id, pad):
         d+=b'\xff'*4
         f.seek(33*S); f.write(d)
         x=b'XEX2'+struct.pack('>IIIII',0,0x1000,0,0,1)+struct.pack('>II',0x00040006,0x100)
-        x=x.ljust(0x100,b'\0')+struct.pack('>IIII',0x12345678,1,0,title_id)+bytes([0,0,1,1])
+        x=x.ljust(0x100,b'\0')+struct.pack('>IIII',media,1,0,title_id)+bytes([0,0,disc,discs])
         f.seek(34*S); f.write(x.ljust(0x200,b'\0'))
         if pad: f.seek(40*S+pad-4); f.write(b'END!')
-make(sys.argv[1], int(sys.argv[2],16), int(sys.argv[3]))
+a=sys.argv
+make(a[1], int(a[2],16), int(a[3]), int(a[4],16) if len(a)>4 else 0x12345678, int(a[5]) if len(a)>5 else 1, int(a[6]) if len(a)>6 else 1)
