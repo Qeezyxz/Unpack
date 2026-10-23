@@ -1,24 +1,41 @@
 # Unpack: desktop edition
 
+**Version 1.6.0.** Use at your own risk: back up `launch.ini` and anything you convert or copy. See [DISCLAIMER.txt](DISCLAIMER.txt). Licensed under the [Unpack Non-Commercial License](LICENSE); third-party notices are in [THIRD-PARTY.md](THIRD-PARTY.md).
+
+This repository is the **complete source code** (Tauri 2: Rust backend, plain HTML/JS page). It is public: you can read it, change it and build it yourself. `HANDOFF.md` describes the architecture, the security model, the build and the tests; `PORT-NOTES.md` explains how the 1.6.0 additions were merged into the reviewed code base.
+
 Unpack opens and extracts **ZIP, RAR, 7Z** (plus TAR, GZ, BZ2, XZ and more), makes **ZIP and 7Z** archives, and converts **Xbox 360 ISOs to Games on Demand**. It looks the same as your web page, but now it's a real Windows program. It works offline, handles huge archives, and adds right-click menu entries in Explorer.
 
 ## Install
 
 **Option A (recommended): the installer**
-1. Run `dist/Unpack_1.0.0_x64-setup.exe`.
+1. Run `Unpack_1.6.0_x64-setup.exe` (from `dist/` after you build it, or from a release you trust).
 2. Windows may show "Windows protected your PC" because the file isn't signed. Click **More info**, then **Run anyway**.
 3. The installer doesn't need admin rights. It installs only for your user account.
 
 **Option B: portable (no install)**
-Unzip `dist/Unpack-portable.zip` anywhere and run `Unpack.exe`. Keep `7za.exe` and `WebView2Loader.dll` in the same folder. The portable copy has **no** right-click menu entries (those come from the installer).
+Unzip `Unpack-portable.zip` anywhere and run `Unpack.exe`. Keep `7za.exe` and `WebView2Loader.dll` in the same folder. The portable copy has **no** right-click menu entries (those come from the installer).
 
 Unpack needs Microsoft's WebView2 runtime. Windows 10 and 11 already have it.
+
+### VirusTotal and false positives
+
+Unsigned NSIS / Tauri builds are often flagged only by Trapmine (`Malicious.high.ml.score`). That is a common machine-learning false positive. Reports for the older 1.3.0 build: [installer](https://www.virustotal.com/gui/file/06d10c80350857f733c4a1bf864e799c68f0d5e4d6423410dc4264934fd0f2f8), [portable](https://www.virustotal.com/gui/file/1d6a4c0551bef9fc413fce2a773cd2a4752ee7ba86f754fa57af420691571b84). Check the file you downloaded against a release you trust, or build it yourself from this source.
+
+### Known bugs and notes
+
+- **Send to Xbox / `launch.ini` (fixed in 1.1.0, hardened since):** older builds could delete `launch.ini` if a transfer was interrupted. Unpack now uploads to a `.part` file, renames it only after the size is checked, and never overwrites a file that is already on the console (a different file at the same place stops the send before anything is written; the DashLaunch catalog install writes a timestamped backup first). USB copy and ISO convert follow the same "finish first, then swap" rule. Keep a backup of your `launch.ini` anyway.
+- A full Xbox drive and a dropped Wi-Fi connection are different messages. Both keep the `.part` file so the next send resumes.
+- The bundled 7-Zip is a Windows build; on Linux the tests use the system 7-Zip (23.01 or newer).
 
 ## Features
 
 - Open and extract ZIP, RAR, 7Z, TAR, GZ, BZ2, XZ and more. Create ZIP and 7Z, with optional passwords.
-- Batch queue: drop many archives at once. Each one shows its own progress bar and Cancel button, and you can extract them all into one chosen folder.
-- **Xbox 360 ISO → GOD**, by hand or automatically for ISOs found inside extracted archives. You can optionally delete the extracted ISO after a fully verified convert.
+- Batch queue: drop many archives at once. Each one shows its own progress bar and Cancel button, and you can extract them all into one chosen folder. **Jobs at once** (Settings → Extraction, 1–4, default 2); jobs that write the same folder always take turns.
+- **Open zips inside zips** (Settings → Extraction, on by default): archives found inside an extracted archive are opened too (a few levels, with size limits). The result line says how many were opened and how many were left closed.
+- **Xbox 360 ISO → GOD**, by hand or automatically for ISOs found inside extracted archives. You can optionally delete the extracted ISO after a fully verified convert. **Multi-disc games:** Disc 1 and Disc 2 go into one playable folder in either order (the lowest disc keeps the `default.xex` that launches); Unpack offers other discs it finds next to an ISO. A TitleID that is not in the list still converts, with a warning that shows the hex ID; a lone Disc 2 with no `default.xex` gets a plain message.
+- **Discord Rich Presence** (Settings → Discord, on by default, can be turned off): shows which screen you are on and how many jobs run, never file names or folders. It only talks to the Discord app on your PC over its local pipe (Discord application ID `1562281261504929922`).
+- **Clear errors:** a red **Error** banner with **Copy** and **Dismiss** stays above every dialog until you dismiss it or the next job starts. A failed write to a FAT32 drive explains the 4 GB limit.
 - **DLC and title updates:** Xbox 360 packages (CON/LIVE/PIRS) found in extracted archives, or picked with **Install DLC**, go straight into their game. DLC lands in `<TitleID>/00000002` and title updates in `<TitleID>/000B0000`. Nothing is ever overwritten.
 - **Library:** your games as tiles, with each game's name read from its own files (offline). Each tile shows the TitleID, size, and DLC/TU counts.
 - **Copy to USB:** copies a game with its DLC and title updates to `<USB>\Content\0000000000000000`. It checks free space first and never overwrites.
@@ -29,6 +46,7 @@ Unpack needs Microsoft's WebView2 runtime. Windows 10 and 11 already have it.
 - **Mod Menus:** a browser for mod files *you already have* (.xex plugins, CON/LIVE/PIRS packages, folders). A searchable grid with game tiles, filters by game and type, a details panel with notes, and **Copy to USB** (into `\Plugins`, the game's `Content` folder, or as is), with a free-space check and no overwrite. The game comes from the file's header TitleID when it has one; otherwise Unpack guesses from the file, folder and archive names using its offline game list (e.g. `BO2_Menu.xex` → Call of Duty: Black Ops II), shows how sure it is, and asks you only when it isn't sure. Your choices are remembered. For offline / modded-console use: Unpack ships no mods, links or catalog, only goes online for a download, catalog or console you set up yourself, and never touches Xbox Live.
 - **Send to Xbox** (Ctrl+Shift+X): send games, DLC, title updates and mods from your PC to a modded Xbox 360 over WiFi or LAN, using the FTP server in Aurora, XeXMenu or DashLaunch (default login `xboxftp` / `xboxftp`, port 21). Enter the console's IP, **Connect / Test** to see all its drives (Hdd1, Usb0, Usb1, UsbMu0…) and pick which one to send to (Hdd1 by default, else the first USB; your choice is remembered per console), browse folders, and save consoles for next time. One-click destinations use the same layout as Copy to USB: GOD games → `Hdd1\Content\0000000000000000\<TitleID>` (with their DLC and TUs), DLC → `…\<TitleID>\00000002`, title updates → `…\<TitleID>\000B0000`, extracted XEX games → `Hdd1\Games\<name>`, plugins → `Plugins`, or any folder you browse to. Picked files are detected automatically (package headers / default.xex). **Send to Xbox** buttons are also on every Library game and Mod Menus item. Live MB/s and ETA, Cancel and **Resume** (uploads go to a `.part` file and continue where they stopped, only if Unpack's own record on your PC shows the file is unchanged and the `.part` is exactly the size it stopped at; otherwise it starts over), remote size checked after each file, existing files never overwritten (same size = skipped, different = stops before sending; if the console's folder listing fails, nothing is sent). Every queue item has an editable **To** folder, pre-filled with the standard place for its type; use **Browse…** to pick it in the console browser, **Reset to default** to go back, the **Last:** chip for your last custom folder of that type, or **Send all to this folder** to point the whole queue at the folder you're viewing. Custom paths must start with a drive (like `/Hdd1`) and follow the Xbox name rules (42 characters, no `" * + , / : ; < = > ? \ |`). Optional **2 at once** uses a second connection when the console allows it and falls back to one otherwise. Only local network addresses (10.x, 172.16–31.x, 192.168.x, 169.254.x) are accepted, and links/junctions on the PC are never followed.
 - **Mod catalog** (Mod Menus → Catalog): browse and install mods from a catalog someone else runs. Unpack ships **no** catalog and no entries. You enter the catalog's address (or pick a `catalog.json` file) and the owner's **public key**. Unpack only loads a catalog whose Ed25519 signature matches that key, and refuses an older catalog than one it already loaded. Pick where to install: a USB drive / folder on this PC, or the console (uses your saved Send to Xbox console and lists every drive it has, e.g. Hdd1, Usb0, Usb1; you pick which one). **Check** runs the safety checks without writing anything: free space, the FAT32 4 GB limit, required and conflicting mods, and whether the game's installed title update (TU) is one the mod supports. **Install** downloads (with mirrors and retries, at most 2 files at once), checks every file's SHA-256, unpacks archives into a staging folder (links and paths that leave the folder are refused), then copies into place; nothing existing is overwritten. Plugins can be added to DashLaunch's `launch.ini`: Unpack writes a timestamped backup first, swaps the new file in without ever removing the old one first (and puts the original back if anything fails, reconnecting if the WiFi dropped; if even that fails, the next time Unpack connects it restores your previous launch.ini automatically), never touches `plugin1`, uses the lowest free slot of `plugin2`–`plugin5`, and asks before replacing a slot that's in use. Installed mods show **Installed** / **Update available** badges; **Uninstall** removes only files that are unchanged since install and not used by another installed mod, and puts the `launch.ini` line back. Archives that would unpack to far more than their size (over 4× / 20 GB) are refused. Paid mods (and ones that can't be redistributed) only get an **Open source page** button. Game aliases and mod names from the catalog also help detect your own files.
+- The built-in game list has **5,908 TitleIDs** (Xbox 360 and original Xbox): the iso2god-rs list plus the TitleID CSVs, merged by `src-tauri/vendor/iso2god/src/game_list/merge_gamelists.py`.
 - Light, dark and System themes. First-run tips, keyboard shortcuts (press `?`), and tooltips on every button.
 - Everything stays on your PC: no network (except the downloads and Send to Xbox you start), no admin rights, per-user only.
 
@@ -81,7 +99,7 @@ Handlers: `xex` (Games/ or Apps/), `plugin` (Plugins/), `tu` and `dlc` (the game
 - **Extract to…** always asks for a folder. **Extract here** puts the files right beside the archive, with no extra folder.
 - **If it already exists:** *Add a number* (`Game-2`), *Replace files*, or *Skip archive*.
 - **Passwords:** Unpack asks when it needs one, and asks again if the password is wrong.
-- **Queue:** each archive gets a row with its own progress bar and Cancel button. Two archives extract at a time and the rest wait. **Recent** lists past jobs, and **Show** opens the result in Explorer.
+- **Queue:** each archive gets a row with its own progress bar and Cancel button. By default two archives extract at a time and the rest wait (Settings → Jobs at once). **Recent** lists past jobs, and **Show** opens the result in Explorer.
 - **Preview:** click a text or image file in the list to see it, or use **Save file** to save just that one file.
 - **Create archive:** click the button at the top, or drop files or folders that aren't archives. Pick ZIP (opens anywhere) or 7Z (smaller), choose a compression level, and optionally set a password. With 7Z, the password also hides the file names. Passwords can't contain `"` on Windows (a 7-Zip limitation).
 - **ISO → GOD:** click the button, or drop `.iso` files. Unpack reads each game's name (you can edit it), you pick an output folder, and it converts the ISOs one by one with progress and Cancel. Copy the `TitleID` folder it makes (for example `4D5307E6`) to `Content/0000000000000000/` on your console's drive. Only convert games you own.
@@ -98,7 +116,7 @@ Handlers: `xex` (Games/ or Apps/), `plugin` (Plugins/), `tu` and `dlc` (the game
 - **Library** (Ctrl+L): every game in your library folders, with DLC/TU counts. **Copy to USB…** asks for the drive's top folder.
 - **Send to Xbox:** on the console, turn on FTP (Aurora: Settings → Network; XeXMenu and DashLaunch run it automatically) and note the IP on screen. Most consoles' FTP allows only one connection, so close other FTP apps (FileZilla etc.) while sending.
 - **Shortcuts:** Ctrl+O open · Ctrl+, settings · Ctrl+L library · Ctrl+D install DLC · Ctrl+G ISO → GOD · Ctrl+Shift+X send to Xbox · Ctrl+N create archive · ? shortcuts · Esc close.
-- **Settings** (gear icon): theme (System / Light / Dark), Auto-convert ISOs to GOD, delete-after-convert, Extract as soon as they open, Skip junk files.
+- **Settings** (gear icon): theme (System / Light / Dark), Auto-convert ISOs to GOD, delete-after-convert, DLC options, game library folders, max download size, Open zips inside zips, Jobs at once, Discord Rich Presence, Extract as soon as they open, Skip junk files.
 
 ## The right-click menu
 
@@ -115,15 +133,34 @@ Command line: `Unpack.exe file.zip`, `Unpack.exe --extract-here file.zip`, `Unpa
 
 - **On Windows:** install Rust (rustup.rs) and Node.js, then double-click `build.bat`.
 - **On Linux** (how these files were made): `npx tauri build --target x86_64-pc-windows-gnu` with MinGW and NSIS installed.
-- **Tests:** `cd src-tauri && cargo test --lib` (needs the test archives in `/workspace/testdata`; see REVIEW.md). `tests/e2e.mjs` drives the real page in headless Chrome through `cargo run --example bridge`.
+- **Tests:** CI (`.github/workflows/test.yml`) runs all of this on every push.
+  - `npm test` (theme logic) and `python3 tests/gamelists.py` (TitleID lists and merge script).
+  - `python3 tests/make_testdata.py /workspace/testdata` builds the small archive fixtures (needs 7-Zip), then `cd src-tauri && cargo test --lib`.
+  - The UI suites in `tests/` (`e2e`, `autogod`, `dlc`, `download`, `mods`, `builtin`, `catalog`, `xbox`, `v160`) drive the real page in headless Chrome through `examples/bridge.rs`; see `HANDOFF.md` ("Tests") for the exact steps.
+- **Release build in CI:** `.github/workflows/release.yml` is manual-only. It builds the installer and the portable zip and keeps them as workflow artifacts; it never creates a tag or a GitHub Release.
 
 ## Credits and licenses (see `licenses/`)
 
 - 7-Zip `7za.exe` © Igor Pavlov, GNU LGPL (+ BSD-3 parts). Source: 7-zip.org
-- iso2god-rs © Ilia Pozdnyakov, MIT. Its built-in list of ~4,900 Xbox 360 TitleIDs and names (`src-tauri/vendor/iso2god/src/game_list`, generated from a public titles list by the iso2god-rs project, shipped under the same MIT license) is the offline game reference. The short alias table in `src-tauri/src/gamedb.rs` (official names + nicknames like BO2, MW2, GTA V) was written for Unpack and only uses TitleIDs that are in that list. No lookups happen online.
+- iso2god-rs © Ilia Pozdnyakov, MIT. Its built-in list of Xbox 360 TitleIDs (extended to 5,908 with the CSV lists) and names (`src-tauri/vendor/iso2god/src/game_list`, generated from a public titles list by the iso2god-rs project, shipped under the same MIT license) is the offline game reference. The short alias table in `src-tauri/src/gamedb.rs` (official names + nicknames like BO2, MW2, GTA V) was written for Unpack and only uses TitleIDs that are in that list. No lookups happen online.
 - Built-in fallback engines in `src/vendor/`: fflate (MIT), 7z-wasm (LGPL, includes unRAR license), node-unrar-js (MIT). Fonts: Fraunces and Outfit (SIL OFL)
 - Built with Tauri 2.
 
 ## Uninstalling
-- Installed version: Settings > Apps > Installed apps > Unpack > Uninstall. Tick "Delete the application data" to also remove settings/history (%LOCALAPPDATA%\com.justin.unpack); leave it unticked to keep them.
+- Installed version: Settings > Apps > Installed apps > Unpack > Uninstall. Tick "Delete the application data" to also remove settings/history (%LOCALAPPDATA%\com.qeezyxz.unpack; builds before 1.6.0 used com.justin.unpack, which Unpack-Cleanup also finds); leave it unticked to keep them.
 - Portable version or leftovers: run Unpack-Cleanup.exe. It lists exactly what it will remove (only Unpack's own HKCU keys, its AppData folder and its temp files) and asks first. No admin needed.
+
+## Status
+
+- **1.6.0**: the later additions below, merged into the reviewed code base (details in `PORT-NOTES.md`).
+- **1.5.0**: red error banner, full-Xbox-drive and lone Disc 2 messages, same-folder jobs wait their turn (the "unknown TitleID stops the convert" rule became a warning in 1.6.0).
+- **1.4.0**: safer copies and Send to Xbox, nested archives, jobs-at-once setting.
+- **1.3.0**: original dark UI and Unpack mark.
+- **1.2.0**: Discord Rich Presence.
+- **1.1.1**: full TitleID lists and Disc 1 / Disc 2 merge.
+
+Per-release notes are in `.github/release-notes-*.md`.
+
+## License
+
+You may copy, modify and share the source under [LICENSE](LICENSE) (hobbyist / non-commercial: don't sell Unpack). See [DISCLAIMER.txt](DISCLAIMER.txt) and [THIRD-PARTY.md](THIRD-PARTY.md).
