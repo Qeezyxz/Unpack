@@ -3,7 +3,7 @@ Unpack **1.1.0** is the first source-complete release in this repository. It is 
 ## Downloads
 
 - `Unpack_1.1.0_x64-setup.exe` — per-user installer. It does not need administrator rights. Windows SmartScreen may warn because the file is unsigned: choose **More info**, then **Run anyway**.
-- `Unpack-portable.zip` — unzip anywhere and run `Unpack.exe`. The zip includes `WebView2Loader.dll` and the standalone `7za.exe` from the official 7-Zip extra package (LGPL).
+- `Unpack-portable.zip` — unzip anywhere and run `Unpack.exe`. The zip includes `WebView2Loader.dll` and `7za.exe` from the official 7-Zip 26.05 extra package (LGPL).
 
 WebView2 is already part of Windows 10 and 11.
 

@@ -57,8 +57,9 @@ jobs:
 
           $fetch = Join-Path (Get-Location) "7zip-fetch"
           New-Item -ItemType Directory -Force -Path $fetch | Out-Null
-          Invoke-WebRequest -Uri "https://www.7-zip.org/a/7zr.exe" -OutFile (Join-Path $fetch "7zr.exe")
-          Invoke-WebRequest -Uri "https://www.7-zip.org/a/7z2409-extra.7z" -OutFile (Join-Path $fetch "extra.7z")
+          $sevenZip = "https://github.com/ip7z/7zip/releases/download/26.05"
+          curl.exe -fsSL -L -o (Join-Path $fetch "7zr.exe") "$sevenZip/7zr.exe"
+          curl.exe -fsSL -L -o (Join-Path $fetch "extra.7z") "$sevenZip/7z2605-extra.7z"
           & (Join-Path $fetch "7zr.exe") x (Join-Path $fetch "extra.7z") "-o$fetch\out" -y
           Copy-Item (Join-Path $fetch "out\7za.exe") (Join-Path $portable "7za.exe") -Force
           $license = Join-Path $fetch "out\license.txt"
