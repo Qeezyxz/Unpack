@@ -245,6 +245,9 @@ async function handlePaths(paths) {
   const tasks = [];
   if (archives.length) {
     setList("recent-files", archives.slice());
+    if (!$("extract-auto").checked) {
+      log(`Added ${archives.length} file(s) but nothing was extracted. Turn on "Extract as soon as they open" to extract on drop.`);
+    }
     if ($("extract-auto").checked) {
       if (!dest) {
         showError("Choose a destination folder first.");
@@ -267,6 +270,9 @@ async function handlePaths(paths) {
         if (found.length) await convertIsos(found, dest);
       })());
     }
+  }
+  if (isos.length && $("auto-iso").value === "off") {
+    log("Auto ISO is Off, so the disc image was left alone. Pick GOD or XEX to convert it.");
   }
   if (isos.length && $("auto-iso").value !== "off") {
     if (!dest) {
