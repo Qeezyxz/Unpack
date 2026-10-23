@@ -16,6 +16,7 @@ const views = {
 
 const state = {
   extractFiles: [],
+  convertFiles: [],
   packFiles: [],
   usbFiles: [],
   xboxFiles: [],
@@ -166,7 +167,9 @@ function ingestDrop(view, paths) {
     state.extractFiles.push(...paths);
     setList("extract-files", state.extractFiles);
   } else if (view === "convert") {
-    $("iso-path").value = paths[0] || "";
+    state.convertFiles.push(...paths);
+    setList("iso-files", state.convertFiles);
+    $("iso-path").value = state.convertFiles[0] || paths[0] || "";
   } else if (view === "usb") {
     state.usbFiles.push(...paths);
     setList("usb-sources", state.usbFiles);
@@ -247,35 +250,61 @@ function bindExtract() {
 function bindConvert() {
   $("pick-iso").onclick = async () => {
     const files = await pickMany("Xbox ISO", ["iso", "ISO", "000"]);
-    if (files[0]) $("iso-path").value = files[0];
+    if (files.length) {
+      state.convertFiles.push(...files);
+      setList("iso-files", state.convertFiles);
+      $("iso-path").value = state.convertFiles[0];
+    }
   };
   $("pick-iso-dest").onclick = async () => {
     const d = await pickDir("Output folder");
     if (d) $("iso-dest").value = d;
   };
   $("inspect-iso").onclick = async () => {
+    const paths = convertPaths();
+    if (!paths.length) {
+      log("Choose an ISO first.");
+      return;
+    }
     try {
-      const info = await invoke("inspect_iso", { path: $("iso-path").value });
-      $("iso-info").textContent = JSON.stringify(info, null, 2);
-      log(`ISO ${info.title_id} ${info.name}`);
+      const infos = [];
+      for (const path of paths) {
+        infos.push(await invoke("inspect_iso", { path }));
+      }
+      $("iso-info").textContent = JSON.stringify(infos, null, 2);
+      infos.forEach((info) => log(`ISO disc ${info.disc_number}/${info.disc_count} ${info.title_id} ${info.name}`));
     } catch (e) {
       $("iso-info").textContent = String(e);
       log(String(e));
     }
   };
   $("run-convert").onclick = () => job("Converting ISO…", async () => {
+    const paths = convertPaths();
+    if (!paths.length) throw new Error("Choose Disc 1 (and Disc 2 if you have it).");
     const mode = document.querySelector("input[name=iso-mode]:checked").value;
-    const report = await invoke("convert_iso", {
-      path: $("iso-path").value,
+    const reports = await invoke("convert_iso", {
+      paths,
       dest: $("iso-dest").value,
       mode,
       trim: $("iso-trim").checked,
       verify: $("iso-verify").checked,
+      autoCompanions: $("iso-companions").checked,
     });
-    $("iso-info").textContent = JSON.stringify(report, null, 2);
-    log(`Converted ${report.info.name} → ${report.output}`);
-    await invoke("notify", { title: "Unpack", body: `Converted ${report.info.name}` });
+    const list = Array.isArray(reports) ? reports : [reports];
+    $("iso-info").textContent = JSON.stringify(list, null, 2);
+    for (const report of list) {
+      const discs = report.merged ? ` (${report.discs?.length || 0} discs merged)` : "";
+      log(`Converted ${report.info.name}${discs} → ${report.output}`);
+      await invoke("notify", { title: "Unpack", body: `Converted ${report.info.name}${discs}` });
+    }
   });
+}
+
+function convertPaths() {
+  const listed = state.convertFiles.filter(Boolean);
+  if (listed.length) return listed;
+  const one = $("iso-path").value.trim();
+  return one ? [one] : [];
 }
 
 function bindLibrary() {

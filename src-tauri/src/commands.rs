@@ -157,23 +157,34 @@ pub async fn inspect_iso(path: String) -> Result<convert::IsoInfo, String> {
 #[tauri::command]
 pub async fn convert_iso(
     app: AppHandle,
-    path: String,
+    path: Option<String>,
+    paths: Option<Vec<String>>,
     dest: String,
     mode: String,
     trim: bool,
     verify: bool,
-) -> Result<convert::ConvertReport, String> {
-    if path.trim().is_empty() || dest.trim().is_empty() {
+    auto_companions: Option<bool>,
+) -> Result<Vec<convert::ConvertReport>, String> {
+    let mut sources: Vec<String> = paths.unwrap_or_default();
+    if let Some(path) = path {
+        if !path.trim().is_empty() && !sources.iter().any(|p| p == &path) {
+            sources.insert(0, path);
+        }
+    }
+    sources.retain(|p| !p.trim().is_empty());
+    if sources.is_empty() || dest.trim().is_empty() {
         return Err("choose an ISO and an output folder".into());
     }
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        convert::convert_iso(
-            &PathBuf::from(path),
+        let bufs: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+        convert::convert_isos(
+            &bufs,
             &PathBuf::from(dest),
             &mode,
             trim,
             verify,
+            auto_companions.unwrap_or(true),
             move |message, current, total| progress::emit(&app2, "convert", message, current, total),
         )
     })

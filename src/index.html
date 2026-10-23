@@ -70,10 +70,12 @@
         </section>
 
         <section class="view hidden" id="view-convert">
-          <div class="drop" data-drop="iso-path">Drop an Xbox 360 ISO here</div>
+          <p class="note">Multi-disc: add Disc 1 and Disc 2 (or one of them — Unpack looks next to it). Extracted XEX merges into <strong>one playable folder</strong>, keeping disc 1’s <code>default.xex</code>. GOD keeps both discs under the same TitleID so Aurora can swap discs.</p>
+          <div class="drop" data-drop="iso-path">Drop Xbox 360 ISOs here (Disc 1 and Disc 2)</div>
+          <ul class="file-list" id="iso-files"></ul>
           <div class="row">
             <label class="grow">ISO
-              <input id="iso-path" placeholder="Game.iso" />
+              <input id="iso-path" placeholder="Game (Disc 1).iso" />
             </label>
             <button class="ghost" id="pick-iso">Browse</button>
             <button id="inspect-iso">Inspect</button>
@@ -88,13 +90,14 @@
             <label class="check"><input type="radio" name="iso-mode" value="xex" /> Extracted XEX folder</label>
             <label class="check"><input type="checkbox" id="iso-trim" checked /> Trim unused ISO space</label>
             <label class="check"><input type="checkbox" id="iso-verify" checked /> Verify before finishing</label>
+            <label class="check"><input type="checkbox" id="iso-companions" checked /> Find Disc 2 in the same folder</label>
             <button class="primary" id="run-convert">Convert</button>
           </div>
         </section>
 
         <section class="view hidden" id="view-library">
           <div class="row">
-            <label class="grow">Search ~4,900 TitleIDs
+            <label class="grow">Search TitleIDs
               <input id="title-search" placeholder="Halo 3 or 4D5307E6" />
             </label>
             <label class="grow">Library folder
