@@ -74,28 +74,66 @@ fn staging_of(new: &Path) -> PathBuf {
     PathBuf::from(n)
 }
 
+/// Sibling of the new folder, present while a migration has been started but not finished
+/// (R17 M1). While it exists, whatever the WebView wrote into the new folder after a failed run is
+/// not treated as the user's data: it is moved aside to `<new>.pre-migration` and the migration
+/// is retried. Removed only after a fully successful run.
+fn retry_marker(new: &Path) -> PathBuf { sibling(new, ".migration-incomplete") }
+fn backup_of(new: &Path) -> PathBuf { sibling(new, ".pre-migration") }
+fn sibling(new: &Path, suffix: &str) -> PathBuf {
+    let mut n = new.as_os_str().to_owned();
+    n.push(suffix);
+    PathBuf::from(n)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: pretend Downloads is on another drive (rename fails), forcing the copy path.
+    pub static FORCE_COPY_DOWNLOADS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Unpack's own files (written by Unpack itself, not the WebView's caches).
+const OWN: [&str; 4] = ["catalog", "grants.json", "ftp-resume", MOVED];
+
+/// True when `new` holds data the user made under the new identifier: Unpack's own files, or a
+/// WebView localStorage that contains Unpack keys. WebView caches alone don't count (R17 M1).
+fn has_own_data(new: &Path) -> bool {
+    if OWN.iter().any(|n| fs::symlink_metadata(new.join(n)).is_ok()) { return true; }
+    let Ok(profiles) = fs::read_dir(new.join("EBWebView")) else { return false };
+    for p in profiles.flatten() {
+        let Ok(files) = fs::read_dir(p.path().join("Local Storage/leveldb")) else { continue };
+        for f in files.flatten() {
+            if fs::read(f.path()).is_ok_and(|b| b.windows(7).any(|w| w == b"unpack.")) { return true; }
+        }
+    }
+    false
+}
+
 /// Copy `old` into `new` when `old` exists and `new` has not been migrated yet and holds no data
 /// of its own. Returns true when it migrated.
 ///
 /// Crash-safe (R16 L1): everything is copied into `<new>.migrating`, every file is checked by size,
 /// and only then is the folder renamed to `<new>` in one step. A run that is killed leaves only the
 /// `.migrating` folder, which the next start throws away and redoes. `Downloads` is moved, not
-/// copied. Any file that can't be copied fails the whole run (nothing is marked, the next start
-/// retries); free space is checked before copying.
+/// copied. Any file that can't be copied fails the run; free space is checked before copying.
+/// A failed or refused run leaves `<new>.migration-incomplete`, so the next start retries even
+/// though the WebView has written into the new folder meanwhile (R17 M1).
 pub fn migrate_dir(old: &Path, new: &Path) -> std::io::Result<bool> {
     let Ok(m) = fs::symlink_metadata(old) else { return Ok(false) };
     if !m.is_dir() { return Ok(false); }
     if new.join(MARKER).exists() { return Ok(false); }
     if new.join(PENDING).exists() {
-        // Killed after the rename: only the Downloads move and the marker are left.
+        // Killed after the rename: only the Downloads move, the merge-back and the marker are left.
         return finish(old, new).map(|_| true);
     }
-    let new_has_data = fs::read_dir(new).map(|mut r| r.next().is_some()).unwrap_or(false);
-    if new_has_data {
+    let retry = retry_marker(new).exists();
+    if !retry && has_own_data(new) {
         // The new identifier already has its own data: never mix the two. Mark it so we don't re-check.
         let _ = fs::write(new.join(MARKER), b"skipped: new folder already had data\n");
         return Ok(false);
     }
+    if let Some(p) = new.parent() { fs::create_dir_all(p)?; }
+    fs::write(retry_marker(new), format!("migration from {} not finished yet\n", old.display()))?;
     let stage = staging_of(new);
     if stage.exists() { fs::remove_dir_all(&stage)?; } // an interrupted earlier run
     let (files, bytes) = measure(old, true)?;
@@ -109,7 +147,7 @@ pub fn migrate_dir(old: &Path, new: &Path) -> std::io::Result<bool> {
     let mut count = 0usize;
     if let Err(e) = copy_tree(old, &stage, true, &mut count) {
         let _ = fs::remove_dir_all(&stage);
-        return Err(e);
+        return Err(std::io::Error::other(format!("{e}; will retry next start")));
     }
     // Verify: same files, same sizes.
     if measure(&stage, true)? != (files, bytes) {
@@ -117,24 +155,70 @@ pub fn migrate_dir(old: &Path, new: &Path) -> std::io::Result<bool> {
         return Err(std::io::Error::other("copy did not match the old folder; will retry next start"));
     }
     fs::write(stage.join(PENDING), b"")?;
-    if new.exists() { fs::remove_dir(new)?; } // empty (checked above)
+    if new.exists() {
+        // Whatever is there was written after an earlier failed run (or is empty): keep it aside.
+        let bak = backup_of(new);
+        if bak.exists() { fs::remove_dir_all(&bak)?; }
+        fs::rename(new, &bak)?;
+    }
     fs::rename(&stage, new)?;
     finish(old, new)?;
     Ok(true)
 }
 
 fn finish(old: &Path, new: &Path) -> std::io::Result<()> {
-    let (from, to) = (old.join(MOVED), new.join(MOVED));
-    if fs::symlink_metadata(&from).is_ok_and(|m| m.is_dir()) && fs::symlink_metadata(&to).is_err() {
-        if fs::rename(&from, &to).is_err() {
-            // Different drive (shouldn't happen for siblings): copy, then remove the old one.
-            let mut n = 0;
-            copy_tree(&from, &to, false, &mut n)?;
-            let _ = fs::remove_dir_all(&from);
+    // Unpack's own files written after a failed run (installs journaled, grants) are newer than
+    // the old folder's: put them back over the migrated copy. WebView data stays the old profile.
+    let bak = backup_of(new);
+    for n in OWN.iter().filter(|n| **n != MOVED) {
+        let from = bak.join(n);
+        match fs::symlink_metadata(&from) {
+            Ok(m) if m.is_dir() => overlay(&from, &new.join(n))?,
+            Ok(m) if m.is_file() => { fs::copy(&from, new.join(n))?; }
+            _ => {}
         }
     }
+    move_downloads(&old.join(MOVED), &new.join(MOVED))?;
+    move_downloads(&bak.join(MOVED), &new.join(MOVED))?;
     fs::write(new.join(MARKER), format!("copied from {}\n", old.display()))?;
-    fs::remove_file(new.join(PENDING))
+    let _ = fs::remove_file(new.join(PENDING));
+    let _ = fs::remove_file(retry_marker(new));
+    Ok(())
+}
+
+/// Move `from` (a Downloads folder) to `to` when `to` doesn't exist. Across drives: copy into
+/// `to.migrating`, verify sizes, rename, then remove the old one (R17 L1); a leftover
+/// `.migrating` from a killed run is thrown away and redone.
+fn move_downloads(from: &Path, to: &Path) -> std::io::Result<()> {
+    let part = sibling(to, ".migrating");
+    if part.exists() { fs::remove_dir_all(&part)?; }
+    if !fs::symlink_metadata(from).is_ok_and(|m| m.is_dir()) || fs::symlink_metadata(to).is_ok() { return Ok(()); }
+    #[cfg(test)]
+    let forced = FORCE_COPY_DOWNLOADS.with(|f| f.get());
+    #[cfg(not(test))]
+    let forced = false;
+    if !forced && fs::rename(from, to).is_ok() { return Ok(()); }
+    let want = measure(from, false)?;
+    let mut n = 0;
+    copy_tree(from, &part, false, &mut n)?;
+    if measure(&part, false)? != want {
+        let _ = fs::remove_dir_all(&part);
+        return Err(std::io::Error::other("Downloads copy did not match; will retry next start"));
+    }
+    fs::rename(&part, to)?;
+    let _ = fs::remove_dir_all(from);
+    Ok(())
+}
+
+/// Copy every file of `src` over `dst` (overwriting), links skipped.
+fn overlay(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for e in fs::read_dir(src)?.flatten() {
+        let m = fs::symlink_metadata(e.path())?;
+        if crate::safecopy::is_link(&m) { continue; }
+        if m.is_dir() { overlay(&e.path(), &dst.join(e.file_name()))?; } else if m.is_file() { fs::copy(e.path(), dst.join(e.file_name()))?; }
+    }
+    Ok(())
 }
 
 /// (files, bytes) under `dir`, links skipped; `skip_moved` leaves out the top-level Downloads.
@@ -275,5 +359,85 @@ mod tests {
         fs::write(new2.join(PENDING), "").unwrap();
         assert!(migrate_dir(&old2, &new2).unwrap());
         assert!(new2.join("Downloads/x").is_file() && new2.join(MARKER).exists() && !new2.join(PENDING).exists());
+    }
+
+    fn put(root: &Path, items: &[(&str, &str)]) {
+        for (p, b) in items {
+            let f = root.join(p);
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(&f, b).unwrap();
+        }
+    }
+
+    /// R17 M1 repro: an unreadable seen.json fails the first start; the WebView then writes its
+    /// caches into the new folder; after the file is readable again the next start still migrates.
+    #[cfg(unix)]
+    #[test]
+    fn r17_m1_failed_migration_is_retried_after_webview_wrote() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = crate::testutil::TmpDir::new("migrate-r17");
+        let (old, new) = (d.join(OLD_ID), d.join(NEW_ID));
+        put(&old, &[("catalog/journal.json", "J"), ("catalog/seen.json", "S"),
+            ("EBWebView/Default/Local Storage/leveldb/000003.log", "unpack.consoles=[1]")]);
+        let seen = old.join("catalog/seen.json");
+        fs::set_permissions(&seen, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read(&seen).is_ok(); // root can read anyway: fall back to the hook
+        if readable { FAIL_NAME.with(|f| *f.borrow_mut() = Some("seen.json".into())); }
+        assert!(migrate_dir(&old, &new).is_err());
+        FAIL_NAME.with(|f| *f.borrow_mut() = None);
+        fs::set_permissions(&seen, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(retry_marker(&new).exists() && !new.join(MARKER).exists());
+        // the app started anyway: WebView caches, a fresh (empty) localStorage, and a new grant
+        put(&new, &[("EBWebView/Default/Cache/data_0", "c"), ("EBWebView/Default/Local Storage/leveldb/000001.log", ""),
+            ("hsts-storage.sqlite", "h"), ("grants.json", "[\"newer\"]")]);
+        assert!(migrate_dir(&old, &new).unwrap(), "retried");
+        assert_eq!(fs::read_to_string(new.join("catalog/journal.json")).unwrap(), "J");
+        assert_eq!(fs::read_to_string(new.join("catalog/seen.json")).unwrap(), "S");
+        assert!(fs::read_to_string(new.join("EBWebView/Default/Local Storage/leveldb/000003.log")).unwrap().contains("unpack.consoles"));
+        assert_eq!(fs::read_to_string(new.join("grants.json")).unwrap(), "[\"newer\"]", "own file written after the failure kept");
+        assert!(backup_of(&new).join("hsts-storage.sqlite").is_file(), "post-failure data kept aside, not deleted");
+        assert!(new.join(MARKER).exists() && !retry_marker(&new).exists());
+        assert!(!migrate_dir(&old, &new).unwrap(), "done: no further runs");
+    }
+
+    /// R17 M1: refused for lack of space counts as failed too; and WebView caches alone (no marker)
+    /// are not "own data".
+    #[test]
+    fn r17_m1_webview_caches_alone_are_not_own_data() {
+        let d = crate::testutil::TmpDir::new("migrate-r17b");
+        let (old, new) = (d.join(OLD_ID), d.join(NEW_ID));
+        put(&old, &[("catalog/journal.json", "J")]);
+        put(&new, &[("EBWebView/Default/Cache/data_0", "c"), ("EBWebView/Default/Local Storage/leveldb/000001.log", "x")]);
+        assert!(!has_own_data(&new));
+        assert!(migrate_dir(&old, &new).unwrap());
+        assert_eq!(fs::read_to_string(new.join("catalog/journal.json")).unwrap(), "J");
+        let n2 = d.join("n2");
+        put(&n2, &[("EBWebView/Default/Local Storage/leveldb/000003.log", "unpack.drives")]);
+        assert!(has_own_data(&n2), "localStorage with Unpack keys is own data");
+    }
+
+    /// R17 L1: cross-drive Downloads copy killed mid-way is redone on the next start, not accepted.
+    #[test]
+    fn r17_l1_cross_drive_downloads_kill_is_redone() {
+        let d = crate::testutil::TmpDir::new("migrate-r17c");
+        let (old, new) = (d.join(OLD_ID), d.join(NEW_ID));
+        put(&old, &[("a.json", "1"), ("Downloads/a.zip", "AAAA"), ("Downloads/b.zip", "BBBBBBBB")]);
+        FORCE_COPY_DOWNLOADS.with(|f| f.set(true));
+        // a.json is file 0 of the main copy; Downloads copy starts counting at 0 again: kill after 1
+        let r = std::panic::catch_unwind(|| {
+            KILL_AFTER.with(|k| k.set(Some(1)));
+            migrate_dir(&old, &new)
+        }).unwrap();
+        KILL_AFTER.with(|k| k.set(None));
+        assert!(r.is_err());
+        assert!(new.join(PENDING).exists() && !new.join(MARKER).exists());
+        // plant a cut-off partial as a real kill would leave it
+        put(&new, &[("Downloads.migrating/b.zip", "BB")]);
+        assert!(migrate_dir(&old, &new).unwrap());
+        FORCE_COPY_DOWNLOADS.with(|f| f.set(false));
+        assert_eq!(fs::read_to_string(new.join("Downloads/b.zip")).unwrap(), "BBBBBBBB");
+        assert_eq!(fs::read_to_string(new.join("Downloads/a.zip")).unwrap(), "AAAA");
+        assert!(!new.join("Downloads.migrating").exists() && !old.join("Downloads").exists());
+        assert!(new.join(MARKER).exists());
     }
 }

@@ -320,7 +320,8 @@ fn run_capped(
         std::thread::spawn(move || {
             use std::sync::atomic::Ordering::SeqCst;
             while !done.load(SeqCst) {
-                if tree_bytes(&dir) > limit {
+                let (bytes, files) = tree_stats(&dir);
+                if bytes > limit || files > NESTED_MAX_FILES {
                     over.store(true, SeqCst);
                     if let Ok(mut c) = child.lock() { let _ = c.kill(); }
                     break;
@@ -782,6 +783,24 @@ fn tree_bytes(root: &Path) -> u64 {
     n
 }
 
+/// An inner archive may not create more files than this (R17 optional: inode/file-count bomb).
+pub const NESTED_MAX_FILES: usize = 100_000;
+
+/// (bytes, files) under `root`, links not followed.
+fn tree_stats(root: &Path) -> (u64, usize) {
+    let (mut n, mut c) = (0u64, 0usize);
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(rd) = fs::read_dir(&d) {
+            for e in rd.flatten() {
+                let Ok(m) = fs::symlink_metadata(e.path()) else { continue };
+                if m.is_dir() { stack.push(e.path()) } else { c += 1; if m.is_file() { n = n.saturating_add(m.len()) } }
+            }
+        }
+    }
+    (n, c)
+}
+
 fn count_files(root: &Path) -> usize {
     let mut n = 0;
     let mut stack = vec![root.to_path_buf()];
@@ -1112,7 +1131,7 @@ fn open_inner(
                     Err(e) if e == ERR_SIZE_CAP => {
                         let _ = fs::remove_dir_all(&out);
                         inner.left += 1;
-                        warnings.push(format!("{rel} was left closed: it unpacked past {} (more than its listing or the size limit allows), so Unpack stopped it.", human(limit)));
+                        warnings.push(format!("{rel} was left closed: it unpacked past {} or {NESTED_MAX_FILES} files (more than its listing or the limits allow), so Unpack stopped it.", human(limit)));
                     }
                     Err(e) => {
                         let _ = fs::remove_dir_all(&out);

@@ -259,3 +259,8 @@ FTP benchmark: `tests/fake_aurora.py ROOT PORT [--limit MBPS] [--cons N] [--no-s
 - migrate.rs: staged copy into `<new>.migrating`, size-verified, renamed in one step; free-space check; Downloads moved, not copied; any copy failure means no marker and a retry next start; `.migration-pending` covers a kill after the rename.
 - Catalog lock wait shows "Waiting for another catalog install to finish…" and is cancellable (downloads still run under the lock).
 - Discord: Rust test with a mock IPC socket (Unix) proves connect + handshake + SET_ACTIVITY only after enabling.
+
+## Round 17 fixes
+- migrate.rs: a sibling `<new>.migration-incomplete` marker is written before every attempt and removed only on full success; while it exists, new-folder contents (WebView caches written after a failed run) are moved aside to `<new>.pre-migration` and the migration retried. Unpack's own files from that backup (catalog/, grants.json, ftp-resume/, Downloads) are put back over the migrated copy; the WebView profile comes from the old folder. "Has data" now means Unpack's own files or a localStorage containing `unpack.` keys.
+- Cross-drive Downloads: copied into `Downloads.migrating`, size-verified, renamed; a leftover partial is redone on resume.
+- Inner archives: the live watcher also stops 7-Zip past NESTED_MAX_FILES (100,000) files.

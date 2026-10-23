@@ -1018,3 +1018,123 @@ Reviewed: branch v1.6.0-merge @ 6121427 (local 527083b plus the ported v1.5.0 ad
 **Checked by reading only:** destlock races and deadlocks; Discord worker, data and pipe; CI files; identifier and migration; FAT32 hint; the attribute tolerance; nested depth (3) and archive count (40) limits; `open_inner` cleanup on failure.
 
 **Not run:** the desktop app with a Discord pipe, a real FAT32 mount, Windows-only CI/NSIS, and cleanup.exe.
+
+## Round 16 — 2026-10-23 (CDT)
+
+Commit 238d589 on v1.6.0-merge (local). Reviewer did not change any source. Scratch work was in /tmp, which has since been removed.
+
+**Verdict: FAIL.** One Medium (M2 is only partly fixed) and three Lows. M1, M3 and most of the Lows held up under direct testing.
+
+### What was run
+| Suite | Result |
+|---|---|
+| cargo test --release --lib, ×20 (4 batches of 5) | 20/20 runs: 236 passed, 0 failed, 1 ignored. No flakes |
+| Wine (x86_64-pc-windows-gnu lib tests, fresh prefix) | 228 passed, 0 failed, 1 ignored |
+| node e2e / autogod / dlc / download / mods / builtin / catalog / xbox / v160 | 42/42, 15, 16, 28, 40, 9/9, 36/36, 52/52, 40: all pass |
+| npm test (theme) / tests/gamelists.py | 7/7 / PASS |
+
+### Bugs (ranked)
+
+**MEDIUM-1: a nested archive that lies about its size still gets written to disk in full before it is refused (M2 is only partly fixed).** Location: src-tauri/src/archive.rs:1043-1046.
+- What happens: the size check after extraction (`tree_bytes(&out)`) only runs once 7-Zip has finished. A .gz records its size in a 4-byte footer that anyone can edit.
+- Impact: a small download can fill the user's drive for a while before Unpack deletes what it wrote. The space is freed afterwards, but other apps, or the extraction itself, can fail while the drive is full.
+- Repro: make 3 GB of zeros with `gzip -1` (14 MB), patch the footer to say 1000 bytes, and put it in a zip (39 KB). Run extract_archive with nested on.
+  - Result: the destination grew to **3,145,394,068 bytes** at its peak, against a 512 MB budget, then dropped to 14 MB. Warning: "CRC Failed, left closed".
+  - A larger stream (about 100 MB of gz per 100 GB written) fills any drive. The free-space check doesn't help, because it trusts the size in the listing.
+- Fix: enforce the limit *while* 7-Zip runs. Have run_with_progress (or a watcher thread) check `tree_bytes(out)` every ~250 ms and kill 7-Zip once it passes min(expected×2+1 MB, budget−used, free−margin). Alternatively, pipe single-stream formats (gz/bz2/xz) through `-so` with a byte cap.
+- Confirmed fixed: the original R15 bomb (4.8 KB zip → 2 GB 7z) is now refused before anything is written ("would unpack to 2.0 GB from 307 KB"; 0 bytes written at peak).
+
+**LOW-1: an interrupted first-start migration is never finished and leaves truncated files.** Location: src-tauri/src/migrate.rs:57-69 and 85; called from src-tauri/src/lib.rs:699.
+- What happens: the copy goes straight into the new folder. A later start sees that folder is not empty, writes "skipped: new folder already had data", and never tries again.
+- Impact: the copy runs before any window appears, so with several GB to copy the app looks frozen and the user is likely to kill it. After that, settings or downloads are missing or cut short forever. The old data is still there, but Unpack never looks at it again.
+- Repro (HOME=/tmp sandbox, target/debug/unpack): old folder holds 3 GB plus another big file. Kill the app 0.4 s after start.
+  - The new folder had the catalog, a-huge.bin cut off at 49,676,288 of 3,221,225,472 bytes, and big.bin missing.
+  - The next start wrote the "skipped" marker.
+- Related, also run:
+  - A file that can't be read (chmod 000) is logged and skipped, and the "copied" marker is written anyway, so it is never retried.
+  - Downloads (300 MB) was copied, doubling disk use, with no free-space check.
+- Fix: copy into `<new>.migrating`, check sizes, then rename to `<new>` (or write an "in progress" marker first and resume or redo on the next start). Check free space first. Skip Downloads or move it instead of copying. Only write the "copied" marker when every file copied.
+
+**LOW-2: the catalog lock is held during the whole download, and waiting for it can't be cancelled or seen.** Location: src-tauri/src/catalog.rs:663-667 and 694-699.
+- Impact: an install to a *different* USB drive or console waits silently for the first install's whole download. The waiting job shows no message and can't be cancelled.
+- Repro: one install with an 8 s download to usb, plus a second install to usb2 started 0.5 s later. The second finished at 8.1 s.
+- Fix: download and verify outside the lock, and take the lock only for the launch.ini/journal update and the copy. Or wait with try_lock plus the cancel check plus WAIT_MESSAGE, like destlock does.
+
+**LOW-3: there is no positive Discord test.** Default-off was confirmed by running (see below). Nobody has checked that turning the toggle on actually connects. Add a v160.mjs check with a fake IPC socket.
+
+### R15 items
+| R15 item | Status | How checked |
+|---|---|---|
+| M1 parallel local installs lose launch.ini lines | **Fixed** | Ran: 4 parallel local installs ×15 rounds, all 4 lines present every round. Failed job then next job: lock released. Lock is poison-tolerant (read). ftp_lock is try_lock, so no deadlock with the catalog lock or destlock (read) |
+| M2 nested bomb | **Partly fixed** | Ran: the R15 bomb is refused before any write. A gz with a forged size still writes 3 GB first (MEDIUM-1) |
+| M3 multi-disc overwrite / cross-TitleID merge | **Fixed** | Ran: 3 same-TID discs with different pad.bin → pad.bin, pad (Disc 2)-2.bin (a user file already named "pad (Disc 2).bin" was kept untouched), pad (Disc 3).bin, each with a warning. Halo 3 / Quake 4 discs sharing a name stay apart. Discs with TID 0 join by name, which is the documented behaviour. A case-only TitleID difference can't happen: IDs are u32, and title_of uppercases them (read) |
+| L Discord ping before toggle | **Fixed** | Ran: first launch under strace with a fake discord-ipc-0. No connect and nothing logged on the fake socket in 25 s |
+| L unconfirmed-swap journal | **Fixed (read)** | install.rs:703-709 journals the line before the write. Uninstall removes it if present and otherwise says "never added". The fault-injection repro was not rerun |
+| L destlock | **Fixed** | cargo r15_l3 tests (cancel, parent/child, nesting, missing folder through a symlinked parent) pass ×20 and on Wine. Code read |
+| L FAT hint | **Fixed** | cargo tests ×20. Code read. No FAT mount was possible (no vfat module) |
+| L identifier migration | **Fixed with issues** | Ran: copies journal, seen.json and backups. Links pointing outside are skipped. Reruns are idempotent and never overwrite. See LOW-1 for interruption, locked files and disk use. The same paths keep the journal and seen.json rollback protection (inferred, not run) |
+| L CI | **Fixed (read)** | Every `uses:` is pinned to a 40-character SHA. permissions are set. npm ci. pyftpdlib==2.2.0, puppeteer-core@23.11.1 |
+| Info rarfile wheel | **Removed** | git show --stat |
+
+### cleanup.exe
+- No cleanup binary is tracked by git. release.yml:49 builds Unpack-Cleanup.exe from cleanup/cleanup.c in CI, so a stale exe can't ship.
+- dist/Unpack-Cleanup.exe is git-ignored, dated 14:43, which is newer than the last cleanup.c change at 14:15 CDT. Its UTF-16 strings match a fresh build.
+- The release.yml gcc command (with `-lshlwapi`) **linked fine here** with x86_64-w64-mingw32-gcc, apart from a harmless UNICODE redefinition warning. The link failure Code Smith reported does not happen on this box.
+
+### Checked by reading only
+- The L2 journal order.
+- The CI pins.
+- The FAT `looks_file_too_large` patterns (no FAT mount).
+- Thread-based nesting in destlock: safe because each job runs on its own blocking thread.
+- Panic while holding the catalog lock: the Mutex is poison-tolerant.
+- No 7z/rar solid archive with a forged header was built. The gz footer case covers "the listing understates".
+
+## Round 17 — 2026-10-23 (CDT)
+
+Commit 74f60aa on v1.6.0-merge (local). The reviewer changed no source files. Scratch work was in /tmp, which has since been removed.
+
+**Verdict: FAIL.** One Medium (migration retry) and one Low. MEDIUM-1 from R16, L2 and L3 are fixed.
+
+### What was run
+| Suite | Result |
+|---|---|
+| cargo test --release --lib, 20 runs (4 batches of 5) | Every run: 240 passed, 0 failed, 1 ignored. No flakes |
+| Wine (x86_64-pc-windows-gnu lib tests, fresh prefix) | 231 passed, 0 failed, 1 ignored |
+| node e2e / autogod / dlc / download / mods / builtin / catalog / xbox / v160 | 42/42, 15, 16, 28, 40, 9/9, 36/36, 52/52, 40: all pass |
+| npm test (theme) / tests/gamelists.py | 7/7 / PASS |
+
+### Bugs (ranked)
+
+**MEDIUM-1: a failed first-start migration is never retried, so old settings are silently lost for good.**
+- Where: src-tauri/src/migrate.rs:93-96, together with lib.rs:699.
+- Cause: when migrate_dir fails (not enough free space, or a file it can't read), the app starts anyway. The WebView then creates its own files in the new folder (CacheStorage, storage, databases, hsts-storage.sqlite...). On the next start, line 93 sees "new folder has data" and writes "skipped: new folder already had data". This contradicts the "will retry next start" log line.
+- Impact: saved consoles, drives, settings, the catalog journal and seen.json from 1.5.x never come over. The old folder is still on disk, but nothing reads it again.
+  - On Windows this is likely: a file locked by a still-running old Unpack or WebView2 makes the copy fail.
+  - Several instances started at once (for example, "Extract here" on many files) can also lose the race. Each loser starts its WebView into the new folder, which can make the winner's `remove_dir(new)` fail. In my one 3-instance run the winner succeeded, but the order is not guaranteed.
+- Repro 1 (HOME sandbox, target/debug/unpack):
+  - chmod 000 old/catalog/seen.json, then start. Log: "skipped: could not copy ... Permission denied". The new folder now holds only WebView files.
+  - chmod 644, then start again. The marker says "skipped: new folder already had data", and journal.json and seen.json are missing.
+- Repro 2: put the old data (1.5 GB) on a 2.6 GB tmpfs. Start: "needs 1572864002 bytes, only 1153429504 free; will retry next start". After that, the new folder holds WebView data, so the next start will skip.
+- Fix: treat the new folder as having "own data" only if it holds Unpack's own data (catalog/, grants.json, or an EBWebView with Local Storage the user created after a *successful* or *skipped* decision). Simpler: write a `.migration-retry` marker when a run fails, and on the next start treat WebView-only content as empty. Or, if migration fails, don't start the WebView on the new identifier until the user has seen an error with a Retry option.
+
+**LOW-1: if a cross-drive Downloads copy is killed, the cut-off copy is accepted as done.**
+- Where: src-tauri/src/migrate.rs:128-132.
+- Cause: after a kill during the copy fallback, the next start resumes from `.migration-pending`. finish() sees `new/Downloads` exists, skips the move, and writes the "copied" marker.
+- Impact: the new Downloads holds a cut-off file. The old full copy stays behind in the old folder, so nothing is lost, but Unpack shows the broken one.
+- Repro: mount tmpfs on old/Downloads with a 2000 MB game.zip, then kill at 0.5 s. The new Downloads/game.zip is 501,673,984 bytes. After a restart the marker says "copied" and the size is unchanged.
+- Fix: copy into `Downloads.migrating`, compare sizes, rename, then remove the old copy. On resume, redo the step if `Downloads.migrating` exists.
+
+### R16 items
+| R16 item | Status | How checked |
+|---|---|---|
+| MEDIUM-1 forged size fills the drive | **Fixed** | Ran the 3 GB forged-gz zip. Peak output folder was **14,051,220 bytes**, which is just the .gz itself; the partial 7-Zip output was killed before it showed. Peak drive use was 34,967,552 bytes. Warning "stopped it", nothing left behind, no 7za orphans (pgrep). Listed size 0: refused before writing ("size can't be read"). Ten inner archives each under the ratio cap, together over budget: five opened (521 MB, at the 512 MB budget) and the rest refused. A tar symlink pointing outside plus a 200 MB file through it: nothing written outside. The 20 ms single-write overshoot was not measurable here |
+| L1 interrupted migration leaves cut-off files | **Fixed for kills; new issue for failures** | Ran kills at 0.3, 1 and 2 s on 2 GB plus Downloads: each restart finished completely with full sizes, journal and seen.json intact, and the link skipped. New data with no pending file: never overwritten. Planted `.migration-pending` with junk content in a new folder that has data: old Downloads moved in, nothing overwritten. Free-space check worked. Unreadable file: run fails with no marker, but it is never retried (MEDIUM-1 above). Cross-drive kill: LOW-1 above |
+| L2 catalog lock wait blocks with no status or cancel | **Fixed** | Ran: the waiting job showed "Waiting for another catalog install to finish…" and cancel_job returned CANCELLED at 1.6 s. An extract into the same USB during the held install finished without waiting (no deadlock with destlock). The next install afterwards succeeded |
+| L3 no positive Discord test | **Fixed** | Mutation test in a /tmp copy. With connect broken: test FAILS (discord.rs:223). With enabled=true at start: test FAILS (discord.rs:209, "no connection while disabled"). Original code: passes |
+
+### Checked by reading only
+- run_capped: the watcher takes the child lock and kills, and the waiter polls with try_wait every 10 ms. A tree with many files makes each poll slower; there is still no file-count cap inside inner archives beyond MAX_NESTED_ARCHIVES.
+- Free space dropping because of another process mid-run is not tracked live. The limit is computed once, and 7-Zip then fails on a full disk and is cleaned up. Not run.
+- Downloads that is itself a symlink or junction is skipped and left in the old folder, by design.
+- The copied journal and seen.json are honoured: the copies match byte for byte (run), and the store paths are identical (read).
+- The race between instances (see MEDIUM-1): one 3-instance run succeeded. The failure order is inferred from the code.
