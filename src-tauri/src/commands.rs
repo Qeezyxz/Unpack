@@ -1,4 +1,4 @@
-use crate::{archive, convert, discord, download, hashutil, library, progress, stfs, usb, xbox};
+use crate::{archive, convert, discord, download, fileops, hashutil, library, progress, stfs, usb, xbox};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -60,8 +60,8 @@ pub fn load_settings(app: AppHandle) -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub fn save_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
     let path = settings_path(&app)?;
-    std::fs::write(path, serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let body = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    fileops::write_atomic(&path, body.as_bytes())?;
     if let Some(enabled) = settings.get("discordPresence").and_then(|v| v.as_bool()) {
         if let Some(presence) = app.try_state::<discord::PresenceHandle>() {
             presence.set_enabled(enabled);
@@ -166,18 +166,25 @@ pub async fn extract_archives(
         return Err("choose a destination folder".into());
     }
     progress::emit(&app, "extract", "Extracting archives", 0, archives.len() as u64);
-    let app2 = app.clone();
+    let app_job = app.clone();
     let opts = archive::ExtractOptions {
         skip_junk: skip_junk.unwrap_or(true),
         existing: existing.unwrap_or_else(|| "number".into()),
     };
     let result = tauri::async_runtime::spawn_blocking(move || {
         let paths: Vec<PathBuf> = archives.into_iter().map(PathBuf::from).collect();
-        archive::extract_archives_with(&paths, &PathBuf::from(dest), &opts)
+        archive::extract_archives_with(
+            &paths,
+            &PathBuf::from(dest),
+            &opts,
+            Some(&mut |message, current, total| {
+                progress::emit(&app_job, "extract", message, current, total);
+            }),
+        )
     })
     .await
     .map_err(|e| e.to_string())??;
-    progress::emit(&app2, "extract", "Done", 1, 1);
+    progress::emit(&app, "extract", "Done", 1, 1);
     Ok(result)
 }
 

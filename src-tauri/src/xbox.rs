@@ -120,7 +120,11 @@ pub fn send_paths(
         files: Vec::new(),
         warnings: Vec::new(),
     };
-    let files = expand_files(paths_in);
+    let files = expand_files(paths_in)?;
+    if files.is_empty() {
+        ftp.close();
+        return Err("no files found to send".into());
+    }
     let total = files.len() as u64;
     for (i, file) in files.iter().enumerate() {
         let name = file
@@ -143,12 +147,12 @@ pub fn send_paths(
                     dest_root.trim_end_matches(['/', '\\']),
                     parent.to_string_lossy().replace('\\', "/")
                 );
-                let _ = ftp.mkdir_p(&remote_dir);
+                ftp.mkdir_p(&remote_dir)?;
             } else {
-                let _ = ftp.cwd(dest_root);
+                ftp.cwd(dest_root)?;
             }
         } else {
-            let _ = ftp.cwd(dest_root);
+            ftp.cwd(dest_root)?;
         }
         match ftp.upload_file(file, &name, include_launch_ini)? {
             UploadOutcome::SkippedProtected => {
@@ -168,29 +172,32 @@ pub fn send_paths(
     Ok(report)
 }
 
-fn expand_files(paths_in: &[PathBuf]) -> Vec<PathBuf> {
+fn expand_files(paths_in: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     for p in paths_in {
         if p.is_dir() {
-            collect_files(p, &mut out);
-        } else {
+            collect_files(p, &mut out)?;
+        } else if p.exists() {
             out.push(p.clone());
+        } else {
+            return Err(format!("file not found: {}", p.display()));
         }
     }
-    out
+    Ok(out)
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_files(&path, out);
-            } else {
-                out.push(path);
-            }
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out)?;
+        } else {
+            out.push(path);
         }
     }
+    Ok(())
 }
 
 fn relative_to_batch(roots: &[PathBuf], file: &Path) -> String {
@@ -228,6 +235,12 @@ mod tests {
         let root = PathBuf::from("/tmp/Games/Halo");
         let file = PathBuf::from("/tmp/Games/Halo/default.xex");
         assert_eq!(relative_to_batch(&[root], &file), "Halo/default.xex");
+    }
+
+    #[test]
+    fn missing_local_file_is_an_error() {
+        let err = expand_files(&[PathBuf::from("/no/such/unpack-file.bin")]).unwrap_err();
+        assert!(err.contains("not found"));
     }
 
     #[test]

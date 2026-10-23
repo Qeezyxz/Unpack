@@ -1,3 +1,4 @@
+use crate::fileops;
 use crate::paths;
 use crate::stfs;
 use iso2god::game_list;
@@ -195,7 +196,7 @@ pub fn place_content(file: &Path, library_root: &Path) -> Result<LibraryItem, St
         file.file_name()
             .ok_or_else(|| "file has no name".to_string())?,
     );
-    fs::copy(file, &dest).map_err(|e| e.to_string())?;
+    fileops::copy_replace(file, &dest)?;
     Ok(LibraryItem {
         path: dest.display().to_string(),
         kind: info.content_label.to_lowercase(),

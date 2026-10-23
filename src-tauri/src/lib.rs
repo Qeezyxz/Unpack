@@ -3,6 +3,7 @@ mod commands;
 mod convert;
 mod discord;
 mod download;
+mod fileops;
 mod ftp;
 mod hashutil;
 mod library;

@@ -29,9 +29,19 @@ pub fn parse_stfs_bytes(bytes: &[u8]) -> Result<StfsInfo, String> {
         return Err("not a CON/LIVE/PIRS package".into());
     }
     let magic = String::from_utf8_lossy(&bytes[0..4]).trim().to_string();
-    let content_type = u32::from_be_bytes(bytes[0x344..0x348].try_into().unwrap());
-    let title_id_num = u32::from_be_bytes(bytes[0x360..0x364].try_into().unwrap());
-    let display_name = utf16be_zstring(&bytes[0x411..0x411.min(bytes.len()).saturating_add(0x80)]);
+    let content_type = u32::from_be_bytes(
+        bytes[0x344..0x348]
+            .try_into()
+            .map_err(|_| "truncated STFS content type".to_string())?,
+    );
+    let title_id_num = u32::from_be_bytes(
+        bytes[0x360..0x364]
+            .try_into()
+            .map_err(|_| "truncated STFS title ID".to_string())?,
+    );
+    let name_end = (0x411 + 0x80).min(bytes.len());
+    let name_start = 0x411.min(name_end);
+    let display_name = utf16be_zstring(&bytes[name_start..name_end]);
     Ok(StfsInfo {
         magic,
         title_id: format!("{title_id_num:08X}"),
@@ -93,5 +103,16 @@ mod tests {
     #[test]
     fn rejects_random_bytes() {
         assert!(parse_stfs_bytes(&[0u8; 0x500]).is_err());
+    }
+
+    #[test]
+    fn short_live_header_does_not_panic() {
+        let mut buf = vec![0u8; 0x430];
+        buf[0..4].copy_from_slice(b"LIVE");
+        buf[0x344..0x348].copy_from_slice(&0x00000002u32.to_be_bytes());
+        buf[0x360..0x364].copy_from_slice(&0x4D5307E6u32.to_be_bytes());
+        let info = parse_stfs_bytes(&buf).unwrap();
+        assert_eq!(info.title_id, "4D5307E6");
+        assert!(info.display_name.is_empty());
     }
 }

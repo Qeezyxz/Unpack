@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -67,21 +68,31 @@ impl Default for ExtractOptions {
     }
 }
 
+#[cfg(test)]
 pub fn extract_archives(archives: &[PathBuf], dest: &Path) -> Result<Vec<ArchiveResult>, String> {
-    extract_archives_with(archives, dest, &ExtractOptions::default())
+    extract_archives_with(archives, dest, &ExtractOptions::default(), None)
 }
 
 pub fn extract_archives_with(
     archives: &[PathBuf],
     dest: &Path,
     opts: &ExtractOptions,
+    mut progress: Option<&mut dyn FnMut(String, u64, u64)>,
 ) -> Result<Vec<ArchiveResult>, String> {
     let seven = find_seven_zip().ok_or_else(|| {
         "7-Zip was not found. Put 7za.exe next to Unpack.exe, or install 7-Zip / p7zip and set UNPACK_7ZA.".to_string()
     })?;
     fs_create(dest)?;
     let mut results = Vec::new();
-    for archive in archives {
+    let total = archives.len() as u64;
+    for (i, archive) in archives.iter().enumerate() {
+        if let Some(cb) = progress.as_mut() {
+            cb(
+                format!("Extracting {}", archive_stem(archive)),
+                i as u64,
+                total.max(1),
+            );
+        }
         let stem = archive_stem(archive);
         let Some(out) = unique_dir(dest, &stem, &opts.existing)? else {
             results.push(ArchiveResult {
@@ -91,20 +102,36 @@ pub fn extract_archives_with(
             });
             continue;
         };
+        let created_fresh = !out.exists();
         fs_create(&out)?;
-        let mut args = vec!["x".into(), "-y".into(), format!("-o{}", out.display())];
+        let mut args: Vec<OsString> = vec!["x".into(), "-y".into()];
+        if opts.existing == "overwrite" {
+            args.push("-aoa".into());
+        }
+        // 7-Zip wants `-oDIR` as one argv token so paths with spaces stay intact.
+        let mut out_arg = OsString::from("-o");
+        out_arg.push(out.as_os_str());
+        args.push(out_arg);
         if opts.skip_junk {
-            args.extend(junk_excludes());
+            args.extend(junk_excludes().into_iter().map(OsString::from));
         }
         args.push("--".into());
-        args.push(archive.display().to_string());
-        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let status = run_7z(&seven, &arg_refs)?;
-        results.push(ArchiveResult {
-            archive: archive.display().to_string(),
-            destination: out.display().to_string(),
-            status,
-        });
+        args.push(archive.as_os_str().to_os_string());
+        match run_7z(&seven, &args) {
+            Ok(status) => {
+                results.push(ArchiveResult {
+                    archive: archive.display().to_string(),
+                    destination: out.display().to_string(),
+                    status,
+                });
+            }
+            Err(e) => {
+                if created_fresh {
+                    let _ = std::fs::remove_dir_all(&out);
+                }
+                return Err(e);
+            }
+        }
     }
     Ok(results)
 }
@@ -159,12 +186,11 @@ pub fn create_archive(inputs: &[PathBuf], dest: &Path) -> Result<ArchiveResult, 
     if let Some(parent) = dest.parent() {
         fs_create(parent)?;
     }
-    let mut args = vec!["a".to_string(), "-y".to_string(), dest.display().to_string()];
+    let mut args: Vec<OsString> = vec!["a".into(), "-y".into(), dest.as_os_str().to_os_string()];
     for input in inputs {
-        args.push(input.display().to_string());
+        args.push(input.as_os_str().to_os_string());
     }
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let status = run_7z(&seven, &arg_refs)?;
+    let status = run_7z(&seven, &args)?;
     Ok(ArchiveResult {
         archive: dest.display().to_string(),
         destination: dest.display().to_string(),
@@ -172,14 +198,30 @@ pub fn create_archive(inputs: &[PathBuf], dest: &Path) -> Result<ArchiveResult, 
     })
 }
 
-fn run_7z(bin: &Path, args: &[&str]) -> Result<String, String> {
+fn run_7z(bin: &Path, args: &[OsString]) -> Result<String, String> {
     let output = Command::new(bin)
-        .args(args)
+        .args(args.iter().map(|a| a.as_os_str()))
         .output()
         .map_err(|e| format!("failed to run {}: {e}", bin.display()))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{stderr}{stdout}");
     if !output.status.success() {
+        if combined.to_ascii_lowercase().contains("wrong password")
+            || combined.to_ascii_lowercase().contains("encrypted")
+        {
+            return Err("this archive is password-protected; Unpack does not prompt for passwords".into());
+        }
+        if combined.to_ascii_lowercase().contains("cannot open")
+            || combined.to_ascii_lowercase().contains("is not supported")
+            || combined.to_ascii_lowercase().contains("crc failed")
+            || combined.to_ascii_lowercase().contains("data error")
+        {
+            return Err(format!(
+                "archive is unreadable or corrupted: {}",
+                combined.trim()
+            ));
+        }
         return Err(format!(
             "7-Zip failed ({:?}): {stderr}{stdout}",
             output.status.code()
@@ -206,7 +248,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("unpack-arc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let src = root.join("src");
-        let dest = root.join("out");
+        let dest = root.join("out with spaces");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::File::create(src.join("note.txt"))
             .unwrap()
@@ -216,10 +258,10 @@ mod tests {
         run_7z(
             &bin,
             &[
-                "a",
-                "-y",
-                &archive.display().to_string(),
-                &src.join("note.txt").display().to_string(),
+                OsString::from("a"),
+                OsString::from("-y"),
+                archive.as_os_str().to_os_string(),
+                src.join("note.txt").as_os_str().to_os_string(),
             ],
         )
         .unwrap();

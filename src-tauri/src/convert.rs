@@ -1,3 +1,4 @@
+use crate::fileops;
 use crate::paths;
 use iso2god::executable::{TitleExecutionInfo, TitleInfo};
 use iso2god::god::{self, ContentType};
@@ -392,12 +393,23 @@ fn extract_xex_set(
                 .unwrap_or_else(|| "Game".into())
         });
     let folder_name = paths::sanitize_xbox_folder_name(&name);
-    let out = dest_dir.join(folder_name);
-    fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    // Do not wipe an existing extract: converting disc 2 later must keep disc 1's
-    // default.xex and extra files already in the folder.
+    let out = dest_dir.join(&folder_name);
+    fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+    // New games extract into a staging folder, then rename over `out`.
+    // An existing folder is merged in place so disc 2 keeps disc 1's default.xex.
+    let staging = if out.exists() {
+        None
+    } else {
+        Some(fileops::Staging::new(
+            dest_dir.join(format!(".{folder_name}.unpack-tmp")),
+        )?)
+    };
+    let target = staging
+        .as_ref()
+        .map(|s| s.path().to_path_buf())
+        .unwrap_or_else(|| out.clone());
     let mut playable_exists =
-        out.join("default.xex").is_file() || out.join("default.xbe").is_file();
+        target.join("default.xex").is_file() || target.join("default.xbe").is_file();
     let mut files = Vec::new();
     let mut infos = Vec::new();
     let disc_total = discs.len() as u64;
@@ -415,13 +427,23 @@ fn extract_xex_set(
             i as u64,
             disc_total.max(1),
         );
-        let (info, part_files) = extract_iso_into(path, &out, merge, preview.as_ref(), progress)?;
+        let (info, part_files) = extract_iso_into(path, &target, merge, preview.as_ref(), progress)?;
         files.extend(part_files);
         if let Some(info) = info {
             infos.push(info);
         }
         playable_exists =
-            out.join("default.xex").is_file() || out.join("default.xbe").is_file();
+            target.join("default.xex").is_file() || target.join("default.xbe").is_file();
+    }
+    if let Some(staging) = staging {
+        let stage_path = staging.path().to_path_buf();
+        fileops::replace_dir(&stage_path, &out)?;
+        for f in &mut files {
+            let p = PathBuf::from(&*f);
+            if let Ok(rel) = p.strip_prefix(&stage_path) {
+                *f = out.join(rel).display().to_string();
+            }
+        }
     }
     if verify {
         let has_exe = out.join("default.xex").is_file() || out.join("default.xbe").is_file();
@@ -463,7 +485,9 @@ fn convert_god(
     let data_size = if trim {
         source_iso.get_max_used_prefix_size()
     } else {
-        source_iso_file_meta.len() - source_iso.volume_descriptor.root_offset
+        source_iso_file_meta
+            .len()
+            .saturating_sub(source_iso.volume_descriptor.root_offset)
     };
     let block_count = data_size.div_ceil(god::BLOCK_SIZE as u64);
     let part_count = block_count.div_ceil(god::BLOCKS_PER_PART).max(1);
@@ -472,8 +496,14 @@ fn convert_god(
 
     fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
     let dest_dir = dest_dir.to_path_buf();
-    let file_layout = god::FileLayout::new(&dest_dir, &exe_info, content_type);
-    ensure_empty_dir(&file_layout.data_dir_path()).map_err(|e| e.to_string())?;
+    // Write into a staging tree, then swap over the live TitleID/00007000/MediaID
+    // layout so an interrupted convert cannot wipe a previous good GOD package.
+    let staging = fileops::Staging::new(dest_dir.join(format!(
+        ".{:08X}-{:08X}.unpack-tmp",
+        exe_info.title_id, exe_info.media_id
+    )))?;
+    let file_layout = god::FileLayout::new(staging.path(), &exe_info, content_type);
+    fs::create_dir_all(file_layout.data_dir_path()).map_err(|e| e.to_string())?;
 
     for part_index in 0..part_count {
         progress(
@@ -520,29 +550,38 @@ fn convert_god(
         con_header = con_header.with_game_title(&game_title);
     }
     let con_header = con_header.finalize();
-    let header_path = file_layout.con_header_file_path();
-    if let Some(parent) = header_path.parent() {
+    let staging_header = file_layout.con_header_file_path();
+    if let Some(parent) = staging_header.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     File::options()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&header_path)
+        .open(&staging_header)
         .map_err(|e| e.to_string())?
         .write_all(&con_header)
         .map_err(|e| e.to_string())?;
 
+    let final_layout = god::FileLayout::new(&dest_dir, &exe_info, content_type);
+    install_god_package(
+        &file_layout.data_dir_path(),
+        &staging_header,
+        &final_layout.data_dir_path(),
+        &final_layout.con_header_file_path(),
+    )?;
+    let header_path = final_layout.con_header_file_path();
+
     let mut files = vec![header_path.display().to_string()];
     for i in 0..part_count {
-        files.push(file_layout.part_file_path(i).display().to_string());
+        files.push(final_layout.part_file_path(i).display().to_string());
     }
     if verify {
         if !header_path.is_file() || fs::metadata(&header_path).map(|m| m.len()).unwrap_or(0) == 0 {
             return Err("verification failed: missing CON header".into());
         }
         for i in 0..part_count {
-            let p = file_layout.part_file_path(i);
+            let p = final_layout.part_file_path(i);
             if !p.is_file() {
                 return Err(format!("verification failed: missing {}", p.display()));
             }
@@ -671,9 +710,15 @@ fn extract_dir(
             reader
                 .seek(SeekFrom::Start(position))
                 .map_err(|e| e.to_string())?;
-            let mut out = File::create(&dest_path).map_err(|e| e.to_string())?;
-            let mut limited = (&mut reader).take(entry.size as u64);
-            std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
+            let tmp = fileops::sibling(&dest_path, "unpack-tmp");
+            fileops::clear_path(&tmp)?;
+            {
+                let mut out = File::create(&tmp).map_err(|e| e.to_string())?;
+                let mut limited = (&mut reader).take(entry.size as u64);
+                std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
+                out.flush().map_err(|e| e.to_string())?;
+            }
+            fileops::replace_file(&tmp, &dest_path)?;
             files.push(dest_path.display().to_string());
             *copied += 1;
             progress(format!("Extracted {safe}"), *copied, total);
@@ -682,11 +727,59 @@ fn extract_dir(
     Ok(())
 }
 
-fn ensure_empty_dir(path: &Path) -> Result<(), String> {
-    if path.exists() {
-        fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+/// Move a finished GOD package from staging onto `{TitleID}/00007000/{MediaID}`.
+/// The live header is not touched until the `.data` folder is in place; if the
+/// header rename fails, both the new data and the previous package are restored.
+fn install_god_package(
+    new_data: &Path,
+    new_hdr: &Path,
+    dest_data: &Path,
+    dest_hdr: &Path,
+) -> Result<(), String> {
+    if let Some(parent) = dest_hdr.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::create_dir_all(path).map_err(|e| e.to_string())
+    let data_bak = take_aside(dest_data)?;
+    if let Err(e) = fs::rename(new_data, dest_data) {
+        put_back(data_bak, dest_data);
+        return Err(format!("install GOD data {}: {e}", dest_data.display()));
+    }
+    let hdr_bak = take_aside(dest_hdr)?;
+    if let Err(e) = fs::rename(new_hdr, dest_hdr).or_else(|_| {
+        fs::copy(new_hdr, dest_hdr).map(|_| ())?;
+        fs::remove_file(new_hdr)
+    }) {
+        put_back(hdr_bak, dest_hdr);
+        let _ = fs::rename(dest_data, new_data);
+        put_back(data_bak, dest_data);
+        return Err(format!("install GOD header {}: {e}", dest_hdr.display()));
+    }
+    if let Some(p) = data_bak {
+        let _ = fileops::clear_path(&p);
+    }
+    if let Some(p) = hdr_bak {
+        let _ = fileops::clear_path(&p);
+    }
+    Ok(())
+}
+
+fn take_aside(path: &Path) -> Result<Option<PathBuf>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bak = fileops::sibling(path, "unpack-old");
+    fileops::clear_path(&bak)?;
+    fs::rename(path, &bak).map_err(|e| format!("set aside {}: {e}", path.display()))?;
+    Ok(Some(bak))
+}
+
+fn put_back(bak: Option<PathBuf>, dest: &Path) {
+    if dest.exists() {
+        let _ = fileops::clear_path(dest);
+    }
+    if let Some(bak) = bak {
+        let _ = fs::rename(&bak, dest);
+    }
 }
 
 fn file_name(path: &Path) -> String {

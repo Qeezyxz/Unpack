@@ -1,12 +1,16 @@
 use crate::paths;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::time::Duration;
 
 pub struct FtpClient {
     reader: BufReader<TcpStream>,
     writer: TcpStream,
+    /// Address of the Xbox from the control connection. Used when PASV
+    /// returns 0.0.0.0 or a non-LAN IP (common on FSD / Aurora).
+    control_ip: IpAddr,
 }
 
 impl FtpClient {
@@ -14,15 +18,20 @@ impl FtpClient {
         let addr = format!("{host}:{port}");
         let stream = connect_timeout(&addr, Duration::from_secs(5))?;
         stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
+            .set_read_timeout(Some(Duration::from_secs(120)))
             .map_err(|e| e.to_string())?;
         stream
-            .set_write_timeout(Some(Duration::from_secs(30)))
+            .set_write_timeout(Some(Duration::from_secs(120)))
             .map_err(|e| e.to_string())?;
+        let control_ip = stream
+            .peer_addr()
+            .map(|a| a.ip())
+            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         let writer = stream.try_clone().map_err(|e| e.to_string())?;
         let mut client = FtpClient {
             reader: BufReader::new(stream),
             writer,
+            control_ip,
         };
         client.read_response()?; // greeting
         let user = if user.trim().is_empty() { "anonymous" } else { user };
@@ -69,8 +78,11 @@ impl FtpClient {
         if code != 227 {
             return Err(format!("PASV failed: {code} {msg}"));
         }
-        let addr = parse_pasv(&msg)?;
-        connect_timeout(&addr, Duration::from_secs(8))
+        let addr = parse_pasv(&msg, self.control_ip)?;
+        let stream = connect_timeout(&addr, Duration::from_secs(8))?;
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(600)));
+        Ok(stream)
     }
 
     pub fn cwd(&mut self, path: &str) -> Result<(), String> {
@@ -103,6 +115,7 @@ impl FtpClient {
                 current.push(sep);
                 current.push_str(part);
             }
+            // 550 = already exists on FSD/Aurora; CWD below is the real check.
             let _ = self.command(&format!("MKD {current}"));
         }
         if !normalized.is_empty() {
@@ -120,25 +133,58 @@ impl FtpClient {
         if paths::is_protected_filename(remote_name) && !overwrite_protected {
             return Ok(UploadOutcome::SkippedProtected);
         }
-        let data = std::fs::read(local).map_err(|e| e.to_string())?;
-        if paths::is_protected_filename(remote_name) {
-            // Never DELE launch.ini. Store beside it, then rename over.
-            let tmp_name = format!("{remote_name}.unpack-tmp");
-            self.stor(&tmp_name, &data)?;
-            let _ = self.command(&format!("RNFR {tmp_name}"));
-            let (code, msg) = self.command(&format!("RNTO {remote_name}"))?;
-            if code >= 400 {
+        let local_len = std::fs::metadata(local)
+            .map_err(|e| format!("{}: {e}", local.display()))?
+            .len();
+        // Store beside the destination, then RNFR/RNTO. Never DELE launch.ini
+        // (or any other file) before the new copy is complete.
+        let tmp_name = format!("{remote_name}.part");
+        if let Err(e) = self.stor_file(&tmp_name, local) {
+            let _ = self.command(&format!("DELE {tmp_name}"));
+            return Err(e);
+        }
+        let (code, msg) = self.command(&format!("RNFR {tmp_name}"))?;
+        if code >= 400 {
+            let _ = self.command(&format!("DELE {tmp_name}"));
+            return Err(format!("RNFR {tmp_name} failed: {code} {msg}"));
+        }
+        let (code, msg) = self.command(&format!("RNTO {remote_name}"))?;
+        if code >= 400 {
+            let _ = self.command(&format!("DELE {tmp_name}"));
+            return Err(format!(
+                "could not replace {remote_name} via rename (left original in place): {code} {msg}"
+            ));
+        }
+        if let Some(remote_len) = self.size_of(remote_name)? {
+            if remote_len != local_len {
                 return Err(format!(
-                    "could not replace {remote_name} via rename (left original in place): {code} {msg}"
+                    "Xbox size for {remote_name} is {remote_len} bytes, local file is {local_len}"
                 ));
             }
-            return Ok(UploadOutcome::UploadedAtomic);
         }
-        self.stor(remote_name, &data)?;
-        Ok(UploadOutcome::Uploaded)
+        if paths::is_protected_filename(remote_name) {
+            Ok(UploadOutcome::UploadedAtomic)
+        } else {
+            Ok(UploadOutcome::Uploaded)
+        }
     }
 
-    fn stor(&mut self, name: &str, data: &[u8]) -> Result<(), String> {
+    fn size_of(&mut self, name: &str) -> Result<Option<u64>, String> {
+        let (code, msg) = self.command(&format!("SIZE {name}"))?;
+        if code == 213 {
+            let n = msg
+                .split_whitespace()
+                .find_map(|p| p.parse::<u64>().ok())
+                .ok_or_else(|| format!("bad SIZE reply: {msg}"))?;
+            Ok(Some(n))
+        } else {
+            // FSD/FileZilla-on-XeXMenu often lack SIZE. Skip rather than fail.
+            Ok(None)
+        }
+    }
+
+    fn stor_file(&mut self, name: &str, local: &Path) -> Result<(), String> {
+        let mut file = File::open(local).map_err(|e| format!("{}: {e}", local.display()))?;
         let mut data_stream = self.pasv_stream()?;
         self.writer
             .write_all(format!("STOR {name}\r\n").as_bytes())
@@ -148,7 +194,18 @@ impl FtpClient {
         if code >= 400 {
             return Err(format!("STOR {name} rejected: {code} {msg}"));
         }
-        data_stream.write_all(data).map_err(|e| e.to_string())?;
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("read {}: {e}", local.display()))?;
+            if n == 0 {
+                break;
+            }
+            data_stream.write_all(&buf[..n]).map_err(|e| {
+                format!("transfer dropped while sending {name}: {e}")
+            })?;
+        }
         data_stream.flush().map_err(|e| e.to_string())?;
         drop(data_stream);
         let (code, msg) = self.read_response()?;
@@ -159,7 +216,13 @@ impl FtpClient {
         }
     }
 
-    pub fn close(mut self) {
+    pub fn close(self) {
+        drop(self);
+    }
+}
+
+impl Drop for FtpClient {
+    fn drop(&mut self) {
         let _ = self.command("QUIT");
     }
 }
@@ -192,9 +255,12 @@ fn xbox_path_candidates(path: &str) -> Vec<String> {
     out
 }
 
-fn parse_pasv(msg: &str) -> Result<String, String> {
+fn parse_pasv(msg: &str, fallback_ip: IpAddr) -> Result<String, String> {
     let start = msg.find('(').ok_or_else(|| "bad PASV response".to_string())?;
     let end = msg.find(')').ok_or_else(|| "bad PASV response".to_string())?;
+    if end <= start {
+        return Err(format!("bad PASV response: {msg}"));
+    }
     let inner = &msg[start + 1..end];
     let n: Vec<u32> = inner
         .split(',')
@@ -203,14 +269,27 @@ fn parse_pasv(msg: &str) -> Result<String, String> {
     if n.len() < 6 {
         return Err(format!("bad PASV tuple: {msg}"));
     }
-    Ok(format!(
-        "{}.{}.{}.{}:{}",
-        n[0],
-        n[1],
-        n[2],
-        n[3],
-        n[4] * 256 + n[5]
-    ))
+    let advertised = Ipv4Addr::new(n[0] as u8, n[1] as u8, n[2] as u8, n[3] as u8);
+    let ip = pasv_ip(advertised, fallback_ip);
+    let port = n[4] * 256 + n[5];
+    Ok(format!("{ip}:{port}"))
+}
+
+/// Aurora/FSD often advertise 0.0.0.0. Never follow a public PASV IP off-LAN.
+fn pasv_ip(advertised: Ipv4Addr, fallback: IpAddr) -> IpAddr {
+    if advertised.is_unspecified()
+        || advertised.is_loopback()
+        || advertised.is_broadcast()
+        || !(advertised.is_private() || advertised.is_link_local())
+    {
+        match fallback {
+            IpAddr::V4(v) if !v.is_unspecified() => fallback,
+            IpAddr::V6(_) => fallback,
+            _ => IpAddr::V4(advertised),
+        }
+    } else {
+        IpAddr::V4(advertised)
+    }
 }
 
 #[cfg(test)]
@@ -219,8 +298,32 @@ mod tests {
 
     #[test]
     fn parses_pasv() {
-        let addr = parse_pasv("227 Entering Passive Mode (192,168,1,20,20,80)").unwrap();
+        let addr = parse_pasv(
+            "227 Entering Passive Mode (192,168,1,20,20,80)",
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+        )
+        .unwrap();
         assert_eq!(addr, "192.168.1.20:5200");
+    }
+
+    #[test]
+    fn pasv_zero_uses_control_ip() {
+        let addr = parse_pasv(
+            "227 Entering Passive Mode (0,0,0,0,20,80)",
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+        )
+        .unwrap();
+        assert_eq!(addr, "192.168.1.20:5200");
+    }
+
+    #[test]
+    fn pasv_public_ip_uses_control_ip() {
+        let addr = parse_pasv(
+            "227 Entering Passive Mode (8,8,8,8,20,80)",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        )
+        .unwrap();
+        assert_eq!(addr, "10.0.0.5:5200");
     }
 
     #[test]

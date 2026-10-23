@@ -1,3 +1,4 @@
+use crate::fileops;
 use crate::hashutil;
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
@@ -43,22 +44,29 @@ pub fn download_url(
     let response = request.call().map_err(|e| format!("download failed: {e}"))?;
     let status = response.status();
     let resumed = status == 206 && existing > 0;
-    if existing > 0 && status == 200 {
-        // Server ignored Range; start over so the file is not concatenated.
-        let _ = std::fs::remove_file(dest);
-    }
     let total = content_length(&response).map(|n| if resumed { existing + n } else { n });
     let mut reader = response.into_reader();
-    let mut file = if resumed {
-        OpenOptions::new()
-            .append(true)
-            .open(dest)
-            .map_err(|e| e.to_string())?
+    let tmp = fileops::sibling(dest, "unpack-tmp");
+    // Resume appends the partial dest. A 200 (server ignored Range) writes a
+    // sibling temp and only replaces dest after the full body is on disk.
+    let (mut file, mut written, using_tmp) = if resumed {
+        (
+            OpenOptions::new()
+                .append(true)
+                .open(dest)
+                .map_err(|e| e.to_string())?,
+            existing,
+            false,
+        )
     } else {
-        File::create(dest).map_err(|e| e.to_string())?
+        fileops::clear_path(&tmp)?;
+        (
+            File::create(&tmp).map_err(|e| e.to_string())?,
+            0,
+            true,
+        )
     };
     let mut buf = [0u8; 64 * 1024];
-    let mut written = if resumed { existing } else { 0 };
     loop {
         let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
@@ -74,11 +82,23 @@ pub fn download_url(
     }
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
+    let complete = if using_tmp { tmp.as_path() } else { dest };
     let hash = if let Some(expected) = expected_hash.filter(|s| !s.trim().is_empty()) {
-        Some(hashutil::verify_hash(dest, expected)?)
+        match hashutil::verify_hash(complete, expected) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                if using_tmp {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+                return Err(e);
+            }
+        }
     } else {
         None
     };
+    if using_tmp {
+        fileops::replace_file(&tmp, dest)?;
+    }
     Ok(DownloadReport {
         url: url.to_string(),
         path: dest.display().to_string(),

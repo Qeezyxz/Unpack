@@ -1,8 +1,8 @@
+use crate::fileops;
 use crate::hashutil;
 use crate::paths;
 use serde::Serialize;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
 const FAT32_MAX_FILE: u64 = 0xFFFF_FFFF;
@@ -56,12 +56,21 @@ pub fn copy_tree(
         warnings: Vec::new(),
     };
     fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+    // Probe the destination volume after the folder exists so canonicalize works.
+    let vol = filesystem_for(dest_dir).ok();
     if src.is_file() {
-        copy_one(src, &dest_dir.join(file_name(src)), verify, overwrite_protected, &mut report)?;
+        copy_one(
+            src,
+            &dest_dir.join(file_name(src)),
+            verify,
+            overwrite_protected,
+            vol.as_ref(),
+            &mut report,
+        )?;
     } else {
         // Keep the folder name so USB:\Halo\default.xex, not USB:\default.xex.
         let nested = dest_dir.join(file_name(src));
-        copy_dir(src, &nested, verify, overwrite_protected, &mut report)?;
+        copy_dir(src, &nested, verify, overwrite_protected, vol.as_ref(), &mut report)?;
     }
     Ok(report)
 }
@@ -85,17 +94,18 @@ fn copy_dir(
     dest: &Path,
     verify: bool,
     overwrite_protected: bool,
+    vol: Option<&VolumeInfo>,
     report: &mut CopyReport,
 ) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+    for entry in fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let from = entry.path();
         let to = dest.join(entry.file_name());
         if from.is_dir() {
-            copy_dir(&from, &to, verify, overwrite_protected, report)?;
+            copy_dir(&from, &to, verify, overwrite_protected, vol, report)?;
         } else {
-            copy_one(&from, &to, verify, overwrite_protected, report)?;
+            copy_one(&from, &to, verify, overwrite_protected, vol, report)?;
         }
     }
     Ok(())
@@ -106,6 +116,7 @@ fn copy_one(
     dest: &Path,
     verify: bool,
     overwrite_protected: bool,
+    vol: Option<&VolumeInfo>,
     report: &mut CopyReport,
 ) -> Result<(), String> {
     let name = file_name(src);
@@ -119,14 +130,16 @@ fn copy_one(
     }
     let meta = fs::metadata(src).map_err(|e| e.to_string())?;
     if exceeds_fat32(meta.len()) {
-        if let Ok(vol) = filesystem_for(dest.parent().unwrap_or(dest)) {
-            if vol.is_fat32 {
-                return Err(format!(
-                    "{} is {} bytes, over the FAT32 4 GiB file limit",
-                    src.display(),
-                    meta.len()
-                ));
-            }
+        let fat32 = vol
+            .map(|v| v.is_fat32)
+            .or_else(|| filesystem_for(dest.parent().unwrap_or(dest)).ok().map(|v| v.is_fat32))
+            .unwrap_or(false);
+        if fat32 {
+            return Err(format!(
+                "{} is {} bytes, over the FAT32 4 GiB file limit",
+                src.display(),
+                meta.len()
+            ));
         }
         report.warnings.push(format!(
             "{} is larger than 4 GiB; copy will fail on FAT32 USB drives",
@@ -136,8 +149,9 @@ fn copy_one(
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    // Hidden sibling temp file, then rename, so a crash never leaves a truncated launch.ini.
-    let tmp = dest.with_file_name(format!(".{}.unpack-tmp", file_name(dest)));
+    // Copy to a sibling temp, hash, then swap. Never delete dest first.
+    let tmp = fileops::sibling(dest, "unpack-tmp");
+    fileops::clear_path(&tmp)?;
     fs::copy(src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
     if verify {
         let a = hashutil::sha256_file(src)?;
@@ -147,13 +161,7 @@ fn copy_one(
             return Err(format!("verify failed for {}", src.display()));
         }
     }
-    if dest.exists() {
-        fs::remove_file(dest).map_err(|e| e.to_string())?;
-    }
-    fs::rename(&tmp, dest).or_else(|_| {
-        fs::copy(&tmp, dest).map(|_| ())?;
-        fs::remove_file(&tmp).map_err(|e| io::Error::other(e.to_string()))
-    }).map_err(|e| e.to_string())?;
+    fileops::replace_file(&tmp, dest)?;
     report.copied += 1;
     report.bytes += meta.len();
     Ok(())
@@ -277,6 +285,13 @@ mod tests {
             "new"
         );
         assert_eq!(report.skipped_protected, 1);
+
+        let replaced = copy_tree(&src_dir, &dest_dir, true, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("src").join("launch.ini")).unwrap(),
+            "new-ini"
+        );
+        assert!(replaced.copied >= 1);
         let _ = fs::remove_dir_all(&root);
     }
 
