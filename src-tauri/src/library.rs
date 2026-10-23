@@ -326,4 +326,23 @@ mod tests {
         assert!(item.path.contains("00000002"));
         let _ = fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn placing_a_package_that_is_already_in_place_keeps_it() {
+        let root = std::env::temp_dir().join(format!("unpack-lib-same-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mut buf = vec![0u8; 0x500];
+        buf[0..4].copy_from_slice(b"LIVE");
+        buf[0x344..0x348].copy_from_slice(&0x00000002u32.to_be_bytes());
+        buf[0x360..0x364].copy_from_slice(&0x41560817u32.to_be_bytes());
+        let src = root.join("dlc.bin");
+        fs::write(&src, &buf).unwrap();
+        let first = place_content(&src, &root).unwrap();
+        let placed = std::path::PathBuf::from(&first.path);
+        let again = place_content(&placed, &root).unwrap();
+        assert_eq!(again.path, first.path);
+        assert_eq!(fs::read(&placed).unwrap(), buf, "the placed file must survive being placed again");
+        let _ = fs::remove_dir_all(&root);
+    }
 }
