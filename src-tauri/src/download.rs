@@ -30,50 +30,56 @@ pub fn download_url(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let existing = dest.metadata().map(|m| m.len()).unwrap_or(0);
+    // Everything is written beside the final name and only renamed into place
+    // once it is complete, so an interrupted download never looks finished and
+    // can be continued from where it stopped.
+    let tmp = fileops::sibling(dest, "unpack-part");
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         .timeout_read(Duration::from_secs(120))
         .timeout_write(Duration::from_secs(120))
         .build();
-    let mut request = agent.get(url);
-    if existing > 0 {
-        request = request.set("Range", &format!("bytes={existing}-"));
-    }
+    let mut existing = tmp.metadata().map(|m| m.len()).unwrap_or(0);
     progress(format!("Connecting to {url}"), existing, existing);
-    let response = request.call().map_err(|e| format!("download failed: {e}"))?;
+    let response = loop {
+        let mut request = agent.get(url);
+        if existing > 0 {
+            request = request.set("Range", &format!("bytes={existing}-"));
+        }
+        match request.call() {
+            Ok(response) => break response,
+            Err(ureq::Error::Status(416, _)) if existing > 0 => {
+                // The saved part is not a prefix of what the server has now.
+                let _ = std::fs::remove_file(&tmp);
+                existing = 0;
+            }
+            Err(e) => return Err(format!("download failed: {e}")),
+        }
+    };
     let status = response.status();
     let resumed = status == 206 && existing > 0;
     if resumed && !range_starts_at(response.header("Content-Range"), existing) {
-        return Err(format!(
-            "the server sent a different part of the file than the {existing} bytes already saved. Delete the partial download and try again."
-        ));
+        let _ = std::fs::remove_file(&tmp);
+        return Err("the server sent a different part of the file than the one already saved, so the partial download was discarded. Try again.".into());
     }
     let total = content_length(&response).map(|n| if resumed { existing + n } else { n });
     let mut reader = response.into_reader();
-    let tmp = fileops::sibling(dest, "unpack-tmp");
-    // Resume appends the partial dest. A 200 (server ignored Range) writes a
-    // sibling temp and only replaces dest after the full body is on disk.
-    let (mut file, mut written, using_tmp) = if resumed {
+    let (mut file, mut written) = if resumed {
         (
             OpenOptions::new()
                 .append(true)
-                .open(dest)
+                .open(&tmp)
                 .map_err(|e| e.to_string())?,
             existing,
-            false,
         )
     } else {
-        fileops::clear_path(&tmp)?;
-        (
-            File::create(&tmp).map_err(|e| e.to_string())?,
-            0,
-            true,
-        )
+        (File::create(&tmp).map_err(|e| e.to_string())?, 0)
     };
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+        let n = reader.read(&mut buf).map_err(|e| {
+            format!("download interrupted after {written} bytes (run it again to continue): {e}")
+        })?;
         if n == 0 {
             break;
         }
@@ -87,23 +93,25 @@ pub fn download_url(
     }
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
-    let complete = if using_tmp { tmp.as_path() } else { dest };
+    if let Some(total) = total {
+        if written != total {
+            return Err(format!(
+                "download ended early ({written} of {total} bytes). Run it again to continue."
+            ));
+        }
+    }
     let hash = if let Some(expected) = expected_hash.filter(|s| !s.trim().is_empty()) {
-        match hashutil::verify_hash(complete, expected) {
+        match hashutil::verify_hash(&tmp, expected) {
             Ok(h) => Some(h),
             Err(e) => {
-                if using_tmp {
-                    let _ = std::fs::remove_file(&tmp);
-                }
+                let _ = std::fs::remove_file(&tmp);
                 return Err(e);
             }
         }
     } else {
         None
     };
-    if using_tmp {
-        fileops::replace_file(&tmp, dest)?;
-    }
+    fileops::replace_file(&tmp, dest)?;
     Ok(DownloadReport {
         url: url.to_string(),
         path: dest.display().to_string(),
@@ -200,103 +208,178 @@ mod tests {
     use std::io::Cursor;
     use tiny_http::{Header, Response, Server, StatusCode};
 
-    #[test]
-    fn resumes_partial_download() {
-        let payload = (0..20_000u32).map(|x| (x % 251) as u8).collect::<Vec<_>>();
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Honor,
+        IgnoreRange,
+        Unsatisfiable,
+        WrongRange,
+    }
+
+    fn header(name: &str, value: String) -> Header {
+        Header::from_bytes(name.as_bytes(), value).unwrap()
+    }
+
+    /// Answers `requests` requests, then returns the Range header of each.
+    fn serve(
+        body: Vec<u8>,
+        mode: Mode,
+        requests: usize,
+    ) -> (String, std::thread::JoinHandle<Vec<Option<String>>>) {
         let server = Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_string();
-        let body = payload.clone();
         let handle = std::thread::spawn(move || {
-            for _ in 0..2 {
+            let mut seen = Vec::new();
+            for _ in 0..requests {
                 let request = server.recv().unwrap();
                 let range = request
                     .headers()
                     .iter()
                     .find(|h| h.field.equiv("Range"))
                     .map(|h| h.value.as_str().to_string());
-                if let Some(range) = range {
-                    let start: usize = range
-                        .trim_start_matches("bytes=")
-                        .trim_end_matches('-')
-                        .parse()
-                        .unwrap();
-                    let slice = body[start..].to_vec();
-                    let len = slice.len();
-                    request
-                        .respond(
-                            Response::new(
+                seen.push(range.clone());
+                let start: usize = range
+                    .as_deref()
+                    .and_then(|r| r.trim_start_matches("bytes=").trim_end_matches('-').parse().ok())
+                    .unwrap_or(0);
+                match (mode, range.is_some()) {
+                    (Mode::Unsatisfiable, true) => {
+                        request
+                            .respond(Response::empty(StatusCode(416)))
+                            .unwrap();
+                    }
+                    (Mode::Honor | Mode::WrongRange, true) => {
+                        let first = if matches!(mode, Mode::WrongRange) { 0 } else { start };
+                        let slice = body[first..].to_vec();
+                        let len = slice.len();
+                        request
+                            .respond(Response::new(
                                 StatusCode(206),
                                 vec![
-                                    Header::from_bytes(&b"Content-Length"[..], len.to_string())
-                                        .unwrap(),
-                                    Header::from_bytes(
-                                        &b"Content-Range"[..],
-                                        format!("bytes {start}-{}/{}", body.len() - 1, body.len()),
-                                    )
-                                    .unwrap(),
+                                    header("Content-Length", len.to_string()),
+                                    header(
+                                        "Content-Range",
+                                        format!("bytes {first}-{}/{}", body.len() - 1, body.len()),
+                                    ),
                                 ],
                                 Cursor::new(slice),
                                 Some(len),
                                 None,
-                            ),
-                        )
-                        .unwrap();
-                } else {
-                    let slice = body[..8000].to_vec();
-                    let len = slice.len();
-                    request
-                        .respond(Response::from_data(slice).with_status_code(200))
-                        .unwrap();
-                    let _ = len;
+                            ))
+                            .unwrap();
+                    }
+                    _ => {
+                        request
+                            .respond(Response::from_data(body.clone()).with_status_code(200))
+                            .unwrap();
+                    }
                 }
             }
+            seen
         });
+        (addr, handle)
+    }
 
-        let dir = std::env::temp_dir().join(format!("unpack-dl-{}", std::process::id()));
-        let dest = dir.join("blob.bin");
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("unpack-dl-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let url = format!("http://{addr}/blob.bin");
-        let first = download_url(&url, &dest, None, |_, _, _| {}).unwrap();
-        assert_eq!(first.bytes, 8000);
-        assert!(!first.resumed);
-        let second = download_url(&url, &dest, None, |_, _, _| {}).unwrap();
-        assert!(second.resumed);
-        assert_eq!(second.bytes, payload.len() as u64);
+        dir
+    }
+
+    fn payload() -> Vec<u8> {
+        (0..20_000u32).map(|x| (x % 251) as u8).collect()
+    }
+
+    #[test]
+    fn resumes_partial_download() {
+        let payload = payload();
+        let (addr, handle) = serve(payload.clone(), Mode::Honor, 1);
+        let dir = scratch("resume");
+        let dest = dir.join("blob.bin");
+        let part = fileops::sibling(&dest, "unpack-part");
+        std::fs::write(&part, &payload[..8000]).unwrap();
+        let report = download_url(&format!("http://{addr}/blob.bin"), &dest, None, |_, _, _| {}).unwrap();
+        assert!(report.resumed);
+        assert_eq!(report.bytes, payload.len() as u64);
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        assert!(!part.exists(), "the part file is renamed into place");
+        assert_eq!(handle.join().unwrap(), vec![Some("bytes=8000-".to_string())]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_old_finished_download_is_replaced_not_resumed() {
+        let payload = payload();
+        let (addr, handle) = serve(payload.clone(), Mode::Unsatisfiable, 1);
+        let dir = scratch("again");
+        let dest = dir.join("blob.bin");
+        std::fs::write(&dest, b"older copy").unwrap();
+        let report = download_url(&format!("http://{addr}/blob.bin"), &dest, None, |_, _, _| {}).unwrap();
+        assert!(!report.resumed);
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        assert_eq!(handle.join().unwrap(), vec![None]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_part_the_server_cannot_continue_starts_over() {
+        let payload = payload();
+        let (addr, handle) = serve(payload.clone(), Mode::Unsatisfiable, 2);
+        let dir = scratch("416");
+        let dest = dir.join("blob.bin");
+        let part = fileops::sibling(&dest, "unpack-part");
+        std::fs::write(&part, vec![5u8; payload.len()]).unwrap();
+        let report = download_url(&format!("http://{addr}/blob.bin"), &dest, None, |_, _, _| {}).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        assert!(!report.resumed);
+        assert_eq!(handle.join().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_server_that_ignores_range_restarts_the_file() {
+        let payload = payload();
+        let (addr, handle) = serve(payload.clone(), Mode::IgnoreRange, 1);
+        let dir = scratch("ignore");
+        let dest = dir.join("blob.bin");
+        std::fs::write(fileops::sibling(&dest, "unpack-part"), vec![1u8; 300]).unwrap();
+        let report = download_url(&format!("http://{addr}/blob.bin"), &dest, None, |_, _, _| {}).unwrap();
+        assert!(!report.resumed);
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn refuses_to_append_the_wrong_part_of_a_file() {
-        let server = Server::http("127.0.0.1:0").unwrap();
-        let addr = server.server_addr().to_string();
-        let handle = std::thread::spawn(move || {
-            let request = server.recv().unwrap();
-            let slice = vec![9u8; 500];
-            request
-                .respond(Response::new(
-                    StatusCode(206),
-                    vec![
-                        Header::from_bytes(&b"Content-Length"[..], "500").unwrap(),
-                        Header::from_bytes(&b"Content-Range"[..], "bytes 0-499/500").unwrap(),
-                    ],
-                    Cursor::new(slice),
-                    Some(500),
-                    None,
-                ))
-                .unwrap();
-        });
-        let dir = std::env::temp_dir().join(format!("unpack-dl-wrong-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn a_wrong_hash_leaves_no_file() {
+        let (addr, handle) = serve(payload(), Mode::IgnoreRange, 1);
+        let dir = scratch("hash");
         let dest = dir.join("blob.bin");
-        std::fs::write(&dest, vec![1u8; 100]).unwrap();
+        let err = download_url(
+            &format!("http://{addr}/blob.bin"),
+            &dest,
+            Some(&"0".repeat(64)),
+            |_, _, _| {},
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+        assert!(!dest.exists());
+        assert!(!fileops::sibling(&dest, "unpack-part").exists());
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_to_append_the_wrong_part_of_a_file() {
+        let (addr, handle) = serve(vec![9u8; 500], Mode::WrongRange, 1);
+        let dir = scratch("wrong");
+        let dest = dir.join("blob.bin");
+        std::fs::write(fileops::sibling(&dest, "unpack-part"), vec![1u8; 100]).unwrap();
         let err = download_url(&format!("http://{addr}/blob.bin"), &dest, None, |_, _, _| {})
             .unwrap_err();
         assert!(err.contains("different part"), "{err}");
-        assert_eq!(std::fs::read(&dest).unwrap(), vec![1u8; 100], "partial file must be untouched");
+        assert!(!dest.exists(), "nothing may be saved under the final name");
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
