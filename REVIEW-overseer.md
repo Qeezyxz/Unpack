@@ -1268,3 +1268,58 @@ All node suites had 0 FAIL.
 - **Where the old data goes:** the 1.5 data sits in EBWebView.old-version and the switch is logged only to stderr. Nothing in the UI shows it.
 - **Severity:** LOW.
 - **Recommendation:** accept it for a hobby app. Optionally show a one-time notice that points to EBWebView.old-version. A first-load merge in the frontend isn't worth it.
+
+## Round 20 — 2026-10-23 (CDT)
+Commit 601e0f9 reviewed locally. **Verdict: PASS.** There is 1 Low bug and 2 Info notes, none blocking release.
+
+### Ranked bugs
+1. **LOW: a kill between the WebView swap and writing `.migration-notice` loses the notice for good.**
+   - Ran with strace, injecting SIGKILL on the openat of `.migration-notice`.
+   - Both profiles survived. On rerun, `.pre-migration` no longer has an EBWebView, so no notice is written and none is logged.
+   - The window is tiny. Fix: write the notice before the second rename, or write it from `finish()` whenever `.old-version*` is present and no notice was ever shown.
+2. **INFO (read only): `take_notice_in` deletes the file when it is read, not when the user clicks OK.** If the app closes before OK, the notice is not shown again.
+3. **INFO (read only): `write_atomic` overwrites an existing `<name>.bad`.**
+   - In practice this can't collide: failed retries never reach the merge. In run BC, 4 retries with different bad journals left one `.bad` from the final merge, which is correct.
+   - It could only happen if 1.5 itself shipped a `.bad` file.
+
+### R19 table
+| R19 issue | R20 run | Result |
+|---|---|---|
+| L1: a damaged side wins | Damaged new journal (D) and damaged new seen (F2): the migrated valid copy is kept and the damaged one saved as `.bad`. Damaged old journal (E): the new one is kept and the old one goes to `.bad`. Both sides damaged (BB): the newer is kept and the older goes to `.bad`, with installs off as designed. | PASS |
+| L2: O(n²) merge | 50k old + 50k new records (25k overlap), whole app: migration marker after 2.68 s (debug build). Result: 75,000 unique records; the 50,000 new-side records (version 2, installed_at 200) all present. | PASS |
+| L3: installed_at rules | New record with garbage installed_at vs old 100: old wins (B). Old record with garbage vs new 50: new wins (B3). Cargo test r19_l2_l3 passes. | PASS |
+| L4: WebView swap | Swept kills at every rename the run made (11 points, injected with strace), plus a kill at the notice write. Every case: the 1.5 profile survived (both copies) and the NEW profile survived. Every rerun ended with live = NEW and EBWebView plus `.old-version`. The R19 window (rename 10, live profile missing) was finished on rerun as `.old-version` and the notice was written. Nothing was ever deleted. | PASS |
+| L5: notice | In headless Chrome with the shim: nothing shown when no notice exists. A hostile path containing an img tag, a script tag and `&amp;` was shown as literal text, with 0 img or script nodes and no XSS. OK removed it. A reload did not show it again. The file was consumed. | PASS |
+
+### Other checks run
+- **Many retries (MR):** 5 failed retries, each adding new settings and a 20 MB cache, then success. Result: a single `EBWebView.old-version` (20 KB) and 96 MB live. `.old-version-N` growth only appears after a kill, so it is bounded.
+- **Release build:** `strings target/release/unpack` shows no `UNPACK_TEST_NOTICE_DIR` and no `__plant_migration_notice`. Both exist only in `examples/bridge.rs`, which is test-only and writes or reads one fixed file name, so there is no path injection.
+- **Regression sweep:**
+  - forged 3 GB gz (ISIZE says 1 MB): stopped by the live cap at 3.0 MB and left closed;
+  - catalog lock: covered by cargo `r16_l2_catalog_lock_wait_is_visible_and_cancellable` and destlock tests;
+  - multi-disc and TitleID: covered by cargo discs::* and the v160 multi-disc and unknown-TitleID checks;
+  - migration kill and resume: covered by the strace sweep.
+
+### Test suites
+| Suite | Result |
+|---|---|
+| cargo | 20 × 249 passed, 0 failed |
+| Wine | 239 passed |
+| e2e | 42 |
+| autogod | 15 |
+| dlc | 16 |
+| download | 28 |
+| mods | 40 |
+| builtin | 9 |
+| catalog | 36 |
+| xbox | 52 |
+| v160 | 43 (notice checks included) |
+| theme | 7/7 |
+| gamelists | 7 PASS |
+
+All suites had 0 FAIL. The bridge ran with `UNPACK_TEST_NOTICE_DIR`, as test.yml line 78 does.
+
+### Checked by reading only
+- The notice's lifetime (Info 2) and `.bad` overwrite (Info 3).
+- `rename_or_copy`'s cross-drive copy goes through `.migrating`. Not run: both paths are siblings on the same drive, so a real rename always succeeds.
+- After a kill between the renames, the notice names `.old-version` even when the earlier profile was `-N`. Only reachable with a second swap.
