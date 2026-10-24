@@ -23,7 +23,10 @@ pub enum Kind {
 
 /// Redump / dump names: `Game (Disc 2).iso`, `Game-disk1.iso`, `Game CD2.iso`.
 pub fn disc_hint_from_name(path: &Path) -> Option<u8> {
-    let stem = path.file_stem().or_else(|| path.file_name()).map(|n| n.to_string_lossy().to_ascii_lowercase())?;
+    let stem = path
+        .file_stem()
+        .or_else(|| path.file_name())
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())?;
     for label in ["disc", "disk", "dvd", "(cd", " cd", "-cd", "_cd"] {
         if let Some(n) = digit_after_label(&stem, label) {
             return Some(n);
@@ -36,7 +39,8 @@ fn digit_after_label(haystack: &str, label: &str) -> Option<u8> {
     let mut start = 0;
     while let Some(pos) = haystack[start..].find(label) {
         let abs = start + pos + label.len();
-        let rest = haystack[abs..].trim_start_matches(|c: char| matches!(c, ' ' | '-' | '_' | '.' | '#'));
+        let rest =
+            haystack[abs..].trim_start_matches(|c: char| matches!(c, ' ' | '-' | '_' | '.' | '#'));
         if let Some(ch) = rest.chars().next() {
             if let Some(d) = ch.to_digit(10) {
                 if (1..=9).contains(&d) {
@@ -51,7 +55,10 @@ fn digit_after_label(haystack: &str, label: &str) -> Option<u8> {
 
 /// The file name with the disc marker removed, lower-cased: `Halo (Disc 2).iso` and `halo disc1.iso` both give `halo`.
 pub fn stem_without_disc(path: &Path) -> String {
-    let mut s = path.file_stem().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let mut s = path
+        .file_stem()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
     for n in 1..=9u8 {
         for pat in [
             format!("(disc {n})"),
@@ -80,7 +87,14 @@ pub fn stem_without_disc(path: &Path) -> String {
 }
 
 pub fn is_iso_path(path: &Path) -> bool {
-    matches!(path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str(), "iso" | "000" | "bin")
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "iso" | "000" | "bin"
+    )
 }
 
 /// Is this ISO (by its own header numbers or by its file name) one disc of several?
@@ -114,9 +128,17 @@ pub fn companions(path: &Path) -> Result<Vec<PathBuf>, String> {
     let mut found: Vec<(u8, PathBuf)> = Vec::new();
     for sib in siblings {
         let same_stem = !my_stem.is_empty() && stem_without_disc(&sib) == my_stem;
-        let info = if inspect { crate::god::iso_info(&sib).ok() } else { None };
+        let info = if inspect {
+            crate::god::iso_info(&sib).ok()
+        } else {
+            None
+        };
         let same_title = match (&me, &info) {
-            (Some(a), Some(b)) => a.title_id == b.title_id && (looks_multi_disc(path, a.disc_number, a.disc_count) || looks_multi_disc(&sib, b.disc_number, b.disc_count)),
+            (Some(a), Some(b)) => {
+                a.title_id == b.title_id
+                    && (looks_multi_disc(path, a.disc_number, a.disc_count)
+                        || looks_multi_disc(&sib, b.disc_number, b.disc_count))
+            }
             _ => false,
         };
         // A name match only counts when the title IDs don't contradict it (R15 M3).
@@ -174,7 +196,9 @@ pub fn keys_for(title_id: Option<&str>, path: &Path) -> Vec<String> {
 }
 
 fn title_of(keys: &[String]) -> Option<String> {
-    keys.iter().find_map(|k| k.strip_prefix("id:")).map(|t| t.to_ascii_uppercase())
+    keys.iter()
+        .find_map(|k| k.strip_prefix("id:"))
+        .map(|t| t.to_ascii_uppercase())
 }
 
 /// What `claim` decided.
@@ -203,13 +227,19 @@ pub fn claim(
         let id = (pk.clone(), kind, k.clone());
         let usable = reg
             .get(&id)
-            .map(|s| s.dir.is_dir() && !s.discs.contains(&disc) && !matches!((&s.title, &title), (Some(a), Some(b)) if a != b))
+            .map(|s| {
+                s.dir.is_dir()
+                    && !s.discs.contains(&disc)
+                    && !matches!((&s.title, &title), (Some(a), Some(b)) if a != b)
+            })
             .unwrap_or(false);
         if usable {
             let dir = {
                 let s = reg.get_mut(&id).unwrap();
                 s.discs.push(disc);
-                if s.title.is_none() { s.title = title.clone(); }
+                if s.title.is_none() {
+                    s.title = title.clone();
+                }
                 s.dir.clone()
             };
             for other in keys {
@@ -227,7 +257,16 @@ pub fn claim(
     }
     let dir = make_dir()?;
     for k in keys {
-        reg.insert((pk.clone(), kind, k.clone()), Set { dir: dir.clone(), discs: vec![disc], exe_disc: 0, title: title.clone(), born: Instant::now() });
+        reg.insert(
+            (pk.clone(), kind, k.clone()),
+            Set {
+                dir: dir.clone(),
+                discs: vec![disc],
+                exe_disc: 0,
+                title: title.clone(),
+                born: Instant::now(),
+            },
+        );
     }
     Ok(Claim { dir, joined: false })
 }
@@ -247,7 +286,11 @@ pub fn release(parent: &Path, kind: Kind, keys: &[String], disc: u8) {
 pub fn exe_disc(parent: &Path, kind: Kind, keys: &[String]) -> u8 {
     let pk = parent_key(parent);
     let reg = lock();
-    keys.iter().filter_map(|k| reg.get(&(pk.clone(), kind, k.clone()))).map(|s| s.exe_disc).find(|d| *d > 0).unwrap_or(0)
+    keys.iter()
+        .filter_map(|k| reg.get(&(pk.clone(), kind, k.clone())))
+        .map(|s| s.exe_disc)
+        .find(|d| *d > 0)
+        .unwrap_or(0)
 }
 
 pub fn set_exe_disc(parent: &Path, kind: Kind, keys: &[String], disc: u8) {
@@ -298,7 +341,14 @@ mod tests {
     }
 
     fn fresh(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("unpack-discs-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let p = std::env::temp_dir().join(format!(
+            "unpack-discs-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -307,10 +357,18 @@ mod tests {
     fn second_disc_joins_the_first_discs_folder() {
         let parent = fresh("join");
         let keys = keys_for(Some("4D5307E6"), Path::new("Game (Disc 1).iso"));
-        let make = |n: &str| { let d = parent.join(n); std::fs::create_dir_all(&d).map(|_| d).map_err(|e| e.to_string()) };
+        let make = |n: &str| {
+            let d = parent.join(n);
+            std::fs::create_dir_all(&d)
+                .map(|_| d)
+                .map_err(|e| e.to_string())
+        };
         let a = claim(&parent, Kind::God, &keys, 1, || make("Game (GOD)")).unwrap();
         assert!(!a.joined);
-        let b = claim(&parent, Kind::God, &keys, 2, || panic!("disc 2 must join, not create")).unwrap();
+        let b = claim(&parent, Kind::God, &keys, 2, || {
+            panic!("disc 2 must join, not create")
+        })
+        .unwrap();
         assert!(b.joined);
         assert_eq!(a.dir, b.dir);
         // the same disc again is a new run: fresh folder
@@ -330,9 +388,17 @@ mod tests {
         let parent = fresh("stem");
         let first = keys_for(Some("0000ABCD"), Path::new("Zed (Disc 1).iso"));
         let second = keys_for(None, Path::new("Zed (Disc 2).iso"));
-        let make = || { let d = parent.join("Zed"); std::fs::create_dir_all(&d).map(|_| d).map_err(|e| e.to_string()) };
+        let make = || {
+            let d = parent.join("Zed");
+            std::fs::create_dir_all(&d)
+                .map(|_| d)
+                .map_err(|e| e.to_string())
+        };
         let a = claim(&parent, Kind::Xex, &first, 1, make).unwrap();
-        let b = claim(&parent, Kind::Xex, &second, 2, || panic!("should join by name")).unwrap();
+        let b = claim(&parent, Kind::Xex, &second, 2, || {
+            panic!("should join by name")
+        })
+        .unwrap();
         assert!(b.joined && a.dir == b.dir);
         set_exe_disc(&parent, Kind::Xex, &first, 1);
         assert_eq!(exe_disc(&parent, Kind::Xex, &second), 1);
@@ -344,13 +410,22 @@ mod tests {
         let parent = fresh("mix");
         let halo = keys_for(Some("4D5307E6"), Path::new("Mix (Disc 1).iso"));
         let quake = keys_for(Some("415607D2"), Path::new("Mix (Disc 2).iso"));
-        let mk = |n: &str| { let d = parent.join(n); std::fs::create_dir_all(&d).map(|_| d).map_err(|e| e.to_string()) };
+        let mk = |n: &str| {
+            let d = parent.join(n);
+            std::fs::create_dir_all(&d)
+                .map(|_| d)
+                .map_err(|e| e.to_string())
+        };
         let a = claim(&parent, Kind::Xex, &halo, 1, || mk("Halo 3")).unwrap();
         let b = claim(&parent, Kind::Xex, &quake, 2, || mk("Quake 4")).unwrap();
         assert!(!b.joined && a.dir != b.dir);
         // a disc with no readable title ID may still join by name
         let none = keys_for(None, Path::new("Mix (Disc 3).iso"));
-        assert!(claim(&parent, Kind::Xex, &none, 3, || panic!("joins")).unwrap().joined);
+        assert!(
+            claim(&parent, Kind::Xex, &none, 3, || panic!("joins"))
+                .unwrap()
+                .joined
+        );
         let _ = std::fs::remove_dir_all(&parent);
     }
 
@@ -362,7 +437,11 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         claim(&parent, Kind::God, &keys, 1, || Ok(d.clone())).unwrap();
         std::fs::remove_dir_all(&d).unwrap();
-        let again = claim(&parent, Kind::God, &keys, 2, || { std::fs::create_dir_all(&d).unwrap(); Ok(d.clone()) }).unwrap();
+        let again = claim(&parent, Kind::God, &keys, 2, || {
+            std::fs::create_dir_all(&d).unwrap();
+            Ok(d.clone())
+        })
+        .unwrap();
         assert!(!again.joined);
         let _ = std::fs::remove_dir_all(&parent);
     }

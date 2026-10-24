@@ -39,7 +39,10 @@ pub fn unknown_title_warning(title_id: &str) -> String {
 
 /// Why a disc could not be read. A disc 2 that carries no default.xex gets a plain explanation.
 pub fn missing_executable_message(path: &Path, detail: &str) -> String {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
     match crate::discs::disc_hint_from_name(path) {
         Some(n) if n > 1 => format!("{name} is Disc {n} and has no default.xex of its own. Convert Disc 1 first, or add both discs together."),
         _ => format!("Couldn't read the game's executable: {detail}"),
@@ -66,12 +69,14 @@ fn read_info(path: &Path) -> Result<(IsoInfo, iso2god::executable::TitleExecutio
     let f = File::open(path).map_err(|e| format!("Cannot open ISO: {e}"))?;
     let size = f.metadata().map(|m| m.len()).unwrap_or(0);
     let mut reader = iso::IsoReader::read(f).map_err(|e| format!("Not an Xbox ISO ({e})"))?;
-    let info = TitleInfo::from_image(&mut reader).map_err(|e| missing_executable_message(path, &format!("{e:#}")))?;
+    let info = TitleInfo::from_image(&mut reader)
+        .map_err(|e| missing_executable_message(path, &format!("{e:#}")))?;
     let data_size = reader.get_max_used_prefix_size();
     check_complete(size, reader.volume_descriptor.root_offset, data_size)?;
     let blocks = data_size.div_ceil(god::BLOCK_SIZE);
     let (disc_number, disc_count) = disc_numbers(path, &info.execution_info);
-    let name = game_list::find_title_by_id(info.execution_info.title_id).filter(|n| !n.trim().is_empty());
+    let name =
+        game_list::find_title_by_id(info.execution_info.title_id).filter(|n| !n.trim().is_empty());
     let out = IsoInfo {
         title_id: format!("{:08X}", info.execution_info.title_id),
         known: name.is_some(),
@@ -107,11 +112,22 @@ fn check_complete(file_len: u64, root_offset: u64, data_size: u64) -> Result<(),
 
 /// The CON header iso2god writes, rebuilt from its inputs (deterministic). Used to write the
 /// header and, before deleting an ISO, to check the header on disk byte for byte.
-fn build_header(exe_info: &iso2god::executable::TitleExecutionInfo, content_type: ContentType, block_count: u64, part_count: u64, last_part_size: u64, mht: &[u8; 20], title: Option<&str>) -> Vec<u8> {
+fn build_header(
+    exe_info: &iso2god::executable::TitleExecutionInfo,
+    content_type: ContentType,
+    block_count: u64,
+    part_count: u64,
+    last_part_size: u64,
+    mht: &[u8; 20],
+    title: Option<&str>,
+) -> Vec<u8> {
     let mut header = god::ConHeaderBuilder::new()
         .with_execution_info(exe_info)
         .with_block_counts(block_count as u32, 0)
-        .with_data_parts_info(part_count as u32, last_part_size + (part_count - 1) * god::BLOCK_SIZE * 0xa290)
+        .with_data_parts_info(
+            part_count as u32,
+            last_part_size + (part_count - 1) * god::BLOCK_SIZE * 0xa290,
+        )
         .with_content_type(content_type)
         .with_mht_hash(mht);
     if let Some(t) = title {
@@ -126,7 +142,12 @@ pub fn free_space(dir: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     extern "system" {
-        fn GetDiskFreeSpaceExW(path: *const u16, avail: *mut u64, total: *mut u64, free: *mut u64) -> i32;
+        fn GetDiskFreeSpaceExW(
+            path: *const u16,
+            avail: *mut u64,
+            total: *mut u64,
+            free: *mut u64,
+        ) -> i32;
     }
     let w: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
     let (mut a, mut t, mut f) = (0u64, 0u64, 0u64);
@@ -136,15 +157,28 @@ pub fn free_space(dir: &Path) -> Option<u64> {
 }
 #[cfg(not(windows))]
 pub fn free_space(dir: &Path) -> Option<u64> {
-    let o = std::process::Command::new("df").arg("-Pk").arg(dir).output().ok()?;
+    let o = std::process::Command::new("df")
+        .arg("-Pk")
+        .arg(dir)
+        .output()
+        .ok()?;
     let s = String::from_utf8_lossy(&o.stdout);
-    s.lines().nth(1)?.split_whitespace().nth(3)?.parse::<u64>().ok().map(|k| k * 1024)
+    s.lines()
+        .nth(1)?
+        .split_whitespace()
+        .nth(3)?
+        .parse::<u64>()
+        .ok()
+        .map(|k| k * 1024)
 }
 
 /// Bytes a conversion will write (all parts + header), from the ISO length.
 pub fn estimated_output(iso_len: u64, root_offset: u64, part_count: u64) -> u64 {
     let avail = iso_len.saturating_sub(root_offset);
-    (0..part_count).map(|i| expected_part_size(avail, i)).sum::<u64>() + 0xb000
+    (0..part_count)
+        .map(|i| expected_part_size(avail, i))
+        .sum::<u64>()
+        + 0xb000
 }
 
 /// Expected size of GOD part `i`: master hash block + one hash block per sub-part + data.
@@ -157,13 +191,21 @@ fn expected_part_size(avail: u64, i: u64) -> u64 {
 /// Re-check a finished package on disk before calling it a success: every DataNNNN part
 /// exists with exactly the expected size, each part's master hash list is chained into the
 /// previous one, and the header starts with the `LIVE` magic and carries part 0's hash.
-pub fn verify_package(layout: &god::FileLayout, part_count: u64, iso_len: u64, root_offset: u64) -> Result<(), String> {
+pub fn verify_package(
+    layout: &god::FileLayout,
+    part_count: u64,
+    iso_len: u64,
+    root_offset: u64,
+) -> Result<(), String> {
     let bad = |m: String| Err(format!("GOD package check failed: {m}"));
     let avail = iso_len.saturating_sub(root_offset);
     let mut digests = vec![];
     for i in 0..part_count {
         let p = layout.part_file_path(i);
-        let len = match fs::metadata(&p) { Ok(m) => m.len(), Err(e) => return bad(format!("Data{i:04} missing ({e})")) };
+        let len = match fs::metadata(&p) {
+            Ok(m) => m.len(),
+            Err(e) => return bad(format!("Data{i:04} missing ({e})")),
+        };
         let want = expected_part_size(avail, i);
         if len != want {
             return bad(format!("Data{i:04} is {len} bytes, expected {want}"));
@@ -175,10 +217,14 @@ pub fn verify_package(layout: &god::FileLayout, part_count: u64, iso_len: u64, r
     for i in 0..part_count.saturating_sub(1) as usize {
         let next = digests[i + 1].0;
         if !digests[i].1.windows(20).any(|w| w == next) {
-            return bad(format!("hash chain broken between Data{i:04} and Data{:04}", i + 1));
+            return bad(format!(
+                "hash chain broken between Data{i:04} and Data{:04}",
+                i + 1
+            ));
         }
     }
-    let hdr = fs::read(layout.con_header_file_path()).map_err(|e| format!("GOD package check failed: header missing ({e})"))?;
+    let hdr = fs::read(layout.con_header_file_path())
+        .map_err(|e| format!("GOD package check failed: header missing ({e})"))?;
     if !hdr.starts_with(b"LIVE") {
         return bad("header has no LIVE magic".into());
     }
@@ -231,10 +277,14 @@ pub fn convert(
     job_id: &str,
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<GodResult, String> {
-    let ioerr = |what: &str| { let w = what.to_string(); move |e: std::io::Error| format!("{w}: {e}") };
+    let ioerr = |what: &str| {
+        let w = what.to_string();
+        move |e: std::io::Error| format!("{w}: {e}")
+    };
     let f = File::open(iso_path).map_err(ioerr("Cannot open ISO"))?;
     let mut source = iso::IsoReader::read(f).map_err(|e| format!("Not an Xbox ISO ({e})"))?;
-    let title = TitleInfo::from_image(&mut source).map_err(|e| missing_executable_message(iso_path, &format!("{e:#}")))?;
+    let title = TitleInfo::from_image(&mut source)
+        .map_err(|e| missing_executable_message(iso_path, &format!("{e:#}")))?;
     let exe_info = title.execution_info;
     let content_type = title.content_type;
     let root_offset = source.volume_descriptor.root_offset;
@@ -246,12 +296,18 @@ pub fn convert(
     if part_count == 0 {
         return Err("The ISO looks empty.".into());
     }
-    let iso_len = fs::metadata(iso_path).map_err(ioerr("Cannot read ISO"))?.len();
+    let iso_len = fs::metadata(iso_path)
+        .map_err(ioerr("Cannot read ISO"))?
+        .len();
     check_complete(iso_len, root_offset, data_size)?;
 
     fs::create_dir_all(dest_dir).map_err(ioerr("Cannot create output folder"))?;
     // One writer per destination folder: a second job aimed at it waits (Disc 1 + Disc 2 into the same game folder, two converts into one picked folder).
-    let _dest_lock = crate::destlock::acquire(dest_dir, || progress(0, crate::destlock::WAIT_MESSAGE), &|| jobs.is_cancelled(job_id))?;
+    let _dest_lock = crate::destlock::acquire(
+        dest_dir,
+        || progress(0, crate::destlock::WAIT_MESSAGE),
+        &|| jobs.is_cancelled(job_id),
+    )?;
     let need = estimated_output(iso_len, root_offset, part_count);
     if let Some(free) = free_space(dest_dir) {
         if free < need + 64 * 1024 * 1024 {
@@ -264,7 +320,10 @@ pub fn convert(
     }
     // Build the whole package in a private temp folder inside dest_dir (same drive, so the
     // final step is a rename). A cancelled or failed re-convert never touches the previous output.
-    let tmp_base = dest_dir.join(format!(".unpack-god-tmp-{}", crate::archive::safe_segment(job_id)));
+    let tmp_base = dest_dir.join(format!(
+        ".unpack-god-tmp-{}",
+        crate::archive::safe_segment(job_id)
+    ));
     if tmp_base.exists() {
         let _ = fs::remove_dir_all(&tmp_base);
     }
@@ -291,9 +350,16 @@ pub fn convert(
         }
         let res = (|| -> Result<(), String> {
             let mut vol = File::open(iso_path).map_err(ioerr("Cannot open ISO"))?;
-            vol.seek(SeekFrom::Start(root_offset)).map_err(ioerr("Seek failed"))?;
-            let part = File::options().write(true).create(true).truncate(true).open(layout.part_file_path(part_index)).map_err(ioerr("Cannot create part file"))?;
-            god::write_part(vol, part_index, part).map_err(|e| format!("Error writing part {part_index}: {e:#}"))
+            vol.seek(SeekFrom::Start(root_offset))
+                .map_err(ioerr("Seek failed"))?;
+            let part = File::options()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(layout.part_file_path(part_index))
+                .map_err(ioerr("Cannot create part file"))?;
+            god::write_part(vol, part_index, part)
+                .map_err(|e| format!("Error writing part {part_index}: {e:#}"))
         })();
         if let Err(e) = res {
             cleanup();
@@ -317,18 +383,36 @@ pub fn convert(
         for prev in (0..part_count - 1).rev() {
             let mut prev_mht = read_mht(prev)?;
             prev_mht.add_hash(&mht.digest());
-            let mut f = File::options().write(true).open(layout.part_file_path(prev)).map_err(|e| e.to_string())?;
+            let mut f = File::options()
+                .write(true)
+                .open(layout.part_file_path(prev))
+                .map_err(|e| e.to_string())?;
             prev_mht.write(&mut f).map_err(|e| e.to_string())?;
             mht = prev_mht;
         }
-        let last_part_size = fs::metadata(layout.part_file_path(part_count - 1)).map_err(|e| e.to_string())?.len();
+        let last_part_size = fs::metadata(layout.part_file_path(part_count - 1))
+            .map_err(|e| e.to_string())?
+            .len();
         let title = title_override
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .or_else(|| game_list::find_title_by_id(exe_info.title_id))
             .map(|t| clamp_title(&t));
-        let bytes = build_header(&exe_info, content_type, block_count, part_count, last_part_size, &mht.digest(), title.as_deref());
-        let mut f = File::options().write(true).create(true).truncate(true).open(layout.con_header_file_path()).map_err(|e| e.to_string())?;
+        let bytes = build_header(
+            &exe_info,
+            content_type,
+            block_count,
+            part_count,
+            last_part_size,
+            &mht.digest(),
+            title.as_deref(),
+        );
+        let mut f = File::options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(layout.con_header_file_path())
+            .map_err(|e| e.to_string())?;
         f.write_all(&bytes).map_err(|e| e.to_string())
     })();
     if let Err(e) = finish {
@@ -346,16 +430,28 @@ pub fn convert(
     verify_package(&layout, part_count, iso_len, root_offset)?;
     // Another disc of this game is already in the TitleID folder: this disc joins it.
     let joined_other_disc = {
-        let mine = final_layout.con_header_file_path().file_name().map(|n| n.to_os_string());
-        final_layout.con_header_file_path().parent().and_then(|d| fs::read_dir(d).ok()).map_or(false, |rd| {
-            rd.flatten().any(|e| {
-                let name = e.file_name();
-                let stem = std::path::Path::new(&name).file_stem().map(|n| n.to_os_string());
-                Some(&name) != mine.as_ref() && stem != mine && !name.to_string_lossy().starts_with('.')
+        let mine = final_layout
+            .con_header_file_path()
+            .file_name()
+            .map(|n| n.to_os_string());
+        final_layout
+            .con_header_file_path()
+            .parent()
+            .and_then(|d| fs::read_dir(d).ok())
+            .map_or(false, |rd| {
+                rd.flatten().any(|e| {
+                    let name = e.file_name();
+                    let stem = std::path::Path::new(&name)
+                        .file_stem()
+                        .map(|n| n.to_os_string());
+                    Some(&name) != mine.as_ref()
+                        && stem != mine
+                        && !name.to_string_lossy().starts_with('.')
+                })
             })
-        })
     };
-    install(&layout, &final_layout, job_id).map_err(|e| format!("Could not move the GOD package into place: {e}"))?;
+    install(&layout, &final_layout, job_id)
+        .map_err(|e| format!("Could not move the GOD package into place: {e}"))?;
     verify_package(&final_layout, part_count, iso_len, root_offset)?;
     // L1: a cancel that arrives after the package was placed keeps the package but reports
     // the cancel (so nothing downstream, e.g. delete-ISO, treats it as a plain success).
@@ -365,11 +461,16 @@ pub fn convert(
     progress(100, "Done");
     let catalog = game_list::find_title_by_id(exe_info.title_id).filter(|n| !n.trim().is_empty());
     let title_hex = format!("{:08X}", exe_info.title_id);
-    let warning = (catalog.is_none() && title_override.map(|t| t.trim().is_empty()).unwrap_or(true)).then(|| unknown_title_warning(&title_hex));
+    let warning = (catalog.is_none()
+        && title_override.map(|t| t.trim().is_empty()).unwrap_or(true))
+    .then(|| unknown_title_warning(&title_hex));
     Ok(GodResult {
         output: title_dir.display().to_string(),
         title_id: title_hex,
-        name: title_override.map(|s| clamp_title(s.trim())).filter(|s| !s.is_empty()).or(catalog),
+        name: title_override
+            .map(|s| clamp_title(s.trim()))
+            .filter(|s| !s.is_empty())
+            .or(catalog),
         parts: part_count,
         disc_number,
         disc_count,
@@ -395,33 +496,53 @@ pub fn convert_named(
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<GodResult, String> {
     let (info, exe) = read_info(iso_path)?;
-    let stem = iso_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = iso_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     let base = title_override
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .or(info.name.clone())
-        .unwrap_or(if stem.trim().is_empty() { info.title_id.clone() } else { stem });
-    let mut seg = crate::archive::safe_segment(&format!("{} (GOD)", base.chars().take(80).collect::<String>()));
+        .unwrap_or(if stem.trim().is_empty() {
+            info.title_id.clone()
+        } else {
+            stem
+        });
+    let mut seg = crate::archive::safe_segment(&format!(
+        "{} (GOD)",
+        base.chars().take(80).collect::<String>()
+    ));
     if seg.is_empty() {
         seg = format!("{} (GOD)", info.title_id);
     }
-    let make = || crate::archive::claim_dir(parent, &seg).map_err(|e| format!("Cannot create output folder: {e}"));
+    let make = || {
+        crate::archive::claim_dir(parent, &seg)
+            .map_err(|e| format!("Cannot create output folder: {e}"))
+    };
     let multi = crate::discs::looks_multi_disc(iso_path, info.disc_number, info.disc_count);
     let keys = crate::discs::keys_for(Some(&info.title_id), iso_path);
     let (dir, joined) = if multi {
-        let c = crate::discs::claim(parent, crate::discs::Kind::God, &keys, info.disc_number, make)?;
+        let c = crate::discs::claim(
+            parent,
+            crate::discs::Kind::God,
+            &keys,
+            info.disc_number,
+            make,
+        )?;
         (c.dir, c.joined)
     } else {
         (make()?, false)
     };
     // A disc with this MediaID already there (same disc converted twice) is not overwritten.
     let layout = god::FileLayout::new(&dir, &exe, ContentType::GamesOnDemand);
-    let (dir, joined) = if joined && (layout.con_header_file_path().exists() || layout.data_dir_path().exists()) {
-        crate::discs::release(parent, crate::discs::Kind::God, &keys, info.disc_number);
-        (make()?, false)
-    } else {
-        (dir, joined)
-    };
+    let (dir, joined) =
+        if joined && (layout.con_header_file_path().exists() || layout.data_dir_path().exists()) {
+            crate::discs::release(parent, crate::discs::Kind::God, &keys, info.disc_number);
+            (make()?, false)
+        } else {
+            (dir, joined)
+        };
     let r = convert(iso_path, &dir, title_override, jobs, job_id, progress);
     match r {
         Ok(mut ok) => {
@@ -456,7 +577,11 @@ pub struct IsoIdentity {
 #[cfg(unix)]
 fn file_id(_p: &Path, m: &fs::Metadata) -> (u64, u64, i128) {
     use std::os::unix::fs::MetadataExt;
-    (m.dev(), m.ino(), m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128)
+    (
+        m.dev(),
+        m.ino(),
+        m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128,
+    )
 }
 #[cfg(windows)]
 fn file_id(p: &Path, m: &fs::Metadata) -> (u64, u64, i128) {
@@ -464,16 +589,41 @@ fn file_id(p: &Path, m: &fs::Metadata) -> (u64, u64, i128) {
     use std::os::windows::io::AsRawHandle;
     #[repr(C)]
     #[derive(Default)]
-    struct Info { attrs: u32, c: [u32; 2], a: [u32; 2], w: [u32; 2], serial: u32, size_hi: u32, size_lo: u32, links: u32, idx_hi: u32, idx_lo: u32 }
+    struct Info {
+        attrs: u32,
+        c: [u32; 2],
+        a: [u32; 2],
+        w: [u32; 2],
+        serial: u32,
+        size_hi: u32,
+        size_lo: u32,
+        links: u32,
+        idx_hi: u32,
+        idx_lo: u32,
+    }
     #[link(name = "kernel32")]
-    extern "system" { fn GetFileInformationByHandle(h: *mut core::ffi::c_void, info: *mut Info) -> i32; }
+    extern "system" {
+        fn GetFileInformationByHandle(h: *mut core::ffi::c_void, info: *mut Info) -> i32;
+    }
     let mut info = Info::default();
-    let ok = File::open(p).map(|f| unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } != 0).unwrap_or(false);
+    let ok = File::open(p)
+        .map(|f| unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } != 0)
+        .unwrap_or(false);
     let ct = m.creation_time() as i128;
-    if ok { (info.serial as u64, ((info.idx_hi as u64) << 32) | info.idx_lo as u64, ct) } else { (0, 0, ct) }
+    if ok {
+        (
+            info.serial as u64,
+            ((info.idx_hi as u64) << 32) | info.idx_lo as u64,
+            ct,
+        )
+    } else {
+        (0, 0, ct)
+    }
 }
 #[cfg(not(any(unix, windows)))]
-fn file_id(_p: &Path, _m: &fs::Metadata) -> (u64, u64, i128) { (0, 0, 0) }
+fn file_id(_p: &Path, _m: &fs::Metadata) -> (u64, u64, i128) {
+    (0, 0, 0)
+}
 
 /// Full SHA-1 of a file (used to seal ISOs when delete-after-convert is on).
 pub fn full_hash(p: &Path) -> Result<[u8; 20], String> {
@@ -484,7 +634,9 @@ pub fn full_hash(p: &Path) -> Result<[u8; 20], String> {
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = f.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         h.update(&buf[..n]);
     }
     Ok(h.finalize().into())
@@ -508,7 +660,12 @@ pub fn identity(p: &Path) -> Result<IsoIdentity, String> {
         let n = (&mut f).take(S).read(&mut buf).map_err(|e| e.to_string())?;
         h.update(&buf[..n]);
     }
-    Ok(IsoIdentity { len, mtime: meta.modified().ok(), file_id: file_id(p, &meta), sample: h.finalize().into() })
+    Ok(IsoIdentity {
+        len,
+        mtime: meta.modified().ok(),
+        file_id: file_id(p, &meta),
+        sample: h.finalize().into(),
+    })
 }
 
 struct ExtractedIso {
@@ -531,7 +688,12 @@ fn random_token() -> String {
     let part = |salt: u64| {
         let mut h = std::collections::hash_map::RandomState::new().build_hasher();
         h.write_u64(n ^ salt);
-        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
         h.finish()
     };
     format!("iso-{:016x}{:016x}", part(0x9e37_79b9), part(0x7f4a_7c15))
@@ -541,10 +703,18 @@ fn random_token() -> String {
 /// a full-content hash taken now is compared again right before deleting (Overseer R4 M1).
 pub fn seal_tokens(tokens: &[String]) {
     for t in tokens {
-        let path = registry().lock().unwrap_or_else(|p| p.into_inner()).get(t).map(|e| e.path.clone());
+        let path = registry()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(t)
+            .map(|e| e.path.clone());
         if let Some(p) = path {
             let h = full_hash(&p).ok();
-            if let Some(e) = registry().lock().unwrap_or_else(|p| p.into_inner()).get_mut(t) {
+            if let Some(e) = registry()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_mut(t)
+            {
                 e.sealed = h;
             }
         }
@@ -552,7 +722,9 @@ pub fn seal_tokens(tokens: &[String]) {
 }
 
 fn registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, ExtractedIso>> {
-    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, ExtractedIso>>> = std::sync::OnceLock::new();
+    static R: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ExtractedIso>>,
+    > = std::sync::OnceLock::new();
     R.get_or_init(Default::default)
 }
 
@@ -568,7 +740,17 @@ pub fn register_extracted(paths: &[String], root: &Path, delete_allowed: bool) -
             match identity(&path) {
                 Ok(ident) => {
                     let t = random_token();
-                    reg.insert(t.clone(), ExtractedIso { path, root: root.to_path_buf(), delete_allowed, ident, sealed: None, born: std::time::Instant::now() });
+                    reg.insert(
+                        t.clone(),
+                        ExtractedIso {
+                            path,
+                            root: root.to_path_buf(),
+                            delete_allowed,
+                            ident,
+                            sealed: None,
+                            born: std::time::Instant::now(),
+                        },
+                    );
                     t
                 }
                 Err(_) => String::new(),
@@ -621,7 +803,9 @@ pub fn convert_registered(
     // Single use: the token is consumed here, whatever happens next.
     let (path, root, delete_allowed, ident, sealed) = {
         let mut reg = registry().lock().unwrap_or_else(|p| p.into_inner());
-        let e = reg.remove(token).ok_or("Unknown or already used ISO token (it wasn't extracted in this session).")?;
+        let e = reg
+            .remove(token)
+            .ok_or("Unknown or already used ISO token (it wasn't extracted in this session).")?;
         if e.born.elapsed() >= TOKEN_TTL {
             return Err("This extracted ISO's token expired; extract the archive again.".into());
         }
@@ -631,18 +815,42 @@ pub fn convert_registered(
     if identity(&path)? != ident {
         return Err(changed.into());
     }
-    let out_parent = root.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+    let out_parent = root
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
     let r = convert_named(&path, &out_parent, None, jobs, job_id, progress)?;
     if identity(&path)? != ident {
-        return Err(format!("{changed} Output in {} may not match; delete it.", r.output));
+        return Err(format!(
+            "{changed} Output in {} may not match; delete it.",
+            r.output
+        ));
     }
-    let mut out = ExtractedGod { output: r.output.clone(), parts: r.parts, title_id: r.title_id.clone(), name: r.name.clone(), iso_deleted: false, kept_reason: None, disc_number: r.disc_number, disc_count: r.disc_count, merged: r.merged, warning: r.warning.clone() };
+    let mut out = ExtractedGod {
+        output: r.output.clone(),
+        parts: r.parts,
+        title_id: r.title_id.clone(),
+        name: r.name.clone(),
+        iso_deleted: false,
+        kept_reason: None,
+        disc_number: r.disc_number,
+        disc_count: r.disc_count,
+        merged: r.merged,
+        warning: r.warning.clone(),
+    };
     if !want_delete {
         return Ok(out);
     }
-    let keep = |m: &str, mut o: ExtractedGod| { o.kept_reason = Some(m.into()); Ok(o) };
+    let keep = |m: &str, mut o: ExtractedGod| {
+        o.kept_reason = Some(m.into());
+        Ok(o)
+    };
     if !delete_allowed {
-        return keep("ISO kept: deleting is off when “If it already exists” is Replace files.", out);
+        return keep(
+            "ISO kept: deleting is off when “If it already exists” is Replace files.",
+            out,
+        );
     }
     progress(0, "Verifying GOD data before deleting the ISO");
     if let Err(e) = deep_verify_output(&r, &path, progress) {
@@ -656,7 +864,10 @@ pub fn convert_registered(
         _ => false,
     };
     if !inside {
-        return keep("ISO kept: it is no longer inside the extraction folder.", out);
+        return keep(
+            "ISO kept: it is no longer inside the extraction folder.",
+            out,
+        );
     }
     if identity(&path)? != ident {
         return keep("ISO kept: it changed during the check.", out);
@@ -666,7 +877,10 @@ pub fn convert_registered(
         Some(h) => {
             progress(100, "Verifying the ISO is unchanged");
             if full_hash(&path)? != h {
-                return keep("ISO kept: its contents changed after it was extracted.", out);
+                return keep(
+                    "ISO kept: its contents changed after it was extracted.",
+                    out,
+                );
             }
         }
     }
@@ -681,7 +895,11 @@ pub fn convert_registered(
 
 /// Re-hash every data block of the package in `r.output` against its sub-hash lists, and each
 /// sub-hash list against the part's master hash list (one extra read of the output).
-pub fn deep_verify_output(r: &GodResult, iso_path: &Path, progress: &mut dyn FnMut(u32, &str)) -> Result<(), String> {
+pub fn deep_verify_output(
+    r: &GodResult,
+    iso_path: &Path,
+    progress: &mut dyn FnMut(u32, &str),
+) -> Result<(), String> {
     let f = File::open(iso_path).map_err(|e| format!("Cannot open ISO: {e}"))?;
     let iso_len = f.metadata().map_err(|e| e.to_string())?.len();
     let mut src = iso::IsoReader::read(f).map_err(|e| format!("Not an Xbox ISO ({e})"))?;
@@ -693,22 +911,52 @@ pub fn deep_verify_output(r: &GodResult, iso_path: &Path, progress: &mut dyn FnM
     // Header, byte for byte against the one iso2god would write for these inputs
     // (title ID, title text, block/part counts, content type, media ID, header SHA-1, …).
     let block_count = src.get_max_used_prefix_size().div_ceil(god::BLOCK_SIZE);
-    let last = fs::metadata(layout.part_file_path(r.parts - 1)).map_err(|e| e.to_string())?.len();
-    let mht0 = god::HashList::read(File::open(layout.part_file_path(0)).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let want = build_header(&title.execution_info, title.content_type, block_count, r.parts, last, &mht0.digest(), r.name.as_deref());
-    let have = fs::read(layout.con_header_file_path()).map_err(|e| format!("GOD header missing: {e}"))?;
+    let last = fs::metadata(layout.part_file_path(r.parts - 1))
+        .map_err(|e| e.to_string())?
+        .len();
+    let mht0 =
+        god::HashList::read(File::open(layout.part_file_path(0)).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let want = build_header(
+        &title.execution_info,
+        title.content_type,
+        block_count,
+        r.parts,
+        last,
+        &mht0.digest(),
+        r.name.as_deref(),
+    );
+    let have =
+        fs::read(layout.con_header_file_path()).map_err(|e| format!("GOD header missing: {e}"))?;
     if have != want {
-        let at = have.iter().zip(&want).position(|(a, b)| a != b).unwrap_or(have.len().min(want.len()));
-        return Err(format!("GOD header check failed: header differs from the expected one at byte 0x{at:X}"));
+        let at = have
+            .iter()
+            .zip(&want)
+            .position(|(a, b)| a != b)
+            .unwrap_or(have.len().min(want.len()));
+        return Err(format!(
+            "GOD header check failed: header differs from the expected one at byte 0x{at:X}"
+        ));
     }
     Ok(())
 }
 
-pub fn deep_verify(layout: &god::FileLayout, part_count: u64, iso_len: u64, root_offset: u64) -> Result<(), String> {
+pub fn deep_verify(
+    layout: &god::FileLayout,
+    part_count: u64,
+    iso_len: u64,
+    root_offset: u64,
+) -> Result<(), String> {
     deep_verify_with(layout, part_count, iso_len, root_offset, &mut |_, _| {})
 }
 
-fn deep_verify_with(layout: &god::FileLayout, part_count: u64, iso_len: u64, root_offset: u64, progress: &mut dyn FnMut(u32, &str)) -> Result<(), String> {
+fn deep_verify_with(
+    layout: &god::FileLayout,
+    part_count: u64,
+    iso_len: u64,
+    root_offset: u64,
+    progress: &mut dyn FnMut(u32, &str),
+) -> Result<(), String> {
     use sha1::{Digest, Sha1};
     use std::io::Read;
     verify_package(layout, part_count, iso_len, root_offset)?;
@@ -717,18 +965,27 @@ fn deep_verify_with(layout: &god::FileLayout, part_count: u64, iso_len: u64, roo
     let bs = god::BLOCK_SIZE as usize;
     let mut blk = vec![0u8; bs];
     for i in 0..part_count {
-        progress(((i * 100) / part_count.max(1)) as u32, &format!("Verifying GOD data, part {}/{part_count}", i + 1));
-        let mut f = std::io::BufReader::with_capacity(1 << 20, File::open(layout.part_file_path(i)).map_err(|e| e.to_string())?);
+        progress(
+            ((i * 100) / part_count.max(1)) as u32,
+            &format!("Verifying GOD data, part {}/{part_count}", i + 1),
+        );
+        let mut f = std::io::BufReader::with_capacity(
+            1 << 20,
+            File::open(layout.part_file_path(i)).map_err(|e| e.to_string())?,
+        );
         let mut master = [0u8; 4096];
         f.read_exact(&mut master).map_err(|e| e.to_string())?;
-        let mut d = (god::BLOCKS_PER_PART * god::BLOCK_SIZE).min(avail.saturating_sub(i * god::BLOCKS_PER_PART * god::BLOCK_SIZE));
+        let mut d = (god::BLOCKS_PER_PART * god::BLOCK_SIZE)
+            .min(avail.saturating_sub(i * god::BLOCKS_PER_PART * god::BLOCK_SIZE));
         let mut j = 0usize;
         while d > 0 {
             let mut sub = [0u8; 4096];
             f.read_exact(&mut sub).map_err(|e| e.to_string())?;
             let sd: [u8; 20] = Sha1::digest(sub).into();
             if master[j * 20..j * 20 + 20] != sd {
-                return bad(format!("Data{i:04} sub-hash list {j} doesn't match the master hash"));
+                return bad(format!(
+                    "Data{i:04} sub-hash list {j} doesn't match the master hash"
+                ));
             }
             let n = d.min(god::SUBPART_SIZE);
             let blocks = (n as usize).div_ceil(bs);
@@ -737,7 +994,10 @@ fn deep_verify_with(layout: &god::FileLayout, part_count: u64, iso_len: u64, roo
                 f.read_exact(&mut blk[..len]).map_err(|e| e.to_string())?;
                 let h: [u8; 20] = Sha1::digest(&blk[..len]).into();
                 if sub[k * 20..k * 20 + 20] != h {
-                    return bad(format!("Data{i:04} block {} is damaged", j * god::BLOCKS_PER_SUBPART as usize + k));
+                    return bad(format!(
+                        "Data{i:04} block {} is damaged",
+                        j * god::BLOCKS_PER_SUBPART as usize + k
+                    ));
                 }
             }
             d -= n;
@@ -751,6 +1011,39 @@ fn deep_verify_with(layout: &god::FileLayout, part_count: u64, iso_len: u64, roo
 /// only deleted once the new header is in place; if any step fails, the new data goes back to the
 /// temp folder and the previous package is restored, so there is never a window with new data under
 /// an old header (or no header at all).
+/// Read-only GOD package check for an existing `<TID>` folder (no ISO required).
+pub fn verify_readonly_folder(tid_dir: &Path) -> Result<String, String> {
+    let base = tid_dir
+        .parent()
+        .ok_or("Pick the game's TitleID folder (the one with 00007000 inside).")?;
+    let tid_name = tid_dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let tid = u32::from_str_radix(tid_name, 16).map_err(|_| "Folder name isn't a TitleID.")?;
+    let exe = iso2god::executable::TitleExecutionInfo {
+        title_id: tid,
+        media_id: tid,
+        version: 0,
+        base_version: 0,
+        platform: 0,
+        executable_type: 0,
+        disc_number: 0,
+        disc_count: 0,
+    };
+    let layout = god::FileLayout::new(base, &exe, ContentType::GamesOnDemand);
+    let hdr =
+        fs::read(layout.con_header_file_path()).map_err(|e| format!("GOD header missing: {e}"))?;
+    if !hdr.starts_with(b"LIVE") {
+        return Err("GOD header has no LIVE magic.".into());
+    }
+    let part_count = u32::from_le_bytes([hdr[0x3a0], hdr[0x3a1], hdr[0x3a2], hdr[0x3a3]]) as u64;
+    if part_count == 0 {
+        return Err("GOD header reports zero data parts.".into());
+    }
+    let blocks = u32::from_be_bytes([0, hdr[0x392], hdr[0x393], hdr[0x394]]);
+    let iso_len = blocks as u64 * god::BLOCK_SIZE + 0x20;
+    verify_package(&layout, part_count, iso_len, 0x20)?;
+    Ok("GOD package passed read-only checks (sizes, hash chain, header).".into())
+}
+
 fn install(tmp: &god::FileLayout, fin: &god::FileLayout, job_id: &str) -> std::io::Result<()> {
     let (new_data, new_hdr) = (tmp.data_dir_path(), tmp.con_header_file_path());
     let (data, hdr) = (fin.data_dir_path(), fin.con_header_file_path());

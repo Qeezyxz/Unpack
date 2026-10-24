@@ -46,5 +46,7 @@ impl Drop for TmpDir {
 
 /// Cached test fixtures live under the crate's target folder, not the system temp folder.
 pub fn fixture_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("test-fixtures")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-fixtures")
 }

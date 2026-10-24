@@ -28,9 +28,12 @@ pub const ERR_CANCELLED: &str = "CANCELLED";
 /// File names the app treats as archives (same list as ARCHIVE_RE in native.js).
 pub fn is_archive_name(path: &str) -> bool {
     let l = path.to_lowercase();
-    [".zip", ".rar", ".7z", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".cab", ".arj", ".lzh", ".z", ".lzma", ".wim", ".zipx"]
-        .iter()
-        .any(|e| l.ends_with(e))
+    [
+        ".zip", ".rar", ".7z", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".cab", ".arj", ".lzh", ".z",
+        ".lzma", ".wim", ".zipx",
+    ]
+    .iter()
+    .any(|e| l.ends_with(e))
 }
 
 pub fn find_7za() -> Option<PathBuf> {
@@ -49,7 +52,12 @@ pub fn find_7za() -> Option<PathBuf> {
         }
     }
     #[cfg(not(windows))]
-    for p in ["/usr/lib/7zip/7za", "/usr/bin/7za", "/usr/bin/7zz", "/usr/bin/7z"] {
+    for p in [
+        "/usr/lib/7zip/7za",
+        "/usr/bin/7za",
+        "/usr/bin/7zz",
+        "/usr/bin/7z",
+    ] {
         if Path::new(p).is_file() {
             return Some(PathBuf::from(p));
         }
@@ -114,8 +122,15 @@ fn pw_arg(password: Option<&str>) -> String {
 /// Map 7-Zip error text to our error codes.
 fn classify_error(stderr: &str, had_password: bool) -> String {
     let low = stderr.to_lowercase();
-    if low.contains("wrong password") || low.contains("cannot open encrypted archive") || low.contains("can not open encrypted archive") {
-        return if had_password { ERR_WRONG_PASSWORD.into() } else { ERR_PASSWORD_REQUIRED.into() };
+    if low.contains("wrong password")
+        || low.contains("cannot open encrypted archive")
+        || low.contains("can not open encrypted archive")
+    {
+        return if had_password {
+            ERR_WRONG_PASSWORD.into()
+        } else {
+            ERR_PASSWORD_REQUIRED.into()
+        };
     }
     let msg: Vec<&str> = stderr
         .lines()
@@ -159,7 +174,18 @@ pub fn list(exe: &Path, archive: &Path, password: Option<&str>) -> Result<Listin
     let had_pw = password.map_or(false, |p| !p.is_empty());
     check_password(password)?;
     let mut cmd = base_command(exe);
-    add_args(&mut cmd, [std::ffi::OsString::from("l"), "-slt".into(), "-ba".into(), "-sccUTF-8".into(), pw_arg(password).into(), "--".into(), archive.as_os_str().into()]);
+    add_args(
+        &mut cmd,
+        [
+            std::ffi::OsString::from("l"),
+            "-slt".into(),
+            "-ba".into(),
+            "-sccUTF-8".into(),
+            pw_arg(password).into(),
+            "--".into(),
+            archive.as_os_str().into(),
+        ],
+    );
     let out = cmd
         .output()
         .map_err(|e| format!("Could not start 7-Zip: {e}"))?;
@@ -206,7 +232,11 @@ pub fn list(exe: &Path, archive: &Path, password: Option<&str>) -> Result<Listin
         format = sniff_format(&head[..n], archive);
     }
     let encrypted = entries.iter().any(|e| e.encrypted);
-    Ok(Listing { entries, format, encrypted })
+    Ok(Listing {
+        entries,
+        format,
+        encrypted,
+    })
 }
 
 pub fn sniff_format(head: &[u8], path: &Path) -> String {
@@ -222,7 +252,10 @@ pub fn sniff_format(head: &[u8], path: &Path) -> String {
     if head.starts_with(&[0x1f, 0x8b]) {
         return "gz".into();
     }
-    path.extension().and_then(|e| e.to_str()).unwrap_or("archive").to_lowercase()
+    path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("archive")
+        .to_lowercase()
 }
 
 /// Running 7-Zip processes by job id, so they can be cancelled.
@@ -239,7 +272,13 @@ struct JobHandle {
 impl Jobs {
     pub fn register(&self, id: &str) -> Arc<std::sync::atomic::AtomicBool> {
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.inner.lock().unwrap().insert(id.to_string(), JobHandle { child: None, cancelled: flag.clone() });
+        self.inner.lock().unwrap().insert(
+            id.to_string(),
+            JobHandle {
+                child: None,
+                cancelled: flag.clone(),
+            },
+        );
         flag
     }
     fn attach(&self, id: &str, child: Arc<Mutex<Child>>) {
@@ -263,11 +302,9 @@ impl Jobs {
         }
     }
     pub fn is_cancelled(&self, id: &str) -> bool {
-        self.inner
-            .lock()
-            .unwrap()
-            .get(id)
-            .map_or(false, |h| h.cancelled.load(std::sync::atomic::Ordering::SeqCst))
+        self.inner.lock().unwrap().get(id).map_or(false, |h| {
+            h.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+        })
     }
 }
 
@@ -304,7 +341,9 @@ fn run_capped(
     let mut cmd = base_command(exe);
     add_args(&mut cmd, args);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("Could not start 7-Zip: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Could not start 7-Zip: {e}"))?;
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
     let child = Arc::new(Mutex::new(child));
@@ -323,7 +362,9 @@ fn run_capped(
                 let (bytes, files) = tree_stats(&dir);
                 if bytes > limit || files > NESTED_MAX_FILES {
                     over.store(true, SeqCst);
-                    if let Ok(mut c) = child.lock() { let _ = c.kill(); }
+                    if let Ok(mut c) = child.lock() {
+                        let _ = c.kill();
+                    }
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(20));
@@ -372,7 +413,9 @@ fn run_capped(
         std::thread::sleep(Duration::from_millis(10));
     };
     done.store(true, std::sync::atomic::Ordering::SeqCst);
-    if let Some(w) = watcher { let _ = w.join(); }
+    if let Some(w) = watcher {
+        let _ = w.join();
+    }
     let err_text = err_thread.join().unwrap_or_default();
     if jobs.is_cancelled(job_id) {
         return Err(ERR_CANCELLED.into());
@@ -396,7 +439,12 @@ fn run_capped(
             Ok(err_text
                 .lines()
                 .filter(|l| l.contains("Cannot create hard link"))
-                .map(|l| format!("Skipped a hard link that points outside the archive ({})", l.split(" : ").nth(2).unwrap_or("?").trim()))
+                .map(|l| {
+                    format!(
+                        "Skipped a hard link that points outside the archive ({})",
+                        l.split(" : ").nth(2).unwrap_or("?").trim()
+                    )
+                })
                 .collect())
         }
         _ => Err(classify_error(&err_text, had_password)),
@@ -405,10 +453,15 @@ fn run_capped(
 
 /// True when 7-Zip's only errors were hard links it refused to create.
 fn tolerable_errors(err: &str) -> bool {
-    let errors: Vec<&str> = err.lines().filter(|l| l.trim_start().starts_with("ERROR:")).collect();
+    let errors: Vec<&str> = err
+        .lines()
+        .filter(|l| l.trim_start().starts_with("ERROR:"))
+        .collect();
     // Older 7-Zip builds (23.x) follow a refused hard link with "Cannot set file attribute" for the same entry.
     errors.iter().any(|l| l.contains("Cannot create hard link"))
-        && errors.iter().all(|l| l.contains("Cannot create hard link") || l.contains("Cannot set file attribute"))
+        && errors.iter().all(|l| {
+            l.contains("Cannot create hard link") || l.contains("Cannot set file attribute")
+        })
 }
 
 /// Parse a 7-Zip progress line such as " 44% 3 - folder/file.bin".
@@ -417,7 +470,10 @@ pub fn parse_progress(text: &str) -> Option<(u32, String)> {
     let pct_end = t.find('%')?;
     let pct: u32 = t[..pct_end].trim().parse().ok()?;
     let rest = t[pct_end + 1..].trim();
-    let file = rest.split_once("- ").map(|(_, f)| f.trim().to_string()).unwrap_or_default();
+    let file = rest
+        .split_once("- ")
+        .map(|(_, f)| f.trim().to_string())
+        .unwrap_or_default();
     Some((pct.min(100), file))
 }
 
@@ -443,13 +499,23 @@ impl Collision {
 pub fn safe_segment(name: &str) -> String {
     let mut s: String = name
         .chars()
-        .map(|c| if "<>:\"/\\|?*".contains(c) || (c as u32) < 32 { '_' } else { c })
+        .map(|c| {
+            if "<>:\"/\\|?*".contains(c) || (c as u32) < 32 {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     while s.ends_with('.') || s.ends_with(' ') {
         s.pop();
     }
     let s2 = s.trim().to_string();
-    s = if s2.is_empty() || s2 == "." || s2 == ".." { "file".into() } else { s2 };
+    s = if s2.is_empty() || s2 == "." || s2 == ".." {
+        "file".into()
+    } else {
+        s2
+    };
     // Same reserved-name rule as downloads (CONIN$, "nul .txt", COM¹, …).
     if crate::download::is_windows_reserved_stem(s.split('.').next().unwrap_or("")) {
         s = format!("_{s}");
@@ -458,9 +524,15 @@ pub fn safe_segment(name: &str) -> String {
 }
 
 pub fn archive_stem(path: &Path) -> String {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("archive");
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("archive");
     let lower = name.to_lowercase();
-    for ext in [".tar.gz", ".tar.bz2", ".tar.xz", ".zip", ".rar", ".7z", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".iso"] {
+    for ext in [
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".zip", ".rar", ".7z", ".tar", ".tgz", ".gz", ".bz2",
+        ".xz", ".iso",
+    ] {
         if lower.ends_with(ext) && name.len() > ext.len() {
             return safe_segment(&name[..name.len() - ext.len()]);
         }
@@ -549,7 +621,11 @@ static PLACE_LOCK: Mutex<()> = Mutex::new(());
 pub fn claim_dir(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
     let mut n = 1u32;
     loop {
-        let candidate = if n == 1 { parent.join(name) } else { parent.join(format!("{name}-{n}")) };
+        let candidate = if n == 1 {
+            parent.join(name)
+        } else {
+            parent.join(format!("{name}-{n}"))
+        };
         match fs::create_dir(&candidate) {
             Ok(()) => return Ok(candidate),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
@@ -585,11 +661,15 @@ fn place_numbered(src: &Path, parent: &Path, name: &str) -> std::io::Result<Path
         };
         let mut n = 1u32;
         loop {
-            let c = if n == 1 { parent.join(name) } else { parent.join(format!("{stem}-{n}{ext}")) };
+            let c = if n == 1 {
+                parent.join(name)
+            } else {
+                parent.join(format!("{stem}-{n}{ext}"))
+            };
             match fs::OpenOptions::new().write(true).create_new(true).open(&c) {
                 Ok(f) => {
                     drop(f); // close it first (Windows can't replace an open file)
-                    // we own the empty placeholder; replace it with the real file
+                             // we own the empty placeholder; replace it with the real file
                     move_path(src, &c)?;
                     return Ok(c);
                 }
@@ -603,14 +683,22 @@ fn place_numbered(src: &Path, parent: &Path, name: &str) -> std::io::Result<Path
 /// Move `src` to `dst`. Falls back to copy+delete across volumes.
 fn move_path(src: &Path, dst: &Path) -> std::io::Result<()> {
     // Only ever called with a dst that doesn't exist or is our own empty placeholder file.
-    if src.is_file() && fs::symlink_metadata(dst).map(|m| m.is_file() && m.len() == 0).unwrap_or(false) {
+    if src.is_file()
+        && fs::symlink_metadata(dst)
+            .map(|m| m.is_file() && m.len() == 0)
+            .unwrap_or(false)
+    {
         let _ = fs::remove_file(dst);
     }
     match fs::rename(src, dst) {
         Ok(()) => Ok(()),
         Err(_) => {
             copy_recursive(src, dst)?;
-            if src.is_dir() { fs::remove_dir_all(src) } else { fs::remove_file(src) }
+            if src.is_dir() {
+                fs::remove_dir_all(src)
+            } else {
+                fs::remove_file(src)
+            }
         }
     }
 }
@@ -630,7 +718,9 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Is `p` a symlink, or (on Windows) a junction/reparse point? Never follows it.
 fn is_link(p: &Path) -> bool {
-    fs::symlink_metadata(p).map(|m| m.file_type().is_symlink() || is_reparse_point(&m)).unwrap_or(false)
+    fs::symlink_metadata(p)
+        .map(|m| m.file_type().is_symlink() || is_reparse_point(&m))
+        .unwrap_or(false)
 }
 
 /// Remove a link itself (never its target).
@@ -716,7 +806,9 @@ fn iso_rel_paths(root: &Path) -> Vec<PathBuf> {
     let mut out = vec![];
     let mut stack = vec![PathBuf::new()];
     while let Some(rel) = stack.pop() {
-        let Ok(rd) = fs::read_dir(root.join(&rel)) else { continue };
+        let Ok(rd) = fs::read_dir(root.join(&rel)) else {
+            continue;
+        };
         for e in rd.flatten() {
             let Ok(ft) = e.file_type() else { continue };
             let r = rel.join(e.file_name());
@@ -755,7 +847,11 @@ fn remove_junk(root: &Path) -> usize {
             for e in rd.flatten() {
                 let p = e.path();
                 if is_junk(&e.file_name().to_string_lossy()) {
-                    let ok = if p.is_dir() { fs::remove_dir_all(&p) } else { fs::remove_file(&p) };
+                    let ok = if p.is_dir() {
+                        fs::remove_dir_all(&p)
+                    } else {
+                        fs::remove_file(&p)
+                    };
                     if ok.is_ok() {
                         removed += 1;
                     }
@@ -775,8 +871,14 @@ fn tree_bytes(root: &Path) -> u64 {
     while let Some(d) = stack.pop() {
         if let Ok(rd) = fs::read_dir(&d) {
             for e in rd.flatten() {
-                let Ok(m) = fs::symlink_metadata(e.path()) else { continue };
-                if m.is_dir() { stack.push(e.path()) } else if m.is_file() { n = n.saturating_add(m.len()) }
+                let Ok(m) = fs::symlink_metadata(e.path()) else {
+                    continue;
+                };
+                if m.is_dir() {
+                    stack.push(e.path())
+                } else if m.is_file() {
+                    n = n.saturating_add(m.len())
+                }
             }
         }
     }
@@ -793,8 +895,17 @@ fn tree_stats(root: &Path) -> (u64, usize) {
     while let Some(d) = stack.pop() {
         if let Ok(rd) = fs::read_dir(&d) {
             for e in rd.flatten() {
-                let Ok(m) = fs::symlink_metadata(e.path()) else { continue };
-                if m.is_dir() { stack.push(e.path()) } else { c += 1; if m.is_file() { n = n.saturating_add(m.len()) } }
+                let Ok(m) = fs::symlink_metadata(e.path()) else {
+                    continue;
+                };
+                if m.is_dir() {
+                    stack.push(e.path())
+                } else {
+                    c += 1;
+                    if m.is_file() {
+                        n = n.saturating_add(m.len())
+                    }
+                }
             }
         }
     }
@@ -808,7 +919,11 @@ fn count_files(root: &Path) -> usize {
         if let Ok(rd) = fs::read_dir(&d) {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.is_dir() { stack.push(p) } else { n += 1 }
+                if p.is_dir() {
+                    stack.push(p)
+                } else {
+                    n += 1
+                }
             }
         }
     }
@@ -849,8 +964,15 @@ pub fn extract(
         .collect();
     let single_root_dir = if tops.len() == 1 {
         let top = tops.iter().next().unwrap().clone();
-        let is_dir = listing.entries.iter().any(|e| e.path.starts_with(&format!("{top}/")) || (e.path == top && e.dir));
-        if is_dir { Some(top) } else { None }
+        let is_dir = listing
+            .entries
+            .iter()
+            .any(|e| e.path.starts_with(&format!("{top}/")) || (e.path == top && e.dir));
+        if is_dir {
+            Some(top)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -858,12 +980,25 @@ pub fn extract(
     if opts.layout == Layout::Folder && opts.collision == Collision::Skip {
         let want = safe_segment(single_root_dir.as_deref().unwrap_or(&stem));
         if fs::symlink_metadata(parent.join(&want)).is_ok() {
-            return Ok(ExtractResult { output: parent.join(want).display().to_string(), skipped: true, warnings: vec![], files: 0, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false, nested: 0, inner_left: 0 });
+            return Ok(ExtractResult {
+                output: parent.join(want).display().to_string(),
+                skipped: true,
+                warnings: vec![],
+                files: 0,
+                isos: vec![],
+                merged: false,
+                iso_tokens: vec![],
+                dlcs: vec![],
+                created: false,
+                nested: 0,
+                inner_left: 0,
+            });
         }
     }
 
     let staging = free_name(parent, &format!(".unpack-tmp-{}", safe_segment(job_id)));
-    fs::create_dir_all(&staging).map_err(|e| format!("Cannot write to {}: {e}", parent.display()))?;
+    fs::create_dir_all(&staging)
+        .map_err(|e| format!("Cannot write to {}: {e}", parent.display()))?;
     let _guard = StagingGuard(staging.clone());
 
     check_password(opts.password)?;
@@ -894,11 +1029,27 @@ pub fn extract(
         }
     }
     let files = count_files(&staging);
-    if files == 0 && fs::read_dir(&staging).map(|mut r| r.next().is_none()).unwrap_or(true) {
+    if files == 0
+        && fs::read_dir(&staging)
+            .map(|mut r| r.next().is_none())
+            .unwrap_or(true)
+    {
         return Err("The archive opened, but no files were found.".into());
     }
-    let inner = open_inner(exe, &staging, opts.nested, jobs, job_id, progress, &mut warnings)?;
-    let files = if inner.opened > 0 { count_files(&staging) } else { files };
+    let inner = open_inner(
+        exe,
+        &staging,
+        opts.nested,
+        jobs,
+        job_id,
+        progress,
+        &mut warnings,
+    )?;
+    let files = if inner.opened > 0 {
+        count_files(&staging)
+    } else {
+        files
+    };
     let (nested, inner_left) = (inner.opened, inner.left);
 
     let place_err = |e: std::io::Error| format!("Could not move files into place: {e}");
@@ -907,13 +1058,17 @@ pub fn extract(
     // stalls unrelated extractions.
     let wait = || progress(100, crate::destlock::WAIT_MESSAGE);
     let _dest_lock = match (opts.layout, opts.collision) {
-        (Layout::Here, _) => Some(crate::destlock::acquire(parent, wait, &|| jobs.is_cancelled(job_id))?),
+        (Layout::Here, _) => Some(crate::destlock::acquire(parent, wait, &|| {
+            jobs.is_cancelled(job_id)
+        })?),
         (Layout::Folder, Collision::Replace) => {
             let name = match &single_root_dir {
                 Some(top) if staging.join(top).is_dir() => safe_segment(top),
                 _ => stem.clone(),
             };
-            Some(crate::destlock::acquire(&parent.join(name), wait, &|| jobs.is_cancelled(job_id))?)
+            Some(crate::destlock::acquire(&parent.join(name), wait, &|| {
+                jobs.is_cancelled(job_id)
+            })?)
         }
         _ => None,
     };
@@ -934,12 +1089,42 @@ pub fn extract(
             match (exists, opts.collision) {
                 (true, Collision::Replace) => {
                     merge_replace(&src, &target, &mut warnings).map_err(place_err)?;
-                    let isos: Vec<String> = iso_rel.iter().map(|r| target.join(r).display().to_string()).collect();
+                    let isos: Vec<String> = iso_rel
+                        .iter()
+                        .map(|r| target.join(r).display().to_string())
+                        .collect();
                     let iso_tokens = crate::god::register_extracted(&isos, &target, false);
-                    return Ok(ExtractResult { output: target.display().to_string(), skipped: false, warnings, files, isos, merged: true, iso_tokens, dlcs: dlc_rel.iter().map(|r| target.join(r).display().to_string()).collect(), created: false, nested, inner_left });
+                    return Ok(ExtractResult {
+                        output: target.display().to_string(),
+                        skipped: false,
+                        warnings,
+                        files,
+                        isos,
+                        merged: true,
+                        iso_tokens,
+                        dlcs: dlc_rel
+                            .iter()
+                            .map(|r| target.join(r).display().to_string())
+                            .collect(),
+                        created: false,
+                        nested,
+                        inner_left,
+                    });
                 }
                 (true, Collision::Skip) => {
-                    return Ok(ExtractResult { output: target.display().to_string(), skipped: true, warnings, files: 0, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false, nested: 0, inner_left: 0 });
+                    return Ok(ExtractResult {
+                        output: target.display().to_string(),
+                        skipped: true,
+                        warnings,
+                        files: 0,
+                        isos: vec![],
+                        merged: false,
+                        iso_tokens: vec![],
+                        dlcs: vec![],
+                        created: false,
+                        nested: 0,
+                        inner_left: 0,
+                    });
                 }
                 _ => {}
             }
@@ -947,37 +1132,82 @@ pub fn extract(
             // Never copies into a folder someone else owns.
             let final_target = claim_dir(parent, &name).map_err(place_err)?;
             move_children(&src, &final_target).map_err(place_err)?;
-            let isos: Vec<String> = iso_rel.iter().map(|r| final_target.join(r).display().to_string()).collect();
+            let isos: Vec<String> = iso_rel
+                .iter()
+                .map(|r| final_target.join(r).display().to_string())
+                .collect();
             // Delete is never allowed in Replace mode: another archive in the batch may merge
             // into this same folder later and swap the file (Overseer round-3 H1).
-            let iso_tokens = crate::god::register_extracted(&isos, &final_target, opts.collision != Collision::Replace);
-            return Ok(ExtractResult { output: final_target.display().to_string(), skipped: false, warnings, files, isos, merged: false, iso_tokens, dlcs: dlc_rel.iter().map(|r| final_target.join(r).display().to_string()).collect(), created: true, nested, inner_left });
+            let iso_tokens = crate::god::register_extracted(
+                &isos,
+                &final_target,
+                opts.collision != Collision::Replace,
+            );
+            return Ok(ExtractResult {
+                output: final_target.display().to_string(),
+                skipped: false,
+                warnings,
+                files,
+                isos,
+                merged: false,
+                iso_tokens,
+                dlcs: dlc_rel
+                    .iter()
+                    .map(|r| final_target.join(r).display().to_string())
+                    .collect(),
+                created: true,
+                nested,
+                inner_left,
+            });
         }
         Layout::Here => {
-            let items: Vec<_> = fs::read_dir(&staging).map_err(place_err)?.flatten().collect();
+            let items: Vec<_> = fs::read_dir(&staging)
+                .map_err(place_err)?
+                .flatten()
+                .collect();
             for item in items {
                 let name = item.file_name().to_string_lossy().into_owned();
                 let target = parent.join(&name);
                 if fs::symlink_metadata(&target).is_ok() {
                     match opts.collision {
-                        Collision::Replace => merge_replace(&item.path(), &target, &mut warnings).map_err(place_err)?,
+                        Collision::Replace => merge_replace(&item.path(), &target, &mut warnings)
+                            .map_err(place_err)?,
                         Collision::Skip => warnings.push(format!("{name} already exists, skipped")),
                         Collision::Number => {
-                            let t = place_numbered(&item.path(), parent, &name).map_err(place_err)?;
-                            warnings.push(format!("{name} saved as {}", t.file_name().unwrap().to_string_lossy()));
+                            let t =
+                                place_numbered(&item.path(), parent, &name).map_err(place_err)?;
+                            warnings.push(format!(
+                                "{name} saved as {}",
+                                t.file_name().unwrap().to_string_lossy()
+                            ));
                         }
                     }
                 } else {
                     let t = place_numbered(&item.path(), parent, &name).map_err(place_err)?;
                     if t != target {
-                        warnings.push(format!("{name} saved as {}", t.file_name().unwrap().to_string_lossy()));
+                        warnings.push(format!(
+                            "{name} saved as {}",
+                            t.file_name().unwrap().to_string_lossy()
+                        ));
                     }
                 }
             }
             parent.to_path_buf()
         }
     };
-    Ok(ExtractResult { output: output.display().to_string(), skipped: false, warnings, files, isos: vec![], merged: false, iso_tokens: vec![], dlcs: vec![], created: false, nested, inner_left })
+    Ok(ExtractResult {
+        output: output.display().to_string(),
+        skipped: false,
+        warnings,
+        files,
+        isos: vec![],
+        merged: false,
+        iso_tokens: vec![],
+        dlcs: vec![],
+        created: false,
+        nested,
+        inner_left,
+    })
 }
 
 /// Archives opened inside an extracted archive, and archives found but left closed.
@@ -1001,38 +1231,66 @@ const NESTED_RATIO_MIN_BYTES: u64 = 16 << 20;
 const NESTED_FREE_MARGIN: u64 = 256 << 20;
 
 /// Why an inner archive must stay closed, judged from its listing before anything is written.
-fn nested_refusal(packed: u64, listing: &Listing, used: u64, budget: u64, free: Option<u64>) -> Result<u64, String> {
+fn nested_refusal(
+    packed: u64,
+    listing: &Listing,
+    used: u64,
+    budget: u64,
+    free: Option<u64>,
+) -> Result<u64, String> {
     let files: Vec<&Entry> = listing.entries.iter().filter(|e| !e.dir).collect();
     if files.len() > NESTED_MAX_FILES {
-        return Err(format!("it holds {} files (more than {NESTED_MAX_FILES})", files.len()));
+        return Err(format!(
+            "it holds {} files (more than {NESTED_MAX_FILES})",
+            files.len()
+        ));
     }
     let unpacked = files.iter().fold(0u64, |a, e| a.saturating_add(e.size));
     if unpacked == 0 && !files.is_empty() && packed > 4096 {
         return Err("its unpacked size can't be read".into());
     }
     if unpacked > NESTED_RATIO_MIN_BYTES && unpacked / packed.max(1) > NESTED_MAX_RATIO {
-        return Err(format!("it would unpack to {} from {} (looks like a zip bomb)", human(unpacked), human(packed)));
+        return Err(format!(
+            "it would unpack to {} from {} (looks like a zip bomb)",
+            human(unpacked),
+            human(packed)
+        ));
     }
     if used.saturating_add(unpacked) > budget {
-        return Err(format!("inner archives would unpack to more than {} in total", human(budget)));
+        return Err(format!(
+            "inner archives would unpack to more than {} in total",
+            human(budget)
+        ));
     }
     if let Some(f) = free {
         if f < unpacked.saturating_add(NESTED_FREE_MARGIN) {
-            return Err(format!("there isn't enough free space ({} needed, {} free)", human(unpacked), human(f)));
+            return Err(format!(
+                "there isn't enough free space ({} needed, {} free)",
+                human(unpacked),
+                human(f)
+            ));
         }
     }
     Ok(unpacked)
 }
 
 fn human(b: u64) -> String {
-    if b >= 1 << 30 { format!("{:.1} GB", b as f64 / (1u64 << 30) as f64) } else if b >= 1 << 20 { format!("{:.1} MB", b as f64 / (1u64 << 20) as f64) } else { format!("{} KB", (b + 1023) / 1024) }
+    if b >= 1 << 30 {
+        format!("{:.1} GB", b as f64 / (1u64 << 30) as f64)
+    } else if b >= 1 << 20 {
+        format!("{:.1} MB", b as f64 / (1u64 << 20) as f64)
+    } else {
+        format!("{} KB", (b + 1023) / 1024)
+    }
 }
 
 /// Archive files Unpack opens on its own inside an extracted tree (a narrower list than
 /// `is_archive_name`: no `.cab`/`.wim`/... that games ship as data).
 pub fn is_nested_archive(name: &str) -> bool {
     let l = name.to_lowercase();
-    [".zip", ".rar", ".7z", ".tar", ".tgz", ".gz", ".xz", ".bz2"].iter().any(|e| l.ends_with(e))
+    [".zip", ".rar", ".7z", ".tar", ".tgz", ".gz", ".xz", ".bz2"]
+        .iter()
+        .any(|e| l.ends_with(e))
 }
 
 fn find_nested(root: &Path) -> Vec<PathBuf> {
@@ -1071,7 +1329,9 @@ fn open_inner(
     warnings: &mut Vec<String>,
 ) -> Result<Inner, String> {
     let mut inner = Inner { opened: 0, left: 0 };
-    let budget = tree_bytes(root).saturating_mul(NESTED_TOTAL_FACTOR).max(NESTED_TOTAL_FLOOR);
+    let budget = tree_bytes(root)
+        .saturating_mul(NESTED_TOTAL_FACTOR)
+        .max(NESTED_TOTAL_FLOOR);
     let mut used = 0u64;
     let mut level = vec![root.to_path_buf()];
     for depth in 1..=MAX_NESTED_DEPTH + 1 {
@@ -1082,15 +1342,23 @@ fn open_inner(
                     inner.left += 1;
                     continue;
                 }
-                let rel = archive.strip_prefix(root).unwrap_or(&archive).display().to_string();
+                let rel = archive
+                    .strip_prefix(root)
+                    .unwrap_or(&archive)
+                    .display()
+                    .to_string();
                 if jobs.is_cancelled(job_id) {
                     return Err(ERR_CANCELLED.into());
                 }
                 let parent = archive.parent().unwrap_or(root);
                 let packed = fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
                 let listed = match list(exe, &archive, None) {
-                    Ok(l) => nested_refusal(packed, &l, used, budget, crate::god::free_space(parent)),
-                    Err(e) if e == ERR_PASSWORD_REQUIRED || e == ERR_WRONG_PASSWORD => Err("it needs a password".into()),
+                    Ok(l) => {
+                        nested_refusal(packed, &l, used, budget, crate::god::free_space(parent))
+                    }
+                    Err(e) if e == ERR_PASSWORD_REQUIRED || e == ERR_WRONG_PASSWORD => {
+                        Err("it needs a password".into())
+                    }
                     Err(e) => Err(format!("it could not be read ({e})")),
                 };
                 let expected = match listed {
@@ -1101,19 +1369,43 @@ fn open_inner(
                         continue;
                     }
                 };
-                let out = claim_dir(parent, &archive_stem(&archive)).map_err(|e| format!("Could not open {rel}: {e}"))?;
+                let out = claim_dir(parent, &archive_stem(&archive))
+                    .map_err(|e| format!("Could not open {rel}: {e}"))?;
                 let mut out_arg = std::ffi::OsString::from("-o");
                 out_arg.push(out.as_os_str());
                 let args: Vec<std::ffi::OsString> = vec![
-                    "x".into(), "-y".into(), "-bso0".into(), "-bse2".into(), "-bsp1".into(), "-snl-".into(), "-sccUTF-8".into(),
-                    pw_arg(None).into(), out_arg, "--".into(), archive.as_os_str().to_owned(),
+                    "x".into(),
+                    "-y".into(),
+                    "-bso0".into(),
+                    "-bse2".into(),
+                    "-bsp1".into(),
+                    "-snl-".into(),
+                    "-sccUTF-8".into(),
+                    pw_arg(None).into(),
+                    out_arg,
+                    "--".into(),
+                    archive.as_os_str().to_owned(),
                 ];
                 progress(99, &format!("Opening inner archive {rel}"));
                 // Live cap: never trust the listed size (a .gz footer is forgeable). Stop 7-Zip as soon
                 // as the output passes twice the listed size, the remaining budget, or free space.
-                let free_cap = crate::god::free_space(parent).map(|f| f.saturating_sub(NESTED_FREE_MARGIN)).unwrap_or(u64::MAX);
-                let limit = expected.saturating_mul(2).saturating_add(1 << 20).min(budget.saturating_sub(used)).min(free_cap);
-                match run_capped(exe, &args, jobs, job_id, false, &mut |_, f| progress(99, &format!("{rel}: {f}")), Some((out.clone(), limit))) {
+                let free_cap = crate::god::free_space(parent)
+                    .map(|f| f.saturating_sub(NESTED_FREE_MARGIN))
+                    .unwrap_or(u64::MAX);
+                let limit = expected
+                    .saturating_mul(2)
+                    .saturating_add(1 << 20)
+                    .min(budget.saturating_sub(used))
+                    .min(free_cap);
+                match run_capped(
+                    exe,
+                    &args,
+                    jobs,
+                    job_id,
+                    false,
+                    &mut |_, f| progress(99, &format!("{rel}: {f}")),
+                    Some((out.clone(), limit)),
+                ) {
                     Ok(tolerated) => {
                         // The listing can understate (e.g. a forged header): check what was really written.
                         let (actual, nfiles) = tree_stats(&out);
@@ -1123,7 +1415,9 @@ fn open_inner(
                             warnings.push(format!("{rel} was left closed: it unpacked to {nfiles} files, more than {NESTED_MAX_FILES}."));
                             continue;
                         }
-                        if actual > expected.saturating_mul(2).saturating_add(1 << 20) || used.saturating_add(actual) > budget {
+                        if actual > expected.saturating_mul(2).saturating_add(1 << 20)
+                            || used.saturating_add(actual) > budget
+                        {
                             let _ = fs::remove_dir_all(&out);
                             inner.left += 1;
                             warnings.push(format!("{rel} was left closed: it unpacked to {}, more than its listing or the size limit allows.", human(actual)));
@@ -1136,7 +1430,10 @@ fn open_inner(
                         inner.opened += 1;
                         next.push(out);
                     }
-                    Err(e) if e == ERR_CANCELLED => { let _ = fs::remove_dir_all(&out); return Err(e) }
+                    Err(e) if e == ERR_CANCELLED => {
+                        let _ = fs::remove_dir_all(&out);
+                        return Err(e);
+                    }
                     Err(e) if e == ERR_SIZE_CAP => {
                         let _ = fs::remove_dir_all(&out);
                         inner.left += 1;
@@ -1190,7 +1487,12 @@ impl Drop for ListFile {
 }
 
 /// 7-Zip exits 0 with no output when nothing matches; make that an error instead of an empty file.
-fn ensure_entry(exe: &Path, archive: &Path, entry: &str, password: Option<&str>) -> Result<(), String> {
+fn ensure_entry(
+    exe: &Path,
+    archive: &Path,
+    entry: &str,
+    password: Option<&str>,
+) -> Result<(), String> {
     let listing = list(exe, archive, password)?;
     let want = clean_entry_path(entry);
     match listing.entries.iter().find(|e| e.path == want) {
@@ -1202,22 +1504,31 @@ fn ensure_entry(exe: &Path, archive: &Path, entry: &str, password: Option<&str>)
 
 fn entry_command(exe: &Path, archive: &Path, list: &ListFile, password: Option<&str>) -> Command {
     let mut cmd = base_command(exe);
-    add_args(&mut cmd, [
-        std::ffi::OsString::from("e"),
-        "-so".into(),
-        "-spd".into(), // no wildcards
-        "-scsUTF-8".into(),
-        "-sccUTF-8".into(),
-        pw_arg(password).into(),
-        list.arg(),
-        "--".into(),
-        archive.as_os_str().into(),
-    ]);
+    add_args(
+        &mut cmd,
+        [
+            std::ffi::OsString::from("e"),
+            "-so".into(),
+            "-spd".into(), // no wildcards
+            "-scsUTF-8".into(),
+            "-sccUTF-8".into(),
+            pw_arg(password).into(),
+            list.arg(),
+            "--".into(),
+            archive.as_os_str().into(),
+        ],
+    );
     cmd
 }
 
 /// Read one entry's bytes (for previews), up to `max` bytes.
-pub fn read_entry(exe: &Path, archive: &Path, entry: &str, password: Option<&str>, max: usize) -> Result<Vec<u8>, String> {
+pub fn read_entry(
+    exe: &Path,
+    archive: &Path,
+    entry: &str,
+    password: Option<&str>,
+    max: usize,
+) -> Result<Vec<u8>, String> {
     let had_pw = password.map_or(false, |p| !p.is_empty());
     check_password(password)?;
     ensure_entry(exe, archive, entry, password)?;
@@ -1229,7 +1540,11 @@ pub fn read_entry(exe: &Path, archive: &Path, entry: &str, password: Option<&str
         .map_err(|e| format!("Could not start 7-Zip: {e}"))?;
     // drain stderr concurrently so a chatty 7-Zip can't block on a full pipe
     let mut stderr = child.stderr.take().unwrap();
-    let err_thread = std::thread::spawn(move || { let mut s = String::new(); let _ = stderr.read_to_string(&mut s); s });
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
     let mut out = Vec::new();
     let mut stdout = child.stdout.take().unwrap();
     let mut buf = [0u8; 65536];
@@ -1259,7 +1574,6 @@ pub fn read_entry(exe: &Path, archive: &Path, entry: &str, password: Option<&str
     Ok(out)
 }
 
-
 /// Create a ZIP or 7Z from files/folders, with optional password (AES-256).
 #[allow(clippy::too_many_arguments)]
 pub fn create(
@@ -1287,14 +1601,19 @@ pub fn create(
             return Err(format!("{} no longer exists.", s.display()));
         }
         if out_file.starts_with(s) {
-            return Err("The new archive can't be saved inside a folder that is being archived.".into());
+            return Err(
+                "The new archive can't be saved inside a folder that is being archived.".into(),
+            );
         }
     }
     let parent = out_file.parent().ok_or("Bad output path")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     // Build into a temp file, then rename, so a cancelled/failed run never leaves a half archive
     // and an existing archive with the same name is never "updated" by accident.
-    let tmp = free_name(parent, &format!(".unpack-new-{}.{fmt}", safe_segment(job_id)));
+    let tmp = free_name(
+        parent,
+        &format!(".unpack-new-{}.{fmt}", safe_segment(job_id)),
+    );
     let _ = fs::remove_file(&tmp);
     let mut args: Vec<std::ffi::OsString> = vec![
         "a".into(),
@@ -1333,16 +1652,29 @@ pub fn create(
 mod tests;
 
 /// Extract a single entry straight to `out_file` (streams; works for huge files).
-pub fn extract_entry_to(exe: &Path, archive: &Path, entry: &str, password: Option<&str>, out_file: &Path, jobs: &Jobs, job_id: &str) -> Result<(), String> {
+pub fn extract_entry_to(
+    exe: &Path,
+    archive: &Path,
+    entry: &str,
+    password: Option<&str>,
+    out_file: &Path,
+    jobs: &Jobs,
+    job_id: &str,
+) -> Result<(), String> {
     let had_pw = password.map_or(false, |p| !p.is_empty());
     check_password(password)?;
     ensure_entry(exe, archive, entry, password)?;
     let parent = out_file.parent().ok_or("Bad output path")?;
     let tmp = free_name(parent, &format!(".unpack-part-{}", safe_segment(job_id)));
-    let mut file = fs::File::create(&tmp).map_err(|e| format!("Cannot write {}: {e}", out_file.display()))?;
+    let mut file =
+        fs::File::create(&tmp).map_err(|e| format!("Cannot write {}: {e}", out_file.display()))?;
     let lf = match ListFile::new(entry) {
         Ok(l) => l,
-        Err(e) => { drop(file); let _ = fs::remove_file(&tmp); return Err(e); }
+        Err(e) => {
+            drop(file);
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
     };
     let mut child = entry_command(exe, archive, &lf, password)
         .stdout(Stdio::piped())
@@ -1351,7 +1683,11 @@ pub fn extract_entry_to(exe: &Path, archive: &Path, entry: &str, password: Optio
         .map_err(|e| format!("Could not start 7-Zip: {e}"))?;
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let err_thread = std::thread::spawn(move || { let mut s = String::new(); let _ = stderr.read_to_string(&mut s); s });
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
     let child = Arc::new(Mutex::new(child));
     jobs.attach(job_id, child.clone());
     if jobs.is_cancelled(job_id) {
@@ -1361,10 +1697,19 @@ pub fn extract_entry_to(exe: &Path, archive: &Path, entry: &str, password: Optio
     let status = child.lock().unwrap().wait().map_err(|e| e.to_string())?;
     let err = err_thread.join().unwrap_or_default();
     drop(file);
-    let fail = |msg: String| { let _ = fs::remove_file(&tmp); Err(msg) };
-    if jobs.is_cancelled(job_id) { return fail(ERR_CANCELLED.into()); }
-    if let Err(e) = copied { return fail(e.to_string()); }
-    if !status.success() { return fail(classify_error(&err, had_pw)); }
+    let fail = |msg: String| {
+        let _ = fs::remove_file(&tmp);
+        Err(msg)
+    };
+    if jobs.is_cancelled(job_id) {
+        return fail(ERR_CANCELLED.into());
+    }
+    if let Err(e) = copied {
+        return fail(e.to_string());
+    }
+    if !status.success() {
+        return fail(classify_error(&err, had_pw));
+    }
     replace_file_safely(&tmp, out_file)
 }
 
@@ -1379,7 +1724,10 @@ pub fn replace_file_safely(tmp: &Path, dst: &Path) -> Result<(), String> {
     };
     let existing = fs::symlink_metadata(dst).ok();
     if existing.as_ref().is_some_and(|m| m.is_dir()) {
-        return fail(format!("{} is a folder, so it can't be replaced by a file.", dst.display()));
+        return fail(format!(
+            "{} is a folder, so it can't be replaced by a file.",
+            dst.display()
+        ));
     }
     let parent = dst.parent().unwrap_or(Path::new("."));
     let aside = match existing {

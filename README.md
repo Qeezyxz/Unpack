@@ -1,6 +1,6 @@
 # Unpack: desktop edition
 
-**Version 1.6.0.** Use at your own risk: back up `launch.ini` and anything you convert or copy. See [DISCLAIMER.txt](DISCLAIMER.txt). Licensed under the [Unpack Non-Commercial License](LICENSE); third-party notices are in [THIRD-PARTY.md](THIRD-PARTY.md).
+**Version 1.7.0.** Use at your own risk: back up `launch.ini` and anything you convert or copy. See [DISCLAIMER.txt](DISCLAIMER.txt). Licensed under the [Unpack Non-Commercial License](LICENSE); third-party notices are in [THIRD-PARTY.md](THIRD-PARTY.md).
 
 This repository is the **complete source code** (Tauri 2: Rust backend, plain HTML/JS page). It is public: you can read it, change it and build it yourself. `HANDOFF.md` describes the architecture, the security model, the build and the tests; `PORT-NOTES.md` explains how the 1.6.0 additions were merged into the reviewed code base.
 
@@ -9,7 +9,7 @@ Unpack opens and extracts **ZIP, RAR, 7Z** (plus TAR, GZ, BZ2, XZ and more), mak
 ## Install
 
 **Option A (recommended): the installer**
-1. Run `Unpack_1.6.0_x64-setup.exe` (from `dist/` after you build it, or from a release you trust).
+1. Run `Unpack_1.7.0_x64-setup.exe` (from `dist/` after you build it, or from a release you trust).
 2. Windows may show "Windows protected your PC" because the file isn't signed. Click **More info**, then **Run anyway**.
 3. The installer doesn't need admin rights. It installs only for your user account.
 

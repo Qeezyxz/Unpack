@@ -1,7 +1,7 @@
 {
   "name": "unpack-app",
   "private": true,
-  "version": "1.6.0",
+  "version": "1.7.0",
   "scripts": { "tauri": "tauri", "test": "node tests/theme.test.mjs" },
   "devDependencies": { "@tauri-apps/cli": "2.12.3" }
 }

@@ -34,7 +34,10 @@ fn classify(l: &str) -> Line {
         Some((k, v)) => {
             // DashLaunch allows trailing ";" comments after values.
             let v = v.split(';').next().unwrap_or("").trim();
-            Line::Kv { key: k.trim().to_string(), value: v.to_string() }
+            Line::Kv {
+                key: k.trim().to_string(),
+                value: v.to_string(),
+            }
         }
         None => Line::Other,
     }
@@ -45,16 +48,29 @@ impl Ini {
         if bytes.len() > INI_MAX {
             return Err("launch.ini is larger than 64 KB; not editing it.".into());
         }
-        let text = std::str::from_utf8(bytes).map_err(|_| "launch.ini isn't plain text; not editing it.".to_string())?;
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| "launch.ini isn't plain text; not editing it.".to_string())?;
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         if text.contains('\0') {
             return Err("launch.ini contains NUL bytes; not editing it.".into());
         }
         let crlf = text.contains("\r\n") || !text.contains('\n');
         let trailing_newline = text.ends_with('\n') || text.is_empty();
-        let raw: Vec<String> = if text.is_empty() { vec![] } else { text.trim_end_matches(['\r', '\n']).split('\n').map(|l| l.trim_end_matches('\r').to_string()).collect() };
+        let raw: Vec<String> = if text.is_empty() {
+            vec![]
+        } else {
+            text.trim_end_matches(['\r', '\n'])
+                .split('\n')
+                .map(|l| l.trim_end_matches('\r').to_string())
+                .collect()
+        };
         let kind = raw.iter().map(|l| classify(l)).collect();
-        Ok(Ini { raw, kind, crlf, trailing_newline })
+        Ok(Ini {
+            raw,
+            kind,
+            crlf,
+            trailing_newline,
+        })
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -73,7 +89,11 @@ impl Ini {
         for k in &self.kind {
             match k {
                 Line::Section(s) => sec = s.clone(),
-                Line::Kv { key, value } => out.push((sec.to_ascii_lowercase(), key.to_ascii_lowercase(), value.clone())),
+                Line::Kv { key, value } => out.push((
+                    sec.to_ascii_lowercase(),
+                    key.to_ascii_lowercase(),
+                    value.clone(),
+                )),
                 Line::Other => {}
             }
         }
@@ -85,7 +105,11 @@ impl Ini {
         for (i, k) in self.kind.iter().enumerate() {
             match k {
                 Line::Section(s) => sec = s.clone(),
-                Line::Kv { key: kk, .. } if sec.eq_ignore_ascii_case(section) && kk.eq_ignore_ascii_case(key) => return Some(i),
+                Line::Kv { key: kk, .. }
+                    if sec.eq_ignore_ascii_case(section) && kk.eq_ignore_ascii_case(key) =>
+                {
+                    return Some(i)
+                }
                 _ => {}
             }
         }
@@ -93,7 +117,10 @@ impl Ini {
     }
 
     pub fn get(&self, section: &str, key: &str) -> Option<String> {
-        self.find(section, key).and_then(|i| match &self.kind[i] { Line::Kv { value, .. } => Some(value.clone()), _ => None })
+        self.find(section, key).and_then(|i| match &self.kind[i] {
+            Line::Kv { value, .. } => Some(value.clone()),
+            _ => None,
+        })
     }
 
     pub fn set(&mut self, section: &str, key: &str, value: &str) {
@@ -109,8 +136,16 @@ impl Ini {
         let mut header: Option<usize> = None;
         for (i, k) in self.kind.iter().enumerate() {
             match k {
-                Line::Section(s) => { sec = s.clone(); if s.eq_ignore_ascii_case(section) { header = Some(i); last_in = Some(i); } }
-                _ if sec.eq_ignore_ascii_case(section) && !self.raw[i].trim().is_empty() => last_in = Some(i),
+                Line::Section(s) => {
+                    sec = s.clone();
+                    if s.eq_ignore_ascii_case(section) {
+                        header = Some(i);
+                        last_in = Some(i);
+                    }
+                }
+                _ if sec.eq_ignore_ascii_case(section) && !self.raw[i].trim().is_empty() => {
+                    last_in = Some(i)
+                }
                 _ => {}
             }
         }
@@ -143,7 +178,9 @@ impl Ini {
     pub fn plugin_slots(&self) -> [Option<String>; 5] {
         let mut out: [Option<String>; 5] = Default::default();
         for n in 1..=5u8 {
-            out[(n - 1) as usize] = self.get(PLUGIN_SECTION, &format!("plugin{n}")).filter(|v| !v.trim().is_empty());
+            out[(n - 1) as usize] = self
+                .get(PLUGIN_SECTION, &format!("plugin{n}"))
+                .filter(|v| !v.trim().is_empty());
         }
         out
     }
@@ -152,24 +189,38 @@ impl Ini {
 /// Where to put `value`. `requested`: the catalog's preferred slot (2..=5). `confirm`: a slot the
 /// user explicitly agreed to overwrite. Returns (slot, previous value) or an error that starts
 /// with `SLOT_OCCUPIED:` (the UI asks the user and retries with `confirm`).
-pub fn choose_slot(ini: &Ini, value: &str, requested: Option<u8>, confirm: Option<u8>) -> Result<(u8, Option<String>), String> {
+pub fn choose_slot(
+    ini: &Ini,
+    value: &str,
+    requested: Option<u8>,
+    confirm: Option<u8>,
+) -> Result<(u8, Option<String>), String> {
     let slots = ini.plugin_slots();
-    if let Some(n) = slots.iter().position(|v| v.as_deref().map_or(false, |v| v.eq_ignore_ascii_case(value))) {
+    if let Some(n) = slots.iter().position(|v| {
+        v.as_deref()
+            .map_or(false, |v| v.eq_ignore_ascii_case(value))
+    }) {
         return Ok((n as u8 + 1, slots[n].clone())); // already there: no change
     }
     if let Some(c) = confirm {
         if !(FIRST_SLOT..=LAST_SLOT).contains(&c) {
-            return Err(format!("plugin{c} can't be used (plugin1 is reserved; use 2–5)."));
+            return Err(format!(
+                "plugin{c} can't be used (plugin1 is reserved; use 2–5)."
+            ));
         }
         return Ok((c, slots[(c - 1) as usize].clone()));
     }
     if let Some(r) = requested {
         if !(FIRST_SLOT..=LAST_SLOT).contains(&r) {
-            return Err(format!("plugin{r} can't be used (plugin1 is reserved; use 2–5)."));
+            return Err(format!(
+                "plugin{r} can't be used (plugin1 is reserved; use 2–5)."
+            ));
         }
         return match &slots[(r - 1) as usize] {
             None => Ok((r, None)),
-            Some(v) => Err(format!("SLOT_OCCUPIED:{r}:plugin{r} is already used by {v}. Replace it?")),
+            Some(v) => Err(format!(
+                "SLOT_OCCUPIED:{r}:plugin{r} is already used by {v}. Replace it?"
+            )),
         };
     }
     for n in FIRST_SLOT..=LAST_SLOT {
@@ -177,17 +228,31 @@ pub fn choose_slot(ini: &Ini, value: &str, requested: Option<u8>, confirm: Optio
             return Ok((n, None));
         }
     }
-    Err(format!("SLOT_OCCUPIED:{LAST_SLOT}:plugin2–plugin5 are all in use (plugin5 = {}). Replace plugin5?", slots[4].clone().unwrap_or_default()))
+    Err(format!(
+        "SLOT_OCCUPIED:{LAST_SLOT}:plugin2–plugin5 are all in use (plugin5 = {}). Replace plugin5?",
+        slots[4].clone().unwrap_or_default()
+    ))
 }
 
 /// The edited file must parse back to exactly the old keys plus/minus the one change.
-pub fn validate_change(before: &Ini, after_bytes: &[u8], key: &str, new_value: Option<&str>) -> Result<(), String> {
+pub fn validate_change(
+    before: &Ini,
+    after_bytes: &[u8],
+    key: &str,
+    new_value: Option<&str>,
+) -> Result<(), String> {
     let after = Ini::parse(after_bytes)?;
     let k = key.to_ascii_lowercase();
     let sec = PLUGIN_SECTION.to_ascii_lowercase();
-    let strip = |v: Vec<(String, String, String)>| v.into_iter().filter(|(s, kk, _)| !(s == &sec && kk == &k)).collect::<Vec<_>>();
+    let strip = |v: Vec<(String, String, String)>| {
+        v.into_iter()
+            .filter(|(s, kk, _)| !(s == &sec && kk == &k))
+            .collect::<Vec<_>>()
+    };
     if strip(before.entries()) != strip(after.entries()) {
-        return Err("launch.ini check failed: other settings would change. Nothing was written.".into());
+        return Err(
+            "launch.ini check failed: other settings would change. Nothing was written.".into(),
+        );
     }
     if after.get(PLUGIN_SECTION, key).as_deref() != new_value {
         return Err("launch.ini check failed: the plugin line didn't come out as expected.".into());

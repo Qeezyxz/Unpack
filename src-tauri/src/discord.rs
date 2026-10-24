@@ -212,7 +212,9 @@ mod tests {
         let (mut s, _) = loop {
             match l.accept() {
                 Ok(c) => break c,
-                Err(_) if t0.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) if t0.elapsed() < Duration::from_secs(5) => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
                 Err(e) => panic!("never connected: {e}"),
             }
         };

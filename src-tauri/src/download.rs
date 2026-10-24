@@ -24,10 +24,15 @@ const META_SUFFIX: &str = ".meta";
 
 /// Human size for messages: GB for ≥ 1 GB, else MB, else KB / bytes (R12 LOW-4).
 pub fn human_size(n: u64) -> String {
-    if n >= 1_000_000_000 { format!("{:.1} GB", n as f64 / 1e9) }
-    else if n >= 1 << 20 { format!("{:.1} MB", n as f64 / 1_048_576.0) }
-    else if n >= 1024 { format!("{:.1} KB", n as f64 / 1024.0) }
-    else { format!("{n} bytes") }
+    if n >= 1_000_000_000 {
+        format!("{:.1} GB", n as f64 / 1e9)
+    } else if n >= 1 << 20 {
+        format!("{:.1} MB", n as f64 / 1_048_576.0)
+    } else if n >= 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{n} bytes")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -38,8 +43,67 @@ pub struct DownloadOpts {
 
 impl Default for DownloadOpts {
     fn default() -> Self {
-        Self { max_bytes: DEFAULT_MAX_BYTES, expected_sha256: None }
+        Self {
+            max_bytes: DEFAULT_MAX_BYTES,
+            expected_sha256: None,
+        }
     }
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ReleaseInfo {
+    pub available: bool,
+    pub latest: String,
+    pub url: String,
+}
+
+/// Opt-in check against GitHub releases (no auto-install).
+pub fn check_github_release(current: &str) -> Result<ReleaseInfo, String> {
+    let url = "https://api.github.com/repos/Qeezyxz/Unpack/releases/latest";
+    let resp = ureq::get(url)
+        .set("User-Agent", UA)
+        .timeout(Duration::from_secs(12))
+        .call()
+        .map_err(|e| format!("Couldn't reach GitHub: {e}"))?;
+    let text = resp.into_string().map_err(|e| e.to_string())?;
+    let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let tag = body["tag_name"]
+        .as_str()
+        .unwrap_or("")
+        .trim_start_matches('v')
+        .to_string();
+    let html = body["html_url"].as_str().unwrap_or("").to_string();
+    let available = !tag.is_empty() && version_gt(&tag, current);
+    Ok(ReleaseInfo {
+        available,
+        latest: if tag.is_empty() {
+            current.to_string()
+        } else {
+            tag
+        },
+        url: html,
+    })
+}
+
+fn version_gt(a: &str, b: &str) -> bool {
+    let pa = a
+        .split('.')
+        .filter_map(|x| x.parse::<u32>().ok())
+        .collect::<Vec<_>>();
+    let pb = b
+        .split('.')
+        .filter_map(|x| x.parse::<u32>().ok())
+        .collect::<Vec<_>>();
+    for i in 0..pa.len().max(pb.len()) {
+        let (x, y) = (
+            pa.get(i).copied().unwrap_or(0),
+            pb.get(i).copied().unwrap_or(0),
+        );
+        if x != y {
+            return x > y;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Serialize)]
@@ -110,7 +174,9 @@ pub fn resolve_safe_addrs(url: &Url) -> Result<Vec<SocketAddr>, String> {
             }
             for a in &addrs {
                 if is_blocked_ip(a.ip()) && !(allow && a.ip().is_loopback()) {
-                    return Err(format!("Refusing download: {host} resolves to a local/private address."));
+                    return Err(format!(
+                        "Refusing download: {host} resolves to a local/private address."
+                    ));
                 }
             }
             Ok(addrs)
@@ -145,7 +211,6 @@ fn agent_pinned(host_key: String, addrs: Vec<SocketAddr>) -> ureq::Agent {
         .build()
 }
 
-
 fn parse_url(u: &str) -> Result<Url, String> {
     let url = Url::parse(u).map_err(|e| format!("Bad URL: {e}"))?;
     if url.scheme() != "http" && url.scheme() != "https" {
@@ -159,7 +224,9 @@ fn parse_url(u: &str) -> Result<Url, String> {
 
 /// Exact host match: `drive.google.com` or a subdomain of it (not substring-in-path).
 pub fn host_matches(url: &Url, domain: &str) -> bool {
-    let Some(h) = url.host_str() else { return false };
+    let Some(h) = url.host_str() else {
+        return false;
+    };
     let h = h.trim_end_matches('.').to_ascii_lowercase();
     let d = domain.to_ascii_lowercase();
     h == d || h.ends_with(&format!(".{d}"))
@@ -205,7 +272,8 @@ pub fn assert_safe_url(url: &Url) -> Result<(), String> {
 }
 
 fn join_redirect(base: &Url, loc: &str) -> Result<Url, String> {
-    base.join(loc).map_err(|e| format!("Bad redirect Location: {e}"))
+    base.join(loc)
+        .map_err(|e| format!("Bad redirect Location: {e}"))
 }
 
 /// Public hoster helpers — host must match exactly (or subdomain), never a substring of the path.
@@ -215,16 +283,25 @@ pub fn resolve_direct(url: &str) -> Result<String, String> {
     for _ in 0..MAX_RESOLVE {
         if host_matches(&u, "drive.google.com") || host_matches(&u, "docs.google.com") {
             if let Some(id) = google_id(u.as_str()) {
-                u = parse_url(&format!("https://drive.google.com/uc?export=download&id={id}"))?;
+                u = parse_url(&format!(
+                    "https://drive.google.com/uc?export=download&id={id}"
+                ))?;
                 assert_safe_url(&u)?;
                 continue;
             }
         }
-        if host_matches(&u, "dropbox.com") || host_matches(&u, "www.dropbox.com") || host_matches(&u, "dl.dropboxusercontent.com") {
+        if host_matches(&u, "dropbox.com")
+            || host_matches(&u, "www.dropbox.com")
+            || host_matches(&u, "dl.dropboxusercontent.com")
+        {
             let mut s = u.to_string();
             s = s.replace("dl=0", "dl=1");
             if !s.contains("dl=1") {
-                s = if s.contains('?') { format!("{s}&dl=1") } else { format!("{s}?dl=1") };
+                s = if s.contains('?') {
+                    format!("{s}&dl=1")
+                } else {
+                    format!("{s}?dl=1")
+                };
             }
             u = parse_url(&s)?;
             break;
@@ -238,7 +315,9 @@ pub fn resolve_direct(url: &str) -> Result<String, String> {
                 .map_err(|e| format!("MediaFire page: {e}"))?
                 .into_string()
                 .map_err(|e| e.to_string())?;
-            let d = mediafire_href(&body).ok_or_else(|| "Couldn't find a public MediaFire download link on that page.".to_string())?;
+            let d = mediafire_href(&body).ok_or_else(|| {
+                "Couldn't find a public MediaFire download link on that page.".to_string()
+            })?;
             u = parse_url(&d)?;
             if !(host_matches(&u, "mediafire.com") || host_matches(&u, "download.mediafire.com")) {
                 return Err("MediaFire link left mediafire.com; refused.".into());
@@ -254,14 +333,20 @@ pub fn resolve_direct(url: &str) -> Result<String, String> {
 fn google_id(u: &str) -> Option<String> {
     if let Some(i) = u.find("/file/d/") {
         let rest = &u[i + 8..];
-        let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+        let id: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
         if id.len() >= 10 {
             return Some(id);
         }
     }
     if let Some(i) = u.find("id=") {
         let rest = &u[i + 3..];
-        let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+        let id: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
         if id.len() >= 10 {
             return Some(id);
         }
@@ -270,12 +355,18 @@ fn google_id(u: &str) -> Option<String> {
 }
 
 fn mediafire_href(html: &str) -> Option<String> {
-    for marker in ["id=\"downloadButton\"", "aria-label=\"Download file\"", "download.mediafire.com"] {
+    for marker in [
+        "id=\"downloadButton\"",
+        "aria-label=\"Download file\"",
+        "download.mediafire.com",
+    ] {
         if let Some(i) = html.find(marker) {
             let window = &html[i.saturating_sub(200)..html.len().min(i + 800)];
             if let Some(h) = href_in(window) {
                 if let Ok(u) = parse_url(&h) {
-                    if host_matches(&u, "mediafire.com") || host_matches(&u, "download.mediafire.com") {
+                    if host_matches(&u, "mediafire.com")
+                        || host_matches(&u, "download.mediafire.com")
+                    {
                         return Some(h);
                     }
                 }
@@ -309,7 +400,10 @@ fn filename_from(url: &str, cd: Option<&str>) -> String {
             return sanitize_name(&name);
         }
     }
-    let path = Url::parse(url).ok().and_then(|u| u.path_segments()?.last().map(|s| s.to_string())).unwrap_or_else(|| "download".into());
+    let path = Url::parse(url)
+        .ok()
+        .and_then(|u| u.path_segments()?.last().map(|s| s.to_string()))
+        .unwrap_or_else(|| "download".into());
     let name = percent_decode(&path);
     sanitize_name(if name.is_empty() { "download" } else { &name })
 }
@@ -404,14 +498,40 @@ pub fn is_windows_reserved_stem(stem: &str) -> bool {
         .trim()
         .trim_end_matches(|c| c == ' ' || c == '.')
         .chars()
-        .map(|c| match c { '\u{00B9}' => '1', '\u{00B2}' => '2', '\u{00B3}' => '3', _ => c })
+        .map(|c| match c {
+            '\u{00B9}' => '1',
+            '\u{00B2}' => '2',
+            '\u{00B3}' => '3',
+            _ => c,
+        })
         .collect::<String>()
         .to_ascii_uppercase();
     matches!(
         s.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
-            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "CONIN$"
+            | "CONOUT$"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     ) || (s.len() == 4
         && (s.starts_with("COM") || s.starts_with("LPT"))
         && s.as_bytes()[3].is_ascii_digit())
@@ -421,7 +541,12 @@ pub fn sanitize_name(n: &str) -> String {
     let mut n: String = n
         .chars()
         .map(|c| {
-            if is_bidi_control(c) || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0') {
+            if is_bidi_control(c)
+                || matches!(
+                    c,
+                    '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'
+                )
+            {
                 '_'
             } else {
                 c
@@ -488,12 +613,16 @@ fn partial_shares_data(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        fs::symlink_metadata(path).map(|m| m.nlink() > 1).unwrap_or(false)
+        fs::symlink_metadata(path)
+            .map(|m| m.nlink() > 1)
+            .unwrap_or(false)
     }
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
         let Ok(f) = File::open(path) else { return true }; // can't check → treat as unsafe, restart
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         let ok = unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) };
@@ -607,11 +736,20 @@ fn parse_content_range(cr: &str) -> Option<(u64, u64)> {
     let (range, total) = rest.split_once('/')?;
     let (start, _) = range.split_once('-')?;
     let start: u64 = start.parse().ok()?;
-    let total = if total == "*" { None } else { Some(total.parse().ok()?) };
+    let total = if total == "*" {
+        None
+    } else {
+        Some(total.parse().ok()?)
+    };
     Some((start, total.unwrap_or(0)))
 }
 
-pub fn download(url: &str, dir: &Path, progress: &mut dyn FnMut(u32, &str), cancelled: &dyn Fn() -> bool) -> Result<DownloadResult, String> {
+pub fn download(
+    url: &str,
+    dir: &Path,
+    progress: &mut dyn FnMut(u32, &str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<DownloadResult, String> {
     download_with(url, dir, &DownloadOpts::default(), progress, cancelled)
 }
 
@@ -632,7 +770,13 @@ pub fn download_with(
     current = parse_url(&resolve_direct(current.as_str())?)?;
 
     let mut resp_holder = None;
-    let mut final_headers: Option<(Option<String>, Option<String>, Option<u64>, Option<String>, String)> = None;
+    let mut final_headers: Option<(
+        Option<String>,
+        Option<String>,
+        Option<u64>,
+        Option<String>,
+        String,
+    )> = None;
     // etag, last_modified, content_length, content_type, content_disposition
     let mut pinned_agent = None;
 
@@ -647,7 +791,10 @@ pub fn download_with(
         let host_key = url_host_key(&current)?;
         let agent = agent_pinned(host_key, addrs);
         pinned_agent = Some(agent.clone());
-        let r = agent.get(current.as_str()).call().map_err(|e| format!("Download failed: {e}"))?;
+        let r = agent
+            .get(current.as_str())
+            .call()
+            .map_err(|e| format!("Download failed: {e}"))?;
         let status = r.status();
         if (300..400).contains(&status) {
             if hop == MAX_REDIRECTS {
@@ -672,9 +819,14 @@ pub fn download_with(
             return Err(format!("Server returned HTTP {status}."));
         }
         // Only a strong ETag is a usable resume validator (weak W/ tags may match changed bytes).
-        let etag = r.header("etag").map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && !s.starts_with("W/"));
+        let etag = r
+            .header("etag")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && !s.starts_with("W/"));
         let lm = r.header("last-modified").map(|s| s.to_string());
-        let len = r.header("content-length").and_then(|s| s.parse::<u64>().ok());
+        let len = r
+            .header("content-length")
+            .and_then(|s| s.parse::<u64>().ok());
         let ct = r.header("content-type").unwrap_or("").to_string();
         let cd = r.header("content-disposition").unwrap_or("").to_string();
         final_headers = Some((etag, lm, len, Some(ct), cd));
@@ -684,17 +836,34 @@ pub fn download_with(
     let resp = resp_holder.ok_or_else(|| "Too many redirects.".to_string())?;
     let (etag, last_modified, len, ct, cd) = final_headers.unwrap();
     let ct = ct.unwrap_or_default().to_ascii_lowercase();
-    let name = filename_from(current.as_str(), if cd.is_empty() { None } else { Some(cd.as_str()) });
+    let name = filename_from(
+        current.as_str(),
+        if cd.is_empty() {
+            None
+        } else {
+            Some(cd.as_str())
+        },
+    );
     if ct.contains("text/html") && !name.contains('.') {
-        return Err("That link returned a web page, not a file. Try a direct download link.".into());
+        return Err(
+            "That link returned a web page, not a file. Try a direct download link.".into(),
+        );
     }
     if let Some(n) = len {
         if n > opts.max_bytes {
-            return Err(format!("File is {}; the size limit is {}. Raise it in Settings if you meant to.", human_size(n), human_size(opts.max_bytes)));
+            return Err(format!(
+                "File is {}; the size limit is {}. Raise it in Settings if you meant to.",
+                human_size(n),
+                human_size(opts.max_bytes)
+            ));
         }
         if let Some(free) = crate::god::free_space(dir) {
             if free < n + 32 * 1024 * 1024 {
-                return Err(format!("Not enough free space: needs {} MB, {} MB free.", n / 1_048_576, free / 1_048_576));
+                return Err(format!(
+                    "Not enough free space: needs {} MB, {} MB free.",
+                    n / 1_048_576,
+                    free / 1_048_576
+                ));
             }
         }
     }
@@ -705,10 +874,17 @@ pub fn download_with(
     let partial = dest.parent().unwrap().join(pname);
 
     let mut have = 0u64;
-    let mut resume_meta = PartialMeta { etag: etag.clone(), last_modified: last_modified.clone(), url: current.to_string() };
+    let mut resume_meta = PartialMeta {
+        etag: etag.clone(),
+        last_modified: last_modified.clone(),
+        url: current.to_string(),
+    };
     if let Ok(m) = fs::symlink_metadata(&partial) {
         if safecopy::is_link(&m) || !m.is_file() {
-            return Err(format!("{} is not a regular file.", safecopy::plain(&partial.display().to_string())));
+            return Err(format!(
+                "{} is not a regular file.",
+                safecopy::plain(&partial.display().to_string())
+            ));
         }
         have = m.len();
         if partial_shares_data(&partial) {
@@ -718,7 +894,11 @@ pub fn download_with(
             have = 0;
         } else if let Some(old) = load_meta(&partial) {
             // URL changed, or nothing strong to compare a resumed body with → restart
-            let weak = old.etag.as_deref().map_or(true, |e| e.starts_with("W/")) && old.last_modified.as_deref().map_or(true, |l| l.trim().is_empty());
+            let weak = old.etag.as_deref().map_or(true, |e| e.starts_with("W/"))
+                && old
+                    .last_modified
+                    .as_deref()
+                    .map_or(true, |l| l.trim().is_empty());
             if old.url != current.as_str() || weak {
                 clear_partial(&partial);
                 have = 0;
@@ -732,9 +912,13 @@ pub fn download_with(
         }
     }
 
-    let agent = pinned_agent.clone().ok_or_else(|| "Internal error: no pinned agent.".to_string())?;
+    let agent = pinned_agent
+        .clone()
+        .ok_or_else(|| "Internal error: no pinned agent.".to_string())?;
     let (mut reader, total_hint): (Box<dyn Read + Send>, Option<u64>) = if have > 0 {
-        let mut req = agent.get(current.as_str()).set("Range", &format!("bytes={have}-"));
+        let mut req = agent
+            .get(current.as_str())
+            .set("Range", &format!("bytes={have}-"));
         if let Some(ref e) = resume_meta.etag {
             req = req.set("If-Range", e);
         } else if let Some(ref lm) = resume_meta.last_modified {
@@ -754,7 +938,10 @@ pub fn download_with(
                     && resp_lm != resume_meta.last_modified
                 {
                     clear_partial(&partial);
-                    return Err("Resume failed (Last-Modified changed). Partial cleared — try again.".into());
+                    return Err(
+                        "Resume failed (Last-Modified changed). Partial cleared — try again."
+                            .into(),
+                    );
                 }
                 let cr = r.header("content-range").unwrap_or("").to_string();
                 let (start, total) = parse_content_range(&cr).ok_or_else(|| {
@@ -781,7 +968,10 @@ pub fn download_with(
             Ok(r) if (200..300).contains(&r.status()) => {
                 clear_partial(&partial);
                 have = 0;
-                let t = r.header("content-length").and_then(|s| s.parse().ok()).or(len);
+                let t = r
+                    .header("content-length")
+                    .and_then(|s| s.parse().ok())
+                    .or(len);
                 (Box::new(r.into_reader()), t)
             }
             _ => {
@@ -791,7 +981,11 @@ pub fn download_with(
             }
         }
     } else {
-        resume_meta = PartialMeta { etag: etag.clone(), last_modified: last_modified.clone(), url: current.to_string() };
+        resume_meta = PartialMeta {
+            etag: etag.clone(),
+            last_modified: last_modified.clone(),
+            url: current.to_string(),
+        };
         save_meta(&partial, &resume_meta)?;
         (Box::new(resp.into_reader()), len)
     };
@@ -826,7 +1020,11 @@ pub fn download_with(
     let mut buf = vec![0u8; 1 << 16];
     let mut last_progress = Instant::now();
     progress(
-        if let Some(t) = total_hint { ((got * 100) / t.max(1)) as u32 } else { 0 },
+        if let Some(t) = total_hint {
+            ((got * 100) / t.max(1)) as u32
+        } else {
+            0
+        },
         &format!("Downloading {name}…"),
     );
     loop {
@@ -840,7 +1038,9 @@ pub fn download_with(
         }
         if last_progress.elapsed() > IDLE_TIMEOUT {
             let _ = out.sync_all();
-            return Err("Download stalled (no data for 2 minutes). You can try again to resume.".into());
+            return Err(
+                "Download stalled (no data for 2 minutes). You can try again to resume.".into(),
+            );
         }
         let n = match reader.read(&mut buf) {
             Ok(0) => break,
@@ -884,7 +1084,9 @@ pub fn download_with(
             if got > t {
                 clear_partial(&partial);
             }
-            return Err(format!("Download incomplete: got {got} of {t} bytes. You can try again to resume."));
+            return Err(format!(
+                "Download incomplete: got {got} of {t} bytes. You can try again to resume."
+            ));
         }
     }
     if got == 0 {
@@ -898,7 +1100,9 @@ pub fn download_with(
         let h = String::from_utf8_lossy(&head[..n]).to_ascii_lowercase();
         if h.contains("<!doctype html") || h.contains("<html") {
             clear_partial(&partial);
-            return Err("That link returned a web page, not a file. Try a direct download link.".into());
+            return Err(
+                "That link returned a web page, not a file. Try a direct download link.".into(),
+            );
         }
     }
     if dest.exists() {
@@ -912,7 +1116,9 @@ pub fn download_with(
         if exp != &sha {
             let base = format!(
                 "{}.bad-hash",
-                dest.file_name().and_then(|n| n.to_str()).unwrap_or("download.bin")
+                dest.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("download.bin")
             );
             let q = unique_path(dir, &base);
             let _ = fs::rename(&partial, &q);
@@ -951,7 +1157,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 pub fn list_archives(root: &Path) -> Result<Vec<String>, String> {
-    let meta = fs::symlink_metadata(root).map_err(|e| format!("Cannot open {}: {e}", root.display()))?;
+    let meta =
+        fs::symlink_metadata(root).map_err(|e| format!("Cannot open {}: {e}", root.display()))?;
     if safecopy::is_link(&meta) {
         return Err("Links aren't followed; pick the real folder.".into());
     }
@@ -964,7 +1171,9 @@ pub fn list_archives(root: &Path) -> Result<Vec<String>, String> {
         let Ok(rd) = fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
             let p = e.path();
-            let Ok(m) = fs::symlink_metadata(&p) else { continue };
+            let Ok(m) = fs::symlink_metadata(&p) else {
+                continue;
+            };
             if safecopy::is_link(&m) {
                 continue;
             }
@@ -972,7 +1181,9 @@ pub fn list_archives(root: &Path) -> Result<Vec<String>, String> {
                 st.push(p);
             } else if m.is_file() {
                 let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                if crate::archive::is_archive_name(name) || name.to_ascii_lowercase().ends_with(".iso") {
+                if crate::archive::is_archive_name(name)
+                    || name.to_ascii_lowercase().ends_with(".iso")
+                {
                     out.push(p.display().to_string());
                 }
             }
@@ -1007,7 +1218,10 @@ mod tests {
             if let Ok((mut s, _)) = listener.accept() {
                 let mut buf = [0u8; 2048];
                 let _ = s.read(&mut buf);
-                let resp = format!("HTTP/1.1 {st}\r\nContent-Length: {}\r\n{hd}\r\n", body.len());
+                let resp = format!(
+                    "HTTP/1.1 {st}\r\nContent-Length: {}\r\n{hd}\r\n",
+                    body.len()
+                );
                 let _ = s.write_all(resp.as_bytes());
                 let _ = s.write_all(body);
             }
@@ -1024,7 +1238,10 @@ mod tests {
         let url = serve_once("200 OK", "Content-Disposition: attachment; filename=\"pack.zip\"\r\nContent-Type: application/zip\r\n", b"hello-download-bytes!!");
         let r = download(&url, &d, &mut |_, _| {}, &|| false).unwrap();
         assert_eq!(r.name, "pack.zip");
-        assert_eq!(r.sha256, hex_lower(&Sha256::digest(b"hello-download-bytes!!")));
+        assert_eq!(
+            r.sha256,
+            hex_lower(&Sha256::digest(b"hello-download-bytes!!"))
+        );
         assert!(r.http_warning);
         std::env::remove_var("UNPACK_TEST_ALLOW_LOOPBACK");
         fs::remove_dir_all(&d).unwrap();
@@ -1036,8 +1253,14 @@ mod tests {
         std::env::set_var("UNPACK_TEST_ALLOW_LOOPBACK", "1");
         let d = tmp("bad");
         assert!(download("file:///etc/passwd", &d, &mut |_, _| {}, &|| false).is_err());
-        let url = serve_once("200 OK", "Content-Type: text/html\r\n", b"<!DOCTYPE html><html>login</html>");
-        assert!(download(&url, &d, &mut |_, _| {}, &|| false).unwrap_err().contains("web page"));
+        let url = serve_once(
+            "200 OK",
+            "Content-Type: text/html\r\n",
+            b"<!DOCTYPE html><html>login</html>",
+        );
+        assert!(download(&url, &d, &mut |_, _| {}, &|| false)
+            .unwrap_err()
+            .contains("web page"));
         std::env::remove_var("UNPACK_TEST_ALLOW_LOOPBACK");
         fs::remove_dir_all(&d).unwrap();
     }
@@ -1059,12 +1282,18 @@ mod tests {
         assert!(s.contains("dl=1"));
         let g = parse_url("https://drive.google.com/file/d/abcdefghijklmnopqrstuv/view").unwrap();
         assert!(host_matches(&g, "drive.google.com"));
-        assert_eq!(google_id(g.as_str()).as_deref(), Some("abcdefghijklmnopqrstuv"));
+        assert_eq!(
+            google_id(g.as_str()).as_deref(),
+            Some("abcdefghijklmnopqrstuv")
+        );
         // Substring trap must not resolve_direct-fetch: host is 127.0.0.1
         std::env::set_var("UNPACK_TEST_ALLOW_LOOPBACK", "1");
         let trap = "http://127.0.0.1/zz?mediafire.com";
         let out = resolve_direct(trap).unwrap();
-        assert!(out.contains("127.0.0.1"), "must not treat query as hoster: {out}");
+        assert!(
+            out.contains("127.0.0.1"),
+            "must not treat query as hoster: {out}"
+        );
         std::env::remove_var("UNPACK_TEST_ALLOW_LOOPBACK");
     }
 
@@ -1167,7 +1396,15 @@ mod tests {
         // Seed a stale partial claiming same URL with etag
         let partial = d.join("f.bin.partial");
         fs::write(&partial, b"OLDOLDOLDOLD").unwrap();
-        save_meta(&partial, &PartialMeta { etag: Some("\"v1\"".into()), last_modified: None, url: url.clone() }).ok();
+        save_meta(
+            &partial,
+            &PartialMeta {
+                etag: Some("\"v1\"".into()),
+                last_modified: None,
+                url: url.clone(),
+            },
+        )
+        .ok();
         // Bypass SSRF for loopback in this unit test by calling the resume path through download —
         // assert_safe_url blocks 127.0.0.1. So test parse/clear logic directly:
         let have = fs::metadata(&partial).unwrap().len();
@@ -1195,7 +1432,9 @@ mod tests {
         fs::write(&existing, b"OLD").unwrap();
         let base = format!(
             "{}.bad-hash",
-            dest.file_name().and_then(|n| n.to_str()).unwrap_or("download.bin")
+            dest.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("download.bin")
         );
         let q = unique_path(&d, &base);
         assert_ne!(q, existing);
@@ -1223,7 +1462,12 @@ mod tests {
 
     #[test]
     fn sanitize_superscript_devices() {
-        for n in ["COM\u{00B9}", "com\u{00B2}.txt", "LPT\u{00B3}.tar.gz", "lpt\u{00B9} .log"] {
+        for n in [
+            "COM\u{00B9}",
+            "com\u{00B2}.txt",
+            "LPT\u{00B3}.tar.gz",
+            "lpt\u{00B9} .log",
+        ] {
             assert!(sanitize_name(n).starts_with('_'), "{n}");
         }
         assert!(!sanitize_name("COM\u{00B9}0.txt").starts_with('_'));
@@ -1263,19 +1507,28 @@ mod tests {
     }
 
     /// Server that serves `body` with optional headers, honouring Range blindly (ignores If-Range).
-    fn serve_range(body: &'static [u8], headers: &'static str, n: usize) -> (u16, Arc<Mutex<Vec<String>>>) {
+    fn serve_range(
+        body: &'static [u8],
+        headers: &'static str,
+        n: usize,
+    ) -> (u16, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let reqs = Arc::new(Mutex::new(vec![]));
         let r2 = reqs.clone();
         thread::spawn(move || {
             for _ in 0..n {
-                let Ok((mut s, _)) = listener.accept() else { break };
+                let Ok((mut s, _)) = listener.accept() else {
+                    break;
+                };
                 let mut buf = [0u8; 4096];
                 let k = s.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..k]).to_string();
                 r2.lock().unwrap().push(req.clone());
-                let start = req.lines().find_map(|l| l.strip_prefix("Range: bytes=")).and_then(|v| v.trim_end_matches('-').parse::<usize>().ok());
+                let start = req
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Range: bytes="))
+                    .and_then(|v| v.trim_end_matches('-').parse::<usize>().ok());
                 let resp = match start {
                     Some(st) if st < body.len() => format!("HTTP/1.1 206 Partial Content\r\n{headers}Content-Range: bytes {st}-{}/{}\r\nContent-Length: {}\r\n\r\n", body.len() - 1, body.len(), body.len() - st),
                     _ => format!("HTTP/1.1 200 OK\r\n{headers}Content-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n", body.len()),
@@ -1297,10 +1550,29 @@ mod tests {
             let url = format!("http://127.0.0.1:{port}/f.bin");
             let partial = d.join("f.bin.partial");
             fs::write(&partial, b"OLDOLD").unwrap();
-            save_meta(&partial, &PartialMeta { etag: if tag == "weak" { Some("W/\"v1\"".into()) } else { None }, last_modified: None, url: url.clone() }).unwrap();
+            save_meta(
+                &partial,
+                &PartialMeta {
+                    etag: if tag == "weak" {
+                        Some("W/\"v1\"".into())
+                    } else {
+                        None
+                    },
+                    last_modified: None,
+                    url: url.clone(),
+                },
+            )
+            .unwrap();
             let r = download(&url, &d, &mut |_, _| {}, &|| false).unwrap();
-            assert_eq!(fs::read(&r.path).unwrap(), b"NEWFILECONTENT", "{tag}: restarted, no old prefix");
-            assert!(!reqs.lock().unwrap().iter().any(|q| q.contains("Range:")), "{tag}: no Range sent");
+            assert_eq!(
+                fs::read(&r.path).unwrap(),
+                b"NEWFILECONTENT",
+                "{tag}: restarted, no old prefix"
+            );
+            assert!(
+                !reqs.lock().unwrap().iter().any(|q| q.contains("Range:")),
+                "{tag}: no Range sent"
+            );
             fs::remove_dir_all(&d).ok();
         }
         std::env::remove_var("UNPACK_TEST_ALLOW_LOOPBACK");
@@ -1317,7 +1589,15 @@ mod tests {
         fs::write(&victim, b"KEEP").unwrap();
         let partial = d.join("f.bin.partial");
         fs::hard_link(&victim, &partial).unwrap();
-        save_meta(&partial, &PartialMeta { etag: Some("\"s1\"".into()), last_modified: None, url: url.clone() }).unwrap();
+        save_meta(
+            &partial,
+            &PartialMeta {
+                etag: Some("\"s1\"".into()),
+                last_modified: None,
+                url: url.clone(),
+            },
+        )
+        .unwrap();
         let r = download(&url, &d, &mut |_, _| {}, &|| false).unwrap();
         assert_eq!(fs::read(&victim).unwrap(), b"KEEP");
         assert_eq!(fs::read(&r.path).unwrap(), b"0123456789");
@@ -1350,7 +1630,10 @@ mod tests {
 
     #[test]
     fn size_cap_setting() {
-        let opts = DownloadOpts { max_bytes: 10, expected_sha256: None };
+        let opts = DownloadOpts {
+            max_bytes: 10,
+            expected_sha256: None,
+        };
         assert!(opts.max_bytes < DEFAULT_MAX_BYTES);
     }
 
@@ -1359,7 +1642,13 @@ mod tests {
         assert!(parse_expected_sha256(Some("abcd")).is_err());
         assert!(parse_expected_sha256(Some(&"0".repeat(63))).is_err());
         assert!(parse_expected_sha256(Some(&"g".repeat(64))).is_err());
-        assert_eq!(parse_expected_sha256(Some(&"a".repeat(64))).unwrap().unwrap().len(), 64);
+        assert_eq!(
+            parse_expected_sha256(Some(&"a".repeat(64)))
+                .unwrap()
+                .unwrap()
+                .len(),
+            64
+        );
         assert!(parse_expected_sha256(None).unwrap().is_none());
         assert!(parse_expected_sha256(Some("  ")).unwrap().is_none());
     }
@@ -1373,7 +1662,10 @@ mod tests {
         let _guard = env_lock();
         std::env::remove_var("UNPACK_TEST_ALLOW_LOOPBACK");
         let e = assert_safe_url(&u).unwrap_err();
-        assert!(e.contains("allowed") || e.contains("local") || e.contains("private"), "{e}");
+        assert!(
+            e.contains("allowed") || e.contains("local") || e.contains("private"),
+            "{e}"
+        );
         let u = parse_url("http://[2001:4860:4860::8888]/").unwrap();
         // public DNS — resolve may fail offline; at least host parse works
         assert!(matches!(u.host(), Some(url::Host::Ipv6(_))));
@@ -1390,10 +1682,24 @@ mod tests {
             let victim = d.join("victim");
             fs::write(&victim, b"KEEP").unwrap();
             std::os::unix::fs::symlink(&victim, &mp).unwrap();
-            assert!(save_meta(&partial, &PartialMeta { etag: None, last_modified: None, url: "http://x".into() }).is_err());
+            assert!(save_meta(
+                &partial,
+                &PartialMeta {
+                    etag: None,
+                    last_modified: None,
+                    url: "http://x".into()
+                }
+            )
+            .is_err());
             assert_eq!(fs::read(&victim).unwrap(), b"KEEP");
         }
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn release_compare() {
+        assert!(version_gt("1.7.0", "1.6.0"));
+        assert!(!version_gt("1.6.0", "1.7.0"));
     }
 
     #[test]

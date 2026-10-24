@@ -35,6 +35,12 @@ src-tauri/src/lib.rs  — Tauri commands, path grants check, job registry, event
       ├─ discs.rs      disc-number parsing ("Disc 2", "CD1"...), multi-disc grouping and notes
       ├─ destlock.rs   per-destination wait locks (jobs writing the same folder queue up)
       ├─ discord.rs    Discord Rich Presence worker thread (local IPC, off toggle, no network from the page)
+      ├─ hints.rs      plain-English fix-it hints for common errors (`error_help`)
+      ├─ preflight.rs  batch/send free-space + FAT32 >4 GB checks (`preflight_local`)
+      ├─ lan.rs        opt-in /24 FTP discovery (`lan_discover`)
+      ├─ usbprep.rs    USB wizard folders (never format) (`usb_prepare`)
+      ├─ saves.rs      profile save backup over FTP (`saves_backup`)
+      ├─ covers.rs     library cover art cache (local / opt-in network)
       └─ safecopy.rs   grants registry, no-link writes, .partial + hash verify, FAT32 4 GiB check
 src-tauri/vendor/iso2god   MIT iso2god-rs (patched: directory depth 64 + cycle detection)
 src-tauri/examples/bridge.rs  TEST ONLY HTTP bridge exposing the same commands to headless Chrome

@@ -1,2 +1,4 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-fn main() { unpack_lib::run() }
+fn main() {
+    unpack_lib::run()
+}

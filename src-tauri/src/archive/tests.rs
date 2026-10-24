@@ -8,7 +8,8 @@ fn data(name: &str) -> PathBuf {
         "symlink.zip" | "wrapped.zip" | "big.7z" => return fixture(name),
         _ => {}
     }
-    PathBuf::from(std::env::var("UNPACK_TESTDATA").unwrap_or("/workspace/testdata".into())).join(name)
+    PathBuf::from(std::env::var("UNPACK_TESTDATA").unwrap_or("/workspace/testdata".into()))
+        .join(name)
 }
 
 // ---------- generated fixtures (no external files needed) ----------
@@ -24,16 +25,35 @@ pub(crate) fn write_zip(path: &Path, entries: &[(&str, &[u8], u32)]) {
         let le16 = |v: &mut Vec<u8>, x: u16| v.extend_from_slice(&x.to_le_bytes());
         let le32 = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
         out.extend_from_slice(b"PK\x03\x04");
-        le16(&mut out, 20); le16(&mut out, 0x0800); le16(&mut out, 0); le16(&mut out, 0); le16(&mut out, 0x21);
-        le32(&mut out, crc); le32(&mut out, body.len() as u32); le32(&mut out, body.len() as u32);
-        le16(&mut out, n.len() as u16); le16(&mut out, 0);
-        out.extend_from_slice(n); out.extend_from_slice(body);
+        le16(&mut out, 20);
+        le16(&mut out, 0x0800);
+        le16(&mut out, 0);
+        le16(&mut out, 0);
+        le16(&mut out, 0x21);
+        le32(&mut out, crc);
+        le32(&mut out, body.len() as u32);
+        le32(&mut out, body.len() as u32);
+        le16(&mut out, n.len() as u16);
+        le16(&mut out, 0);
+        out.extend_from_slice(n);
+        out.extend_from_slice(body);
         central.extend_from_slice(b"PK\x01\x02");
-        le16(&mut central, if *mode != 0 { 0x0314 } else { 20 }); le16(&mut central, 20);
-        le16(&mut central, 0x0800); le16(&mut central, 0); le16(&mut central, 0); le16(&mut central, 0x21);
-        le32(&mut central, crc); le32(&mut central, body.len() as u32); le32(&mut central, body.len() as u32);
-        le16(&mut central, n.len() as u16); le16(&mut central, 0); le16(&mut central, 0); le16(&mut central, 0); le16(&mut central, 0);
-        le32(&mut central, mode << 16); le32(&mut central, off);
+        le16(&mut central, if *mode != 0 { 0x0314 } else { 20 });
+        le16(&mut central, 20);
+        le16(&mut central, 0x0800);
+        le16(&mut central, 0);
+        le16(&mut central, 0);
+        le16(&mut central, 0x21);
+        le32(&mut central, crc);
+        le32(&mut central, body.len() as u32);
+        le32(&mut central, body.len() as u32);
+        le16(&mut central, n.len() as u16);
+        le16(&mut central, 0);
+        le16(&mut central, 0);
+        le16(&mut central, 0);
+        le16(&mut central, 0);
+        le32(&mut central, mode << 16);
+        le32(&mut central, off);
         central.extend_from_slice(n);
     }
     let cd_off = out.len() as u32;
@@ -91,11 +111,17 @@ fn fixture(name: &str) -> PathBuf {
     }
     let part = fixture_dir().join(format!("{name}.part"));
     match name {
-        "symlink.zip" => write_zip(&part, &[
-            ("link", b"/tmp", 0o120777),
-            ("link/unpack_symlink_pwned.txt", b"pwned", 0o100600),
-        ]),
-        "wrapped.zip" => write_zip(&part, &[("MyGame/", b"", 0o40755), ("MyGame/readme.txt", b"hi", 0)]),
+        "symlink.zip" => write_zip(
+            &part,
+            &[
+                ("link", b"/tmp", 0o120777),
+                ("link/unpack_symlink_pwned.txt", b"pwned", 0o100600),
+            ],
+        ),
+        "wrapped.zip" => write_zip(
+            &part,
+            &[("MyGame/", b"", 0o40755), ("MyGame/readme.txt", b"hi", 0)],
+        ),
         "big.7z" => {
             // 300 MiB of incompressible data, stored (-mx=0), built with the bundled 7-Zip.
             let src = fixture_dir().join("big-src");
@@ -108,7 +134,9 @@ fn fixture(name: &str) -> PathBuf {
                 let mut buf = vec![0u8; 1 << 20];
                 for _ in 0..300 {
                     for c in buf.chunks_mut(8) {
-                        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
                         c.copy_from_slice(&x.to_le_bytes());
                     }
                     f.write_all(&buf).unwrap();
@@ -139,19 +167,41 @@ fn exe() -> PathBuf {
 fn tmp(name: &str) -> crate::testutil::TmpDir {
     crate::testutil::TmpDir::new(&format!("test-{name}"))
 }
-fn run(archive: &str, dest: &Path, pw: Option<&str>, c: Collision, l: Layout) -> Result<ExtractResult, String> {
+fn run(
+    archive: &str,
+    dest: &Path,
+    pw: Option<&str>,
+    c: Collision,
+    l: Layout,
+) -> Result<ExtractResult, String> {
     let a = data(archive);
-    let opts = ExtractOptions { archive: &a, dest_parent: dest, password: pw, collision: c, layout: l, skip_junk: true, nested: false };
+    let opts = ExtractOptions {
+        archive: &a,
+        dest_parent: dest,
+        password: pw,
+        collision: c,
+        layout: l,
+        skip_junk: true,
+        nested: false,
+    };
     extract(&exe(), &opts, &Jobs::default(), "t", &mut |_, _| {})
 }
 fn no_staging_left(dir: &Path) -> bool {
-    fs::read_dir(dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".unpack-tmp"))
+    fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .all(|e| !e.file_name().to_string_lossy().starts_with(".unpack-tmp"))
 }
 
 #[test]
 fn lists_plain_zip_without_dirs_as_files() {
     let l = list(&exe(), &data("plain.zip"), None).unwrap();
-    let files: Vec<_> = l.entries.iter().filter(|e| !e.dir).map(|e| e.path.clone()).collect();
+    let files: Vec<_> = l
+        .entries
+        .iter()
+        .filter(|e| !e.dir)
+        .map(|e| e.path.clone())
+        .collect();
     assert_eq!(files.len(), 4, "{files:?}");
     assert!(files.contains(&"nested/deep/er/d.txt".to_string()));
     assert_eq!(l.format, "zip");
@@ -159,9 +209,23 @@ fn lists_plain_zip_without_dirs_as_files() {
 
 #[test]
 fn password_required_then_wrong_then_right() {
-    assert_eq!(list(&exe(), &data("pw.7z"), None).unwrap_err(), ERR_PASSWORD_REQUIRED);
-    assert_eq!(list(&exe(), &data("pw.7z"), Some("nope")).unwrap_err(), ERR_WRONG_PASSWORD);
-    assert_eq!(list(&exe(), &data("pw.7z"), Some("secret")).unwrap().entries.iter().filter(|e| !e.dir).count(), 4);
+    assert_eq!(
+        list(&exe(), &data("pw.7z"), None).unwrap_err(),
+        ERR_PASSWORD_REQUIRED
+    );
+    assert_eq!(
+        list(&exe(), &data("pw.7z"), Some("nope")).unwrap_err(),
+        ERR_WRONG_PASSWORD
+    );
+    assert_eq!(
+        list(&exe(), &data("pw.7z"), Some("secret"))
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| !e.dir)
+            .count(),
+        4
+    );
 }
 
 #[test]
@@ -169,11 +233,18 @@ fn extract_password_7z_and_zip() {
     for a in ["pw.7z", "pwnohe.7z", "pw.zip"] {
         let d = tmp(&format!("pw-{a}"));
         let e = run(a, &d, None, Collision::Number, Layout::Folder).unwrap_err();
-        assert!(e == ERR_PASSWORD_REQUIRED || e == ERR_WRONG_PASSWORD, "{a}: {e}");
+        assert!(
+            e == ERR_PASSWORD_REQUIRED || e == ERR_WRONG_PASSWORD,
+            "{a}: {e}"
+        );
         assert!(no_staging_left(&d), "staging left after failure for {a}");
         let r = run(a, &d, Some("secret"), Collision::Number, Layout::Folder).unwrap();
         let stem = a.trim_end_matches(".7z").trim_end_matches(".zip");
-        assert_eq!(fs::read_to_string(d.join(stem).join("a.txt")).unwrap(), "hello\n", "{a}");
+        assert_eq!(
+            fs::read_to_string(d.join(stem).join("a.txt")).unwrap(),
+            "hello\n",
+            "{a}"
+        );
         assert_eq!(r.files, 4);
         assert!(no_staging_left(&d));
     }
@@ -183,7 +254,10 @@ fn extract_password_7z_and_zip() {
 fn nested_folders_and_html_names_survive() {
     let d = tmp("nested");
     run("plain.7z", &d, None, Collision::Number, Layout::Folder).unwrap();
-    assert_eq!(fs::read_to_string(d.join("plain/nested/deep/er/d.txt")).unwrap(), "deep\n");
+    assert_eq!(
+        fs::read_to_string(d.join("plain/nested/deep/er/d.txt")).unwrap(),
+        "deep\n"
+    );
     // Linux allows < > in names; on Windows 7-Zip replaces them with '_'.
     assert!(fs::read_dir(d.join("plain")).unwrap().count() >= 3);
 }
@@ -195,7 +269,11 @@ fn zip_slip_entries_stay_inside() {
     fs::create_dir_all(&outer).unwrap();
     let r = run("evil.zip", &outer, None, Collision::Number, Layout::Folder).unwrap();
     // nothing may appear in d or above
-    let names: Vec<_> = fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name()).collect();
+    let names: Vec<_> = fs::read_dir(&d)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
     assert_eq!(names, vec![std::ffi::OsString::from("outer")]);
     assert!(!Path::new("/abs_evil.txt").exists());
     assert!(!std::env::temp_dir().join("evil_escape.txt").exists());
@@ -211,8 +289,14 @@ fn symlink_escape_is_neutralised() {
     while let Some(p) = stack.pop() {
         for e in fs::read_dir(&p).unwrap().flatten() {
             let m = fs::symlink_metadata(e.path()).unwrap();
-            assert!(!m.file_type().is_symlink(), "symlink survived: {:?}", e.path());
-            if m.is_dir() { stack.push(e.path()) }
+            assert!(
+                !m.file_type().is_symlink(),
+                "symlink survived: {:?}",
+                e.path()
+            );
+            if m.is_dir() {
+                stack.push(e.path())
+            }
         }
     }
     assert!(!Path::new("/tmp/unpack_symlink_pwned.txt").exists());
@@ -223,14 +307,25 @@ fn collisions_number_skip_replace() {
     let d = tmp("coll");
     let r1 = run("plain.zip", &d, None, Collision::Number, Layout::Folder).unwrap();
     let r2 = run("plain.zip", &d, None, Collision::Number, Layout::Folder).unwrap();
-    assert!(r1.output.ends_with("plain") && r2.output.ends_with("plain-2"), "{} {}", r1.output, r2.output);
+    assert!(
+        r1.output.ends_with("plain") && r2.output.ends_with("plain-2"),
+        "{} {}",
+        r1.output,
+        r2.output
+    );
     let r3 = run("plain.zip", &d, None, Collision::Skip, Layout::Folder).unwrap();
     assert!(r3.skipped);
     fs::write(d.join("plain/a.txt"), "changed").unwrap();
     fs::write(d.join("plain/keep.txt"), "mine").unwrap();
     run("plain.zip", &d, None, Collision::Replace, Layout::Folder).unwrap();
-    assert_eq!(fs::read_to_string(d.join("plain/a.txt")).unwrap(), "hello\n");
-    assert_eq!(fs::read_to_string(d.join("plain/keep.txt")).unwrap(), "mine");
+    assert_eq!(
+        fs::read_to_string(d.join("plain/a.txt")).unwrap(),
+        "hello\n"
+    );
+    assert_eq!(
+        fs::read_to_string(d.join("plain/keep.txt")).unwrap(),
+        "mine"
+    );
     assert!(no_staging_left(&d));
 }
 
@@ -257,10 +352,26 @@ fn extract_here_places_items_with_numbering() {
 fn big_archive_streams_with_progress_and_cancel() {
     let d = tmp("big");
     let a = data("big.7z");
-    let opts = ExtractOptions { archive: &a, dest_parent: &d, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: false };
+    let opts = ExtractOptions {
+        archive: &a,
+        dest_parent: &d,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: false,
+    };
     let mut seen = Vec::new();
-    let r = extract(&exe(), &opts, &Jobs::default(), "big", &mut |p, _| seen.push(p)).unwrap();
-    assert_eq!(fs::metadata(Path::new(&r.output).join("big.bin")).unwrap().len(), 300 * 1024 * 1024);
+    let r = extract(&exe(), &opts, &Jobs::default(), "big", &mut |p, _| {
+        seen.push(p)
+    })
+    .unwrap();
+    assert_eq!(
+        fs::metadata(Path::new(&r.output).join("big.bin"))
+            .unwrap()
+            .len(),
+        300 * 1024 * 1024
+    );
     assert!(seen.len() >= 2 && *seen.last().unwrap() == 100, "{seen:?}");
     fs::remove_dir_all(&d).unwrap();
 
@@ -269,11 +380,26 @@ fn big_archive_streams_with_progress_and_cancel() {
     let jobs = Jobs::default();
     jobs.register("c");
     let j2 = jobs.clone();
-    let opts = ExtractOptions { archive: &a, dest_parent: &d, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: false };
+    let opts = ExtractOptions {
+        archive: &a,
+        dest_parent: &d,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: false,
+    };
     // cancel as soon as the first progress report arrives (deterministic, unlike a timer)
-    let e = extract(&exe(), &opts, &jobs, "c", &mut |_, _| { j2.cancel("c"); }).unwrap_err();
+    let e = extract(&exe(), &opts, &jobs, "c", &mut |_, _| {
+        j2.cancel("c");
+    })
+    .unwrap_err();
     assert_eq!(e, ERR_CANCELLED);
-    assert_eq!(fs::read_dir(&d).unwrap().count(), 0, "cancel must leave nothing behind");
+    assert_eq!(
+        fs::read_dir(&d).unwrap().count(),
+        0,
+        "cancel must leave nothing behind"
+    );
     fs::remove_dir_all(&d).unwrap();
 }
 
@@ -281,12 +407,18 @@ fn big_archive_streams_with_progress_and_cancel() {
 fn read_entry_literal_names_and_limit() {
     let b = read_entry(&exe(), &data("plain.zip"), "nested/n.json", None, 1024).unwrap();
     assert_eq!(String::from_utf8(b).unwrap(), "{\"k\":1}\n");
-    assert_eq!(read_entry(&exe(), &data("big.7z"), "big.bin", None, 1024).unwrap_err(), "TOO_LARGE");
+    assert_eq!(
+        read_entry(&exe(), &data("big.7z"), "big.bin", None, 1024).unwrap_err(),
+        "TOO_LARGE"
+    );
 }
 
 #[test]
 fn helpers() {
-    assert_eq!(parse_progress(" 44% 3 - big.bin"), Some((44, "big.bin".into())));
+    assert_eq!(
+        parse_progress(" 44% 3 - big.bin"),
+        Some((44, "big.bin".into()))
+    );
     assert_eq!(parse_progress("  0%"), Some((0, String::new())));
     assert_eq!(parse_progress("hello"), None);
     assert_eq!(safe_segment("con.txt"), "_con.txt");
@@ -305,15 +437,39 @@ fn helpers() {
 fn create_zip_and_7z_with_password_roundtrip() {
     let d = tmp("create");
     let src = data("src");
-    for (fmt, pw) in [("zip", None), ("7z", None), ("zip", Some("s3cret")), ("7z", Some("s3cret"))] {
+    for (fmt, pw) in [
+        ("zip", None),
+        ("7z", None),
+        ("zip", Some("s3cret")),
+        ("7z", Some("s3cret")),
+    ] {
         let out = d.join(format!("made-{}-{}.{fmt}", fmt, pw.is_some()));
         let mut pct = Vec::new();
-        create(&exe(), &[src.join("a.txt"), src.join("nested")], &out, fmt, pw, 5, &Jobs::default(), "mk", &mut |p, _| pct.push(p)).unwrap();
+        create(
+            &exe(),
+            &[src.join("a.txt"), src.join("nested")],
+            &out,
+            fmt,
+            pw,
+            5,
+            &Jobs::default(),
+            "mk",
+            &mut |p, _| pct.push(p),
+        )
+        .unwrap();
         assert!(out.exists());
         let l = list(&exe(), &out, pw);
         let l = l.unwrap();
-        let names: Vec<_> = l.entries.iter().filter(|e| !e.dir).map(|e| e.path.as_str()).collect();
-        assert!(names.contains(&"a.txt") && names.contains(&"nested/deep/er/d.txt"), "{fmt}: {names:?}");
+        let names: Vec<_> = l
+            .entries
+            .iter()
+            .filter(|e| !e.dir)
+            .map(|e| e.path.as_str())
+            .collect();
+        assert!(
+            names.contains(&"a.txt") && names.contains(&"nested/deep/er/d.txt"),
+            "{fmt}: {names:?}"
+        );
         if let Some(_) = pw {
             assert!(l.encrypted, "{fmt} should be encrypted");
             if fmt == "7z" {
@@ -322,18 +478,46 @@ fn create_zip_and_7z_with_password_roundtrip() {
             } else {
                 assert!(read_entry(&exe(), &out, "a.txt", None, 1024).is_err());
             }
-            assert_eq!(read_entry(&exe(), &out, "a.txt", pw, 1024).unwrap(), b"hello\n");
+            assert_eq!(
+                read_entry(&exe(), &out, "a.txt", pw, 1024).unwrap(),
+                b"hello\n"
+            );
         }
         assert_eq!(*pct.last().unwrap(), 100);
     }
     // existing file is replaced, not "updated"
     let out = d.join("made-zip-false.zip");
-    create(&exe(), &[src.join("a.txt")], &out, "zip", None, 5, &Jobs::default(), "mk2", &mut |_, _| {}).unwrap();
+    create(
+        &exe(),
+        &[src.join("a.txt")],
+        &out,
+        "zip",
+        None,
+        5,
+        &Jobs::default(),
+        "mk2",
+        &mut |_, _| {},
+    )
+    .unwrap();
     assert_eq!(list(&exe(), &out, None).unwrap().entries.len(), 1);
     // refuse to write the archive inside a folder being archived
-    let e = create(&exe(), &[d.clone()], &d.join("x.zip"), "zip", None, 5, &Jobs::default(), "mk3", &mut |_, _| {}).unwrap_err();
+    let e = create(
+        &exe(),
+        &[d.clone()],
+        &d.join("x.zip"),
+        "zip",
+        None,
+        5,
+        &Jobs::default(),
+        "mk3",
+        &mut |_, _| {},
+    )
+    .unwrap_err();
     assert!(e.contains("inside"), "{e}");
-    assert!(fs::read_dir(&d).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".unpack-new")));
+    assert!(fs::read_dir(&d)
+        .unwrap()
+        .flatten()
+        .all(|e| !e.file_name().to_string_lossy().starts_with(".unpack-new")));
     fs::remove_dir_all(&d).unwrap();
 }
 
@@ -345,9 +529,27 @@ fn awkward_passwords_and_paths_roundtrip() {
     fs::create_dir_all(&sub).unwrap();
     for pw in ["a b\\", "x\\\\ y", "ünï cødé", "p%PATH%&|^"] {
         let out = sub.join("out file.7z");
-        create(&exe(), &[data("src").join("a.txt")], &out, "7z", Some(pw), 1, &Jobs::default(), "awk", &mut |_, _| {}).unwrap();
-        assert_eq!(read_entry(&exe(), &out, "a.txt", Some(pw), 1024).unwrap(), b"hello\n", "pw {pw:?}");
-        assert_eq!(read_entry(&exe(), &out, "a.txt", Some("wrong"), 1024).unwrap_err(), ERR_WRONG_PASSWORD);
+        create(
+            &exe(),
+            &[data("src").join("a.txt")],
+            &out,
+            "7z",
+            Some(pw),
+            1,
+            &Jobs::default(),
+            "awk",
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            read_entry(&exe(), &out, "a.txt", Some(pw), 1024).unwrap(),
+            b"hello\n",
+            "pw {pw:?}"
+        );
+        assert_eq!(
+            read_entry(&exe(), &out, "a.txt", Some("wrong"), 1024).unwrap_err(),
+            ERR_WRONG_PASSWORD
+        );
     }
     if cfg!(windows) {
         assert!(check_password(Some("has\"quote")).is_err());
@@ -362,7 +564,17 @@ fn files_under(root: &Path) -> Vec<String> {
     let mut st = vec![root.to_path_buf()];
     while let Some(d) = st.pop() {
         for e in fs::read_dir(&d).unwrap().flatten() {
-            if e.path().is_dir() { st.push(e.path()) } else { v.push(e.path().strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/")) }
+            if e.path().is_dir() {
+                st.push(e.path())
+            } else {
+                v.push(
+                    e.path()
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                )
+            }
         }
     }
     v.sort();
@@ -377,31 +589,71 @@ fn h1_parallel_same_name_extractions_never_merge() {
     let (a, b) = (d.join("src-a"), d.join("src-b"));
     fs::create_dir_all(&a).unwrap();
     fs::create_dir_all(&b).unwrap();
-    write_zip(&a.join("same.zip"), &[("from-a.txt", b"A", 0), ("x/a2.txt", b"A2", 0)]);
-    write_zip(&b.join("same.zip"), &[("from-b.txt", b"B", 0), ("x/b2.txt", b"B2", 0)]);
+    write_zip(
+        &a.join("same.zip"),
+        &[("from-a.txt", b"A", 0), ("x/a2.txt", b"A2", 0)],
+    );
+    write_zip(
+        &b.join("same.zip"),
+        &[("from-b.txt", b"B", 0), ("x/b2.txt", b"B2", 0)],
+    );
     let out = d.join("out");
     fs::create_dir_all(&out).unwrap();
     let mut hs = Vec::new();
     for i in 0..12 {
-        let src = if i % 2 == 0 { a.join("same.zip") } else { b.join("same.zip") };
+        let src = if i % 2 == 0 {
+            a.join("same.zip")
+        } else {
+            b.join("same.zip")
+        };
         let out = out.clone();
         hs.push(std::thread::spawn(move || {
-            let opts = ExtractOptions { archive: &src, dest_parent: &out, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: false };
-            extract(&find_7za().unwrap(), &opts, &Jobs::default(), &format!("j{i}"), &mut |_, _| {}).unwrap().output
+            let opts = ExtractOptions {
+                archive: &src,
+                dest_parent: &out,
+                password: None,
+                collision: Collision::Number,
+                layout: Layout::Folder,
+                skip_junk: true,
+                nested: false,
+            };
+            extract(
+                &find_7za().unwrap(),
+                &opts,
+                &Jobs::default(),
+                &format!("j{i}"),
+                &mut |_, _| {},
+            )
+            .unwrap()
+            .output
         }));
     }
-    let outs: std::collections::BTreeSet<String> = hs.into_iter().map(|h| h.join().unwrap()).collect();
-    assert_eq!(outs.len(), 12, "two jobs reported the same folder: {outs:?}");
+    let outs: std::collections::BTreeSet<String> =
+        hs.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(
+        outs.len(),
+        12,
+        "two jobs reported the same folder: {outs:?}"
+    );
     let dirs: Vec<_> = fs::read_dir(&out).unwrap().flatten().collect();
     assert_eq!(dirs.len(), 12);
     for e in dirs {
         let f = files_under(&e.path());
-        assert!(f == ["from-a.txt", "x/a2.txt"] || f == ["from-b.txt", "x/b2.txt"], "merged folder {:?}: {f:?}", e.path());
+        assert!(
+            f == ["from-a.txt", "x/a2.txt"] || f == ["from-b.txt", "x/b2.txt"],
+            "merged folder {:?}: {f:?}",
+            e.path()
+        );
     }
     // claim_dir itself: racing claims always get distinct folders
     let c = d.join("claims");
     fs::create_dir_all(&c).unwrap();
-    let hs: Vec<_> = (0..16).map(|_| { let c = c.clone(); std::thread::spawn(move || claim_dir(&c, "x").unwrap()) }).collect();
+    let hs: Vec<_> = (0..16)
+        .map(|_| {
+            let c = c.clone();
+            std::thread::spawn(move || claim_dir(&c, "x").unwrap())
+        })
+        .collect();
     let got: std::collections::BTreeSet<_> = hs.into_iter().map(|h| h.join().unwrap()).collect();
     assert_eq!(got.len(), 16);
     fs::remove_dir_all(&d).unwrap();
@@ -421,8 +673,14 @@ fn m1_replace_does_not_follow_symlinks() {
     // case 1: the destination folder itself is a link
     std::os::unix::fs::symlink(&victim, out.join("plain")).unwrap();
     run("plain.zip", &out, None, Collision::Replace, Layout::Folder).unwrap();
-    assert!(!fs::symlink_metadata(out.join("plain")).unwrap().file_type().is_symlink());
-    assert_eq!(fs::read_to_string(out.join("plain/a.txt")).unwrap(), "hello\n");
+    assert!(!fs::symlink_metadata(out.join("plain"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        fs::read_to_string(out.join("plain/a.txt")).unwrap(),
+        "hello\n"
+    );
     // case 2: a sub-folder and a file inside it are links
     fs::remove_dir_all(out.join("plain/nested")).unwrap();
     std::os::unix::fs::symlink(victim.join("nested"), out.join("plain/nested")).unwrap();
@@ -434,9 +692,18 @@ fn m1_replace_does_not_follow_symlinks() {
     fs::create_dir_all(&here).unwrap();
     std::os::unix::fs::symlink(&victim, here.join("nested")).unwrap();
     run("plain.zip", &here, None, Collision::Replace, Layout::Here).unwrap();
-    assert!(here.join("nested/n.json").exists() && !fs::symlink_metadata(here.join("nested")).unwrap().file_type().is_symlink());
+    assert!(
+        here.join("nested/n.json").exists()
+            && !fs::symlink_metadata(here.join("nested"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+    );
     assert_eq!(fs::read_to_string(victim.join("a.txt")).unwrap(), "victim");
-    assert_eq!(fs::read_to_string(victim.join("nested/n.json")).unwrap(), "victim");
+    assert_eq!(
+        fs::read_to_string(victim.join("nested/n.json")).unwrap(),
+        "victim"
+    );
     assert_eq!(files_under(&victim), ["a.txt", "nested/n.json"]);
     fs::remove_dir_all(&d).unwrap();
 }
@@ -450,7 +717,16 @@ fn m3_missing_entry_is_an_error() {
     let e = read_entry(&exe(), &data("plain.zip"), "nested", None, 1024).unwrap_err();
     assert!(e.contains("folder"), "{e}");
     let out = d.join("saved.txt");
-    let e = extract_entry_to(&exe(), &data("plain.zip"), "nope.txt", None, &out, &Jobs::default(), "m3").unwrap_err();
+    let e = extract_entry_to(
+        &exe(),
+        &data("plain.zip"),
+        "nope.txt",
+        None,
+        &out,
+        &Jobs::default(),
+        "m3",
+    )
+    .unwrap_err();
     assert!(e.contains("not found"), "{e}");
     assert!(!out.exists());
     assert_eq!(fs::read_dir(&d).unwrap().count(), 0, "no temp file left");
@@ -462,15 +738,27 @@ fn m3_missing_entry_is_an_error() {
 fn l1_awkward_entry_names_are_literal() {
     let d = tmp("l1");
     let z = d.join("names.zip");
-    write_zip(&z, &[
-        ("a \"q\" b.txt", b"QUOTE", 0),
-        ("-x.txt", b"DASH", 0),
-        ("*.txt", b"STAR", 0),
-        ("dir/e f\\.txt", b"BACKSLASH", 0),
-        ("dir/ünï.txt", b"UNI", 0),
-    ]);
-    for (n, want) in [("a \"q\" b.txt", "QUOTE"), ("-x.txt", "DASH"), ("*.txt", "STAR"), ("dir/ünï.txt", "UNI")] {
-        assert_eq!(read_entry(&exe(), &z, n, None, 1024).unwrap(), want.as_bytes(), "{n}");
+    write_zip(
+        &z,
+        &[
+            ("a \"q\" b.txt", b"QUOTE", 0),
+            ("-x.txt", b"DASH", 0),
+            ("*.txt", b"STAR", 0),
+            ("dir/e f\\.txt", b"BACKSLASH", 0),
+            ("dir/ünï.txt", b"UNI", 0),
+        ],
+    );
+    for (n, want) in [
+        ("a \"q\" b.txt", "QUOTE"),
+        ("-x.txt", "DASH"),
+        ("*.txt", "STAR"),
+        ("dir/ünï.txt", "UNI"),
+    ] {
+        assert_eq!(
+            read_entry(&exe(), &z, n, None, 1024).unwrap(),
+            want.as_bytes(),
+            "{n}"
+        );
         let out = d.join("o.bin");
         extract_entry_to(&exe(), &z, n, None, &out, &Jobs::default(), "l1").unwrap();
         assert_eq!(fs::read(&out).unwrap(), want.as_bytes(), "{n}");
@@ -486,7 +774,8 @@ fn l2_cancel_before_attach() {
     jobs.register("x");
     jobs.cancel("x");
     let out = d.join("o.bin");
-    let e = extract_entry_to(&exe(), &data("big.7z"), "big.bin", None, &out, &jobs, "x").unwrap_err();
+    let e =
+        extract_entry_to(&exe(), &data("big.7z"), "big.bin", None, &out, &jobs, "x").unwrap_err();
     assert_eq!(e, ERR_CANCELLED);
     assert_eq!(fs::read_dir(&d).unwrap().count(), 0);
     fs::remove_dir_all(&d).unwrap();
@@ -497,20 +786,49 @@ fn l2_cancel_before_attach() {
 fn l4_bad_hard_link_is_a_warning() {
     let d = tmp("l4");
     let t = d.join("hl.tar");
-    write_tar(&t, &[("pkg/ok.txt", b"ok", b'0', ""), ("pkg/hl", b"", b'1', "/etc/hostname")]);
+    write_tar(
+        &t,
+        &[
+            ("pkg/ok.txt", b"ok", b'0', ""),
+            ("pkg/hl", b"", b'1', "/etc/hostname"),
+        ],
+    );
     let out = d.join("out");
-    let opts = ExtractOptions { archive: &t, dest_parent: &out, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: false };
+    let opts = ExtractOptions {
+        archive: &t,
+        dest_parent: &out,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: false,
+    };
     let r = extract(&exe(), &opts, &Jobs::default(), "l4", &mut |_, _| {}).unwrap();
-    assert_eq!(fs::read_to_string(Path::new(&r.output).join("ok.txt")).unwrap(), "ok");
-    assert!(r.warnings.iter().any(|w| w.contains("hard link")), "{:?}", r.warnings);
+    assert_eq!(
+        fs::read_to_string(Path::new(&r.output).join("ok.txt")).unwrap(),
+        "ok"
+    );
+    assert!(
+        r.warnings.iter().any(|w| w.contains("hard link")),
+        "{:?}",
+        r.warnings
+    );
     fs::remove_dir_all(&d).unwrap();
 }
 
 /// M4 support: read_file is limited to archive names.
 #[test]
 fn read_file_allow_list() {
-    assert!(is_archive_name("C:\\x\\Game.RAR") && is_archive_name("/a/b.tar.gz") && is_archive_name("a.7z"));
-    assert!(!is_archive_name("/etc/passwd") && !is_archive_name("C:\\Users\\me\\secrets.txt") && !is_archive_name("x.iso"));
+    assert!(
+        is_archive_name("C:\\x\\Game.RAR")
+            && is_archive_name("/a/b.tar.gz")
+            && is_archive_name("a.7z")
+    );
+    assert!(
+        !is_archive_name("/etc/passwd")
+            && !is_archive_name("C:\\Users\\me\\secrets.txt")
+            && !is_archive_name("x.iso")
+    );
 }
 
 /// Overseer C1 regression: the ISO list is the exact set of paths this extraction placed.
@@ -524,17 +842,43 @@ fn c1_iso_list_is_exact_and_replace_is_flagged() {
     fs::write(src.join("game.iso"), b"top").unwrap();
     fs::write(src.join("disc/game.iso"), b"nested").unwrap();
     let zip = d.join("merge.zip");
-    let st = std::process::Command::new(exe()).current_dir(&src).args(["a", "-tzip", "-bso0"]).arg(&zip).args(["game.iso", "disc"]).status().unwrap();
+    let st = std::process::Command::new(exe())
+        .current_dir(&src)
+        .args(["a", "-tzip", "-bso0"])
+        .arg(&zip)
+        .args(["game.iso", "disc"])
+        .status()
+        .unwrap();
     assert!(st.success());
     let out = d.join("out");
     fs::create_dir_all(out.join("merge/keep")).unwrap();
     fs::write(out.join("merge/keep/game.iso"), b"MINE").unwrap();
     fs::write(out.join("merge/disc2.iso"), b"MINE2").unwrap();
-    let ex = |c| { let o = ExtractOptions { archive: &zip, dest_parent: &out, password: None, collision: c, layout: Layout::Folder, skip_junk: true, nested: false }; extract(&exe(), &o, &Jobs::default(), "c1", &mut |_, _| {}).unwrap() };
+    let ex = |c| {
+        let o = ExtractOptions {
+            archive: &zip,
+            dest_parent: &out,
+            password: None,
+            collision: c,
+            layout: Layout::Folder,
+            skip_junk: true,
+            nested: false,
+        };
+        extract(&exe(), &o, &Jobs::default(), "c1", &mut |_, _| {}).unwrap()
+    };
     let r = ex(Collision::Replace);
     assert!(r.merged);
-    let mut got = r.isos.clone(); got.sort();
-    let mut want = vec![out.join("merge").join("disc").join("game.iso").display().to_string(), out.join("merge").join("game.iso").display().to_string()]; want.sort();
+    let mut got = r.isos.clone();
+    got.sort();
+    let mut want = vec![
+        out.join("merge")
+            .join("disc")
+            .join("game.iso")
+            .display()
+            .to_string(),
+        out.join("merge").join("game.iso").display().to_string(),
+    ];
+    want.sort();
     assert_eq!(got, want);
     assert_eq!(fs::read(out.join("merge/keep/game.iso")).unwrap(), b"MINE");
     let r = ex(Collision::Number);
@@ -552,18 +896,51 @@ fn r3_replace_mode_never_allows_delete() {
     let src = d.join("src");
     fs::create_dir_all(&src).unwrap();
     let mk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/make_iso.py");
-    assert!(std::process::Command::new("python3").arg(&mk).arg(src.join("game.iso")).args(["4D5307E6", "0"]).status().map(|s| s.success()).unwrap_or(false) || cfg!(windows));
-    if !src.join("game.iso").exists() { return; } // no python under Wine: covered on Linux
+    assert!(
+        std::process::Command::new("python3")
+            .arg(&mk)
+            .arg(src.join("game.iso"))
+            .args(["4D5307E6", "0"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+            || cfg!(windows)
+    );
+    if !src.join("game.iso").exists() {
+        return;
+    } // no python under Wine: covered on Linux
     let zip = d.join("g.zip");
-    assert!(std::process::Command::new(exe()).current_dir(&src).args(["a", "-tzip", "-bso0"]).arg(&zip).arg("game.iso").status().unwrap().success());
+    assert!(std::process::Command::new(exe())
+        .current_dir(&src)
+        .args(["a", "-tzip", "-bso0"])
+        .arg(&zip)
+        .arg("game.iso")
+        .status()
+        .unwrap()
+        .success());
     let out = d.join("out");
     for (c, allowed) in [(Collision::Replace, false), (Collision::Number, true)] {
-        let o = ExtractOptions { archive: &zip, dest_parent: &out, password: None, collision: c, layout: Layout::Folder, skip_junk: true, nested: false };
+        let o = ExtractOptions {
+            archive: &zip,
+            dest_parent: &out,
+            password: None,
+            collision: c,
+            layout: Layout::Folder,
+            skip_junk: true,
+            nested: false,
+        };
         let r = extract(&exe(), &o, &Jobs::default(), "r", &mut |_, _| {}).unwrap();
         assert!(!r.merged);
         assert_eq!(r.iso_tokens.len(), 1);
         crate::god::seal_tokens(&r.iso_tokens);
-        let g = crate::god::convert_registered(&r.iso_tokens[0], true, &Jobs::default(), "g", &mut |_, _| {}).unwrap();
+        let g = crate::god::convert_registered(
+            &r.iso_tokens[0],
+            true,
+            &Jobs::default(),
+            "g",
+            &mut |_, _| {},
+        )
+        .unwrap();
         assert_eq!(g.iso_deleted, allowed, "{c:?}");
         fs::remove_dir_all(&out).unwrap();
     }
@@ -578,15 +955,39 @@ fn r5_skip_does_not_set_created() {
     write_zip(&arch, &[("a.txt", b"x", 0o644)]);
     let out = d.join("out");
     fs::create_dir_all(out.join("secret")).unwrap(); // same name as archive stem
-    let opts = ExtractOptions { archive: &arch, dest_parent: &out, password: None, collision: Collision::Skip, layout: Layout::Folder, skip_junk: true, nested: false };
+    let opts = ExtractOptions {
+        archive: &arch,
+        dest_parent: &out,
+        password: None,
+        collision: Collision::Skip,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: false,
+    };
     let r = extract(&exe(), &opts, &Jobs::default(), "s", &mut |_, _| {}).unwrap();
     assert!(r.skipped && !r.created);
     let out2 = d.join("out2");
     fs::create_dir_all(&out2).unwrap();
-    let opts = ExtractOptions { archive: &arch, dest_parent: &out2, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: false };
+    let opts = ExtractOptions {
+        archive: &arch,
+        dest_parent: &out2,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: false,
+    };
     let r2 = extract(&exe(), &opts, &Jobs::default(), "s2", &mut |_, _| {}).unwrap();
     assert!(!r2.skipped && r2.created, "claim_dir folder is created");
-    let opts = ExtractOptions { archive: &arch, dest_parent: &out2, password: None, collision: Collision::Number, layout: Layout::Here, skip_junk: true, nested: false };
+    let opts = ExtractOptions {
+        archive: &arch,
+        dest_parent: &out2,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Here,
+        skip_junk: true,
+        nested: false,
+    };
     let r3 = extract(&exe(), &opts, &Jobs::default(), "s3", &mut |_, _| {}).unwrap();
     assert!(!r3.created, "Extract here never sets created");
     fs::remove_dir_all(&d).unwrap();
@@ -595,15 +996,35 @@ fn r5_skip_does_not_set_created() {
 // ---------- nested archives ("Open zips inside zips") ----------
 
 fn zip_bytes(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
-    let p = std::env::temp_dir().join(format!("unpack-zipbytes-{}-{}.zip", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let p = std::env::temp_dir().join(format!(
+        "unpack-zipbytes-{}-{}.zip",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     write_zip(&p, entries);
     let b = fs::read(&p).unwrap();
     let _ = fs::remove_file(p);
     b
 }
 
-fn run_nested(archive: &Path, dest: &Path, nested: bool, job: &str) -> Result<ExtractResult, String> {
-    let opts = ExtractOptions { archive, dest_parent: dest, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested };
+fn run_nested(
+    archive: &Path,
+    dest: &Path,
+    nested: bool,
+    job: &str,
+) -> Result<ExtractResult, String> {
+    let opts = ExtractOptions {
+        archive,
+        dest_parent: dest,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested,
+    };
     extract(&exe(), &opts, &Jobs::default(), job, &mut |_, _| {})
 }
 
@@ -612,17 +1033,30 @@ fn nested_zip_inside_zip_opens_when_on_and_is_counted_when_off() {
     let d = tmp("nested-basic");
     let inner = zip_bytes(&[("note.txt", b"inner-secret", 0)]);
     let outer = d.join("outer.zip");
-    write_zip(&outer, &[("readme.txt", b"top", 0), ("sub/inner.zip", &inner, 0)]);
+    write_zip(
+        &outer,
+        &[("readme.txt", b"top", 0), ("sub/inner.zip", &inner, 0)],
+    );
     let on = d.join("on");
     let r = run_nested(&outer, &on, true, "n1").unwrap();
     assert_eq!((r.nested, r.inner_left), (1, 0), "{:?}", r.warnings);
     let out = Path::new(&r.output);
-    assert_eq!(fs::read_to_string(out.join("sub/inner/note.txt")).unwrap(), "inner-secret");
-    assert!(out.join("sub/inner.zip").is_file(), "the inner archive itself is kept");
+    assert_eq!(
+        fs::read_to_string(out.join("sub/inner/note.txt")).unwrap(),
+        "inner-secret"
+    );
+    assert!(
+        out.join("sub/inner.zip").is_file(),
+        "the inner archive itself is kept"
+    );
     assert!(no_staging_left(&on));
     let off = d.join("off");
     let r = run_nested(&outer, &off, false, "n2").unwrap();
-    assert_eq!((r.nested, r.inner_left), (0, 1), "turning it off still reports the closed inner archive");
+    assert_eq!(
+        (r.nested, r.inner_left),
+        (0, 1),
+        "turning it off still reports the closed inner archive"
+    );
     assert!(!Path::new(&r.output).join("sub/inner").exists());
     assert!(Path::new(&r.output).join("sub/inner.zip").is_file());
 }
@@ -640,11 +1074,20 @@ fn nested_depth_and_count_are_limited() {
     let r = run_nested(&chain, &d.join("o1"), true, "d1").unwrap();
     assert_eq!(r.nested, 3, "depth limit: {:?}", r.warnings);
     assert!(r.inner_left >= 1);
-    assert!(!files_under(Path::new(&r.output)).iter().any(|f| f.ends_with("core.txt")), "{:?}", files_under(Path::new(&r.output)));
+    assert!(
+        !files_under(Path::new(&r.output))
+            .iter()
+            .any(|f| f.ends_with("core.txt")),
+        "{:?}",
+        files_under(Path::new(&r.output))
+    );
     // 45 siblings: the first 40 are opened, the rest are left closed
     let tiny = zip_bytes(&[("t.txt", b"t", 0)]);
     let names: Vec<String> = (0..45).map(|i| format!("z{i:02}.zip")).collect();
-    let entries: Vec<(&str, &[u8], u32)> = names.iter().map(|n| (n.as_str(), tiny.as_slice(), 0)).collect();
+    let entries: Vec<(&str, &[u8], u32)> = names
+        .iter()
+        .map(|n| (n.as_str(), tiny.as_slice(), 0))
+        .collect();
     let many = d.join("many.zip");
     write_zip(&many, &entries);
     let r = run_nested(&many, &d.join("o2"), true, "d2").unwrap();
@@ -661,10 +1104,19 @@ fn nested_password_protected_inner_archive_is_left_closed_with_a_warning() {
     write_zip(&outer, &[("locked.7z", &pw7z, 0), ("ok.zip", &ok, 0)]);
     let r = run_nested(&outer, &d.join("out"), true, "p1").unwrap();
     assert_eq!((r.nested, r.inner_left), (1, 1));
-    assert!(r.warnings.iter().any(|w| w.contains("locked.7z") && w.contains("password")), "{:?}", r.warnings);
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("locked.7z") && w.contains("password")),
+        "{:?}",
+        r.warnings
+    );
     let out = Path::new(&r.output);
     assert!(out.join("ok/fine.txt").is_file());
-    assert!(!out.join("locked").exists(), "no half-made folder for the locked archive");
+    assert!(
+        !out.join("locked").exists(),
+        "no half-made folder for the locked archive"
+    );
 }
 
 #[test]
@@ -677,14 +1129,27 @@ fn nested_hostile_inner_archive_stays_inside_the_destination() {
     let dest = d.join("dest");
     let r = run_nested(&outer, &dest, true, "e1").unwrap();
     assert_eq!(r.nested, 2, "{:?}", r.warnings);
-    let names: Vec<_> = fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-    assert!(names.iter().all(|n| n == "dest" || n == "outer.zip"), "nothing may appear next to the destination: {names:?}");
+    let names: Vec<_> = fs::read_dir(&d)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().all(|n| n == "dest" || n == "outer.zip"),
+        "nothing may appear next to the destination: {names:?}"
+    );
     let mut stack = vec![PathBuf::from(&r.output)];
     while let Some(p) = stack.pop() {
         for e in fs::read_dir(&p).unwrap().flatten() {
             let m = fs::symlink_metadata(e.path()).unwrap();
-            assert!(!m.file_type().is_symlink(), "symlink survived: {:?}", e.path());
-            if m.is_dir() { stack.push(e.path()) }
+            assert!(
+                !m.file_type().is_symlink(),
+                "symlink survived: {:?}",
+                e.path()
+            );
+            if m.is_dir() {
+                stack.push(e.path())
+            }
         }
     }
     assert!(!Path::new("/tmp/unpack_symlink_pwned.txt").exists());
@@ -698,26 +1163,63 @@ fn nested_works_with_extract_here_and_cancel_leaves_nothing() {
     write_zip(&outer, &[("inner.zip", &inner, 0)]);
     let dest = d.join("here");
     fs::create_dir_all(&dest).unwrap();
-    let opts = ExtractOptions { archive: &outer, dest_parent: &dest, password: None, collision: Collision::Number, layout: Layout::Here, skip_junk: true, nested: true };
+    let opts = ExtractOptions {
+        archive: &outer,
+        dest_parent: &dest,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Here,
+        skip_junk: true,
+        nested: true,
+    };
     let r = extract(&exe(), &opts, &Jobs::default(), "h1", &mut |_, _| {}).unwrap();
     assert_eq!(r.nested, 1);
-    assert_eq!(fs::read_to_string(dest.join("inner/deep.txt")).unwrap(), "deep");
+    assert_eq!(
+        fs::read_to_string(dest.join("inner/deep.txt")).unwrap(),
+        "deep"
+    );
     // a cancel that arrives while the inner archive is opened removes everything
     let d2 = d.join("cancel");
     fs::create_dir_all(&d2).unwrap();
     let jobs = Jobs::default();
     jobs.register("c1");
     let j2 = jobs.clone();
-    let opts = ExtractOptions { archive: &outer, dest_parent: &d2, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: true };
-    let e = extract(&exe(), &opts, &jobs, "c1", &mut |_, f| { if f.starts_with("Opening inner") { j2.cancel("c1"); } }).unwrap_err();
+    let opts = ExtractOptions {
+        archive: &outer,
+        dest_parent: &d2,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: true,
+    };
+    let e = extract(&exe(), &opts, &jobs, "c1", &mut |_, f| {
+        if f.starts_with("Opening inner") {
+            j2.cancel("c1");
+        }
+    })
+    .unwrap_err();
     assert_eq!(e, ERR_CANCELLED);
-    assert_eq!(fs::read_dir(&d2).unwrap().count(), 0, "cancel must leave nothing behind");
+    assert_eq!(
+        fs::read_dir(&d2).unwrap().count(),
+        0,
+        "cancel must leave nothing behind"
+    );
 }
 
 #[test]
 fn nested_archive_name_list_is_narrow() {
-    assert!(is_nested_archive("Pack.ZIP") && is_nested_archive("a.tar.gz") && is_nested_archive("a.7z") && is_nested_archive("a.rar"));
-    assert!(!is_nested_archive("data.cab") && !is_nested_archive("disc.iso") && !is_nested_archive("readme.txt"));
+    assert!(
+        is_nested_archive("Pack.ZIP")
+            && is_nested_archive("a.tar.gz")
+            && is_nested_archive("a.7z")
+            && is_nested_archive("a.rar")
+    );
+    assert!(
+        !is_nested_archive("data.cab")
+            && !is_nested_archive("disc.iso")
+            && !is_nested_archive("readme.txt")
+    );
 }
 
 #[test]
@@ -729,7 +1231,11 @@ fn replacing_a_file_keeps_the_old_one_when_the_swap_fails() {
     let e = replace_file_safely(&d.join(".unpack-new-x.zip"), &dst).unwrap_err();
     assert!(e.contains("Could not save"), "{e}");
     assert_eq!(fs::read_to_string(&dst).unwrap(), "old");
-    assert_eq!(fs::read_dir(&d).unwrap().count(), 1, "no aside file left behind");
+    assert_eq!(
+        fs::read_dir(&d).unwrap().count(),
+        1,
+        "no aside file left behind"
+    );
     // success path replaces, leaves no aside
     let t = d.join(".unpack-new-y.zip");
     fs::write(&t, "new").unwrap();
@@ -741,7 +1247,9 @@ fn replacing_a_file_keeps_the_old_one_when_the_swap_fails() {
     fs::create_dir(&folder).unwrap();
     let t = d.join(".unpack-new-z.zip");
     fs::write(&t, "x").unwrap();
-    assert!(replace_file_safely(&t, &folder).unwrap_err().contains("is a folder"));
+    assert!(replace_file_safely(&t, &folder)
+        .unwrap_err()
+        .contains("is a folder"));
     assert!(folder.is_dir() && !t.exists());
     // a link at the destination is moved aside, its target is untouched
     #[cfg(unix)]
@@ -754,7 +1262,10 @@ fn replacing_a_file_keeps_the_old_one_when_the_swap_fails() {
         fs::write(&t, "fresh").unwrap();
         replace_file_safely(&t, &link).unwrap();
         assert_eq!(fs::read_to_string(&victim).unwrap(), "victim");
-        assert!(!fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(!fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(fs::read_to_string(&link).unwrap(), "fresh");
     }
 }
@@ -768,44 +1279,103 @@ fn r15_m2_nested_zip_bomb_is_left_closed() {
     let d = tmp("bomb");
     let inner = d.join("zeros.7z");
     let mut c = std::process::Command::new(exe())
-        .args(["a", "-t7z", "-mx=1", "-mmt=1", "-md=1m", "-sizeros.bin"]).arg(&inner)
-        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-        .spawn().unwrap();
+        .args(["a", "-t7z", "-mx=1", "-mmt=1", "-md=1m", "-sizeros.bin"])
+        .arg(&inner)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
     {
         let mut si = c.stdin.take().unwrap();
         let z = vec![0u8; 1 << 20];
-        for _ in 0..2048 { si.write_all(&z).unwrap(); }
+        for _ in 0..2048 {
+            si.write_all(&z).unwrap();
+        }
     }
     assert!(c.wait().unwrap().success());
     let inner_bytes = fs::read(&inner).unwrap();
     fs::remove_file(&inner).unwrap();
     let outer = d.join("bomb.zip");
     write_zip(&outer, &[("zeros.7z", &inner_bytes, 0)]);
-    assert!(fs::metadata(&outer).unwrap().len() < 1 << 20, "bomb outer is small");
+    assert!(
+        fs::metadata(&outer).unwrap().len() < 1 << 20,
+        "bomb outer is small"
+    );
     let dest = d.join("out");
     fs::create_dir_all(&dest).unwrap();
-    let opts = ExtractOptions { archive: &outer, dest_parent: &dest, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: true };
+    let opts = ExtractOptions {
+        archive: &outer,
+        dest_parent: &dest,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: true,
+    };
     let r = extract(&exe(), &opts, &Jobs::default(), "bomb", &mut |_, _| {}).unwrap();
     assert_eq!((r.nested, r.inner_left), (0, 1), "{r:?}");
-    assert!(r.warnings.iter().any(|w| w.contains("zeros.7z was left closed") && w.contains("zip bomb")), "{:?}", r.warnings);
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("zeros.7z was left closed") && w.contains("zip bomb")),
+        "{:?}",
+        r.warnings
+    );
     assert!(super::tree_bytes(&dest) < 2 << 20, "nothing big written");
     assert!(no_staging_left(&dest));
 }
 
 #[test]
 fn r15_m2_nested_limits_budget_free_space_unknown() {
-    let e = |size: u64| Entry { path: "f".into(), size, dir: false, encrypted: false };
-    let l = |v: Vec<Entry>| Listing { entries: v, format: "zip".into(), encrypted: false };
+    let e = |size: u64| Entry {
+        path: "f".into(),
+        size,
+        dir: false,
+        encrypted: false,
+    };
+    let l = |v: Vec<Entry>| Listing {
+        entries: v,
+        format: "zip".into(),
+        encrypted: false,
+    };
     // fine: 10 MB from 5 MB
-    assert_eq!(super::nested_refusal(5 << 20, &l(vec![e(10 << 20)]), 0, 1 << 30, Some(1 << 40)), Ok(10 << 20));
+    assert_eq!(
+        super::nested_refusal(5 << 20, &l(vec![e(10 << 20)]), 0, 1 << 30, Some(1 << 40)),
+        Ok(10 << 20)
+    );
     // ratio
-    assert!(super::nested_refusal(100 << 10, &l(vec![e(100 << 20)]), 0, 1 << 40, None).unwrap_err().contains("zip bomb"));
+    assert!(
+        super::nested_refusal(100 << 10, &l(vec![e(100 << 20)]), 0, 1 << 40, None)
+            .unwrap_err()
+            .contains("zip bomb")
+    );
     // total budget across inners
-    assert!(super::nested_refusal(400 << 20, &l(vec![e(400 << 20)]), 200 << 20, 512 << 20, None).unwrap_err().contains("in total"));
+    assert!(super::nested_refusal(
+        400 << 20,
+        &l(vec![e(400 << 20)]),
+        200 << 20,
+        512 << 20,
+        None
+    )
+    .unwrap_err()
+    .contains("in total"));
     // free space
-    assert!(super::nested_refusal(100 << 20, &l(vec![e(100 << 20)]), 0, 1 << 40, Some(200 << 20)).unwrap_err().contains("free space"));
+    assert!(super::nested_refusal(
+        100 << 20,
+        &l(vec![e(100 << 20)]),
+        0,
+        1 << 40,
+        Some(200 << 20)
+    )
+    .unwrap_err()
+    .contains("free space"));
     // unknown size
-    assert!(super::nested_refusal(1 << 20, &l(vec![e(0)]), 0, 1 << 40, None).unwrap_err().contains("can't be read"));
+    assert!(
+        super::nested_refusal(1 << 20, &l(vec![e(0)]), 0, 1 << 40, None)
+            .unwrap_err()
+            .contains("can't be read")
+    );
 }
 
 /// R16 MEDIUM-1: a .gz whose footer claims 1000 bytes but holds 512 MiB of zeros is stopped while
@@ -816,13 +1386,19 @@ fn r16_m1_forged_gz_size_is_capped_live() {
     let d = tmp("forged-gz");
     let gz = d.join("zeros.gz");
     let mut c = std::process::Command::new(exe())
-        .args(["a", "-tgzip", "-mx=1", "-sizeros.bin"]).arg(&gz)
-        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-        .spawn().unwrap();
+        .args(["a", "-tgzip", "-mx=1", "-sizeros.bin"])
+        .arg(&gz)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
     {
         let mut si = c.stdin.take().unwrap();
         let z = vec![0u8; 1 << 20];
-        for _ in 0..512 { si.write_all(&z).unwrap(); }
+        for _ in 0..512 {
+            si.write_all(&z).unwrap();
+        }
     }
     assert!(c.wait().unwrap().success());
     let mut b = fs::read(&gz).unwrap();
@@ -837,15 +1413,32 @@ fn r16_m1_forged_gz_size_is_capped_live() {
     let (s2, d2) = (stop.clone(), dest.clone());
     let peak = std::thread::spawn(move || {
         let mut peak = 0u64;
-        while !s2.load(std::sync::atomic::Ordering::SeqCst) { peak = peak.max(super::tree_bytes(&d2)); std::thread::sleep(std::time::Duration::from_millis(2)); }
+        while !s2.load(std::sync::atomic::Ordering::SeqCst) {
+            peak = peak.max(super::tree_bytes(&d2));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         peak
     });
-    let opts = ExtractOptions { archive: &outer, dest_parent: &dest, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: true };
+    let opts = ExtractOptions {
+        archive: &outer,
+        dest_parent: &dest,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: true,
+    };
     let r = extract(&exe(), &opts, &Jobs::default(), "forged", &mut |_, _| {}).unwrap();
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let peak = peak.join().unwrap();
     assert_eq!((r.nested, r.inner_left), (0, 1), "{r:?}");
-    assert!(r.warnings.iter().any(|w| w.contains("zeros.gz was left closed") && w.contains("stopped")), "{:?}", r.warnings);
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("zeros.gz was left closed") && w.contains("stopped")),
+        "{:?}",
+        r.warnings
+    );
     // outer gz (~0.5 MB) + cap (~1 MB) + what 7-Zip can write in one 20 ms poll
     assert!(peak < 96 << 20, "peak {peak} bytes written");
     assert!(super::tree_bytes(&dest) < 4 << 20, "partial output removed");
@@ -887,10 +1480,27 @@ fn r18_l2_inner_file_count_cap_from_listing() {
     drop(tar);
     let dest = d.join("out");
     fs::create_dir_all(&dest).unwrap();
-    let opts = ExtractOptions { archive: &outer, dest_parent: &dest, password: None, collision: Collision::Number, layout: Layout::Folder, skip_junk: true, nested: true };
+    let opts = ExtractOptions {
+        archive: &outer,
+        dest_parent: &dest,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: true,
+    };
     let r = extract(&exe(), &opts, &Jobs::default(), "filecap", &mut |_, _| {}).unwrap();
     assert_eq!((r.nested, r.inner_left), (0, 1), "{r:?}");
-    assert!(r.warnings.iter().any(|w| w.contains("many.tar") && w.contains("100500 files")), "{:?}", r.warnings);
-    assert!(super::count_files(&dest) < 5, "nothing unpacked from the tar");
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("many.tar") && w.contains("100500 files")),
+        "{:?}",
+        r.warnings
+    );
+    assert!(
+        super::count_files(&dest) < 5,
+        "nothing unpacked from the tar"
+    );
     assert!(no_staging_left(&dest));
 }

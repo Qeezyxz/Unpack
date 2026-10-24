@@ -14,7 +14,11 @@ fn shipped_folder_entries_are_all_valid() {
     // load without problems (empty is fine too).
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/menus");
     let s = load_builtin(&dir);
-    assert!(s.problems.is_empty(), "invalid built-in menu entries: {:?}", s.problems);
+    assert!(
+        s.problems.is_empty(),
+        "invalid built-in menu entries: {:?}",
+        s.problems
+    );
 }
 
 #[test]
@@ -50,14 +54,27 @@ fn valid_entries_load_and_bad_ones_are_skipped() {
     ]);
     fs::write(d.join("menus.json"), json.to_string()).unwrap();
     let s = load_builtin(&d);
-    assert_eq!(s.menus.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["Zorblax Fixture", "Quuxly Fixture"], "{:?}", s.problems);
+    assert_eq!(
+        s.menus.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        vec!["Zorblax Fixture", "Quuxly Fixture"],
+        "{:?}",
+        s.problems
+    );
     assert_eq!(s.problems.len(), 13, "{:#?}", s.problems);
     let a = &s.menus[0];
-    assert_eq!((a.title_id.as_str(), a.version.as_str(), a.sha256.as_deref()), ("4D5307E6", "0.0.1", Some(DUMMY_SHA)));
+    assert_eq!(
+        (a.title_id.as_str(), a.version.as_str(), a.sha256.as_deref()),
+        ("4D5307E6", "0.0.1", Some(DUMMY_SHA))
+    );
     assert!(a.game.contains("Halo"));
-    assert!(Path::new(&a.path).starts_with(crate::safecopy::simplify(fs::canonicalize(&d).unwrap())));
+    assert!(
+        Path::new(&a.path).starts_with(crate::safecopy::simplify(fs::canonicalize(&d).unwrap()))
+    );
     assert!(s.problems.iter().any(|p| p.contains("sha256 mismatch")));
-    assert!(s.problems.iter().any(|p| p.contains("leaves the menus folder")));
+    assert!(s
+        .problems
+        .iter()
+        .any(|p| p.contains("leaves the menus folder")));
     assert!(s.problems.iter().any(|p| p.contains("isn't a known game")));
     assert!(s.learned.iter().all(|l| l.tid == "4D5307E6") && !s.learned.is_empty());
 }
@@ -73,7 +90,11 @@ fn links_inside_menus_folder_refused() {
     fs::write(d.join("menus.json"), r#"[{"name":"Zorblax Fixture","file":"l.bin","titleId":"4D5307E6","version":"1"},{"name":"Quuxly Fixture","file":"ldir/secret.bin","titleId":"4D5307E6","version":"1"}]"#).unwrap();
     let s = load_builtin(&d);
     assert!(s.menus.is_empty());
-    assert!(s.problems.iter().all(|p| p.contains("link")), "{:?}", s.problems);
+    assert!(
+        s.problems.iter().all(|p| p.contains("link")),
+        "{:?}",
+        s.problems
+    );
 }
 
 #[test]
@@ -87,10 +108,25 @@ fn bad_json_and_size_cap() {
 
 #[test]
 fn builtin_seeds_never_override_user() {
-    let user = vec![Learned { key: "zorblax".into(), tid: "415608C3".into() }];
-    let builtin = vec![Learned { key: "zorblax".into(), tid: "4D5307E6".into() }, Learned { key: "quuxly".into(), tid: "4D5307E6".into() }];
+    let user = vec![Learned {
+        key: "zorblax".into(),
+        tid: "415608C3".into(),
+    }];
+    let builtin = vec![
+        Learned {
+            key: "zorblax".into(),
+            tid: "4D5307E6".into(),
+        },
+        Learned {
+            key: "quuxly".into(),
+            tid: "4D5307E6".into(),
+        },
+    ];
     let m = merge_learned(user, &builtin);
     assert_eq!(m.len(), 2);
-    assert_eq!(m.iter().find(|l| l.key == "zorblax").unwrap().tid, "415608C3");
+    assert_eq!(
+        m.iter().find(|l| l.key == "zorblax").unwrap().tid,
+        "415608C3"
+    );
     assert!(m.iter().any(|l| l.key == "quuxly"));
 }

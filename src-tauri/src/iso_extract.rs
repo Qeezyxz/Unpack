@@ -43,7 +43,10 @@ struct Merge {
 
 /// A later disc never replaces the playable executable of an earlier one.
 pub fn is_playable_exe(rel: &Path) -> bool {
-    rel.file_name().and_then(|n| n.to_str()).map(|n| n.eq_ignore_ascii_case("default.xex") || n.eq_ignore_ascii_case("default.xbe")).unwrap_or(false)
+    rel.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.eq_ignore_ascii_case("default.xex") || n.eq_ignore_ascii_case("default.xbe"))
+        .unwrap_or(false)
 }
 
 #[derive(Clone)]
@@ -76,11 +79,13 @@ fn verify_tree(root: &Path, planned: &[PlannedFile]) -> Result<(), String> {
     let mut found = 0usize;
     for p in planned {
         let path = root.join(&p.rel);
-        let meta = fs::symlink_metadata(&path).map_err(|_| {
-            format!("Missing extracted file: {}", p.rel.display())
-        })?;
+        let meta = fs::symlink_metadata(&path)
+            .map_err(|_| format!("Missing extracted file: {}", p.rel.display()))?;
         if crate::safecopy::is_link(&meta) || !meta.is_file() {
-            return Err(format!("{} is not a regular file after extract.", p.rel.display()));
+            return Err(format!(
+                "{} is not a regular file after extract.",
+                p.rel.display()
+            ));
         }
         if meta.len() != p.size {
             return Err(format!(
@@ -93,14 +98,19 @@ fn verify_tree(root: &Path, planned: &[PlannedFile]) -> Result<(), String> {
         found += 1;
     }
     if found != planned.len() {
-        return Err(format!("File count mismatch: wrote {found}, expected {}.", planned.len()));
+        return Err(format!(
+            "File count mismatch: wrote {found}, expected {}.",
+            planned.len()
+        ));
     }
     let mut walk = 0usize;
     let mut st = vec![root.to_path_buf()];
     while let Some(d) = st.pop() {
         let Ok(rd) = fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
-            let Ok(m) = fs::symlink_metadata(e.path()) else { continue };
+            let Ok(m) = fs::symlink_metadata(e.path()) else {
+                continue;
+            };
             if m.is_dir() {
                 st.push(e.path());
             } else if m.is_file() {
@@ -134,17 +144,16 @@ fn verify_content_vs_iso(
     let mut buf_b = vec![0u8; 1 << 16];
     for p in planned {
         let pos = root_offset + (p.sector as u64) * sector_size;
-        iso.seek(SeekFrom::Start(pos)).map_err(|e| format!("Seek ISO: {e}"))?;
+        iso.seek(SeekFrom::Start(pos))
+            .map_err(|e| format!("Seek ISO: {e}"))?;
         let mut file = File::open(root.join(&p.rel)).map_err(|e| e.to_string())?;
         let mut left = p.size;
         while left > 0 {
             let n = (left as usize).min(buf_a.len());
-            iso.read_exact(&mut buf_a[..n]).map_err(|e| {
-                format!("ISO read failed for {}: {e}", p.rel.display())
-            })?;
-            file.read_exact(&mut buf_b[..n]).map_err(|e| {
-                format!("File read failed for {}: {e}", p.rel.display())
-            })?;
+            iso.read_exact(&mut buf_a[..n])
+                .map_err(|e| format!("ISO read failed for {}: {e}", p.rel.display()))?;
+            file.read_exact(&mut buf_b[..n])
+                .map_err(|e| format!("File read failed for {}: {e}", p.rel.display()))?;
             if buf_a[..n] != buf_b[..n] {
                 return Err(format!(
                     "Content mismatch for {} vs the ISO image.",
@@ -167,7 +176,15 @@ pub fn extract(
     job_id: &str,
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<ExtractResult, String> {
-    extract_inner(iso_path, dest_dir, title_override, jobs, job_id, progress, None)
+    extract_inner(
+        iso_path,
+        dest_dir,
+        title_override,
+        jobs,
+        job_id,
+        progress,
+        None,
+    )
 }
 
 fn extract_inner(
@@ -189,7 +206,9 @@ fn extract_inner(
     // A later disc that carries no default.xex can still be overlaid onto its game's folder.
     let title = match TitleInfo::from_image(&mut source) {
         Ok(t) => Some(t),
-        Err(e) if merge.is_none() => return Err(god::missing_executable_message(iso_path, &format!("{e:#}"))),
+        Err(e) if merge.is_none() => {
+            return Err(god::missing_executable_message(iso_path, &format!("{e:#}")))
+        }
         Err(_) => None,
     };
     let exe_info = title.map(|t| t.execution_info);
@@ -209,7 +228,11 @@ fn extract_inner(
     }
     let need: u64 = planned.iter().map(|p| p.size).sum();
     fs::create_dir_all(dest_dir).map_err(ioerr("Cannot create output folder"))?;
-    let _dest_lock = crate::destlock::acquire(dest_dir, || progress(0, crate::destlock::WAIT_MESSAGE), &|| jobs.is_cancelled(job_id))?;
+    let _dest_lock = crate::destlock::acquire(
+        dest_dir,
+        || progress(0, crate::destlock::WAIT_MESSAGE),
+        &|| jobs.is_cancelled(job_id),
+    )?;
     crate::safecopy::fat_check(dest_dir, planned.iter().map(|p| (p.rel.clone(), p.size)))?;
     if let Some(free) = free_space(dest_dir) {
         if free < need + 64 * 1024 * 1024 {
@@ -221,7 +244,10 @@ fn extract_inner(
         }
     }
 
-    let tmp = dest_dir.join(format!(".unpack-xex-tmp-{}", crate::archive::safe_segment(job_id)));
+    let tmp = dest_dir.join(format!(
+        ".unpack-xex-tmp-{}",
+        crate::archive::safe_segment(job_id)
+    ));
     if tmp.exists() {
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -246,7 +272,8 @@ fn extract_inner(
         }
         let pos = root_offset + (p.sector as u64) * sector_size;
         let mut src = File::open(iso_path).map_err(ioerr("Cannot open ISO"))?;
-        src.seek(SeekFrom::Start(pos)).map_err(ioerr("Seek failed"))?;
+        src.seek(SeekFrom::Start(pos))
+            .map_err(ioerr("Seek failed"))?;
         let mut dest = File::options()
             .write(true)
             .create_new(true)
@@ -260,7 +287,10 @@ fn extract_inner(
             }
             let n = (left as usize).min(buf.len());
             src.read_exact(&mut buf[..n]).map_err(|e| {
-                format!("Read failed for {}: {e} (ISO may be truncated)", p.rel.display())
+                format!(
+                    "Read failed for {}: {e} (ISO may be truncated)",
+                    p.rel.display()
+                )
             })?;
             dest.write_all(&buf[..n]).map_err(ioerr("Write failed"))?;
             left -= n as u64;
@@ -285,20 +315,38 @@ fn extract_inner(
             for e in fs::read_dir(&tmp).map_err(ioerr("Cannot read temp"))? {
                 let e = e.map_err(ioerr("Cannot read temp"))?;
                 let to = dest_dir.join(e.file_name());
-                move_entry(&e.path(), &to).map_err(|err| format!("Could not place {}: {err}", e.file_name().to_string_lossy()))?;
+                move_entry(&e.path(), &to).map_err(|err| {
+                    format!("Could not place {}: {err}", e.file_name().to_string_lossy())
+                })?;
             }
             verify_tree(dest_dir, &planned)?;
         }
         Some(m) => {
-            overlay(&tmp, dest_dir, Path::new(""), m, job_id, &mut kept_files, &mut renamed)?;
+            overlay(
+                &tmp,
+                dest_dir,
+                Path::new(""),
+                m,
+                job_id,
+                &mut kept_files,
+                &mut renamed,
+            )?;
             for p in &planned {
                 if kept_files.contains(&p.rel) {
                     continue;
                 }
-                let at = renamed.iter().find(|(a, _)| *a == p.rel).map(|(_, b)| b.clone()).unwrap_or_else(|| p.rel.clone());
-                let meta = fs::symlink_metadata(dest_dir.join(&at)).map_err(|_| format!("Missing merged file: {}", p.rel.display()))?;
+                let at = renamed
+                    .iter()
+                    .find(|(a, _)| *a == p.rel)
+                    .map(|(_, b)| b.clone())
+                    .unwrap_or_else(|| p.rel.clone());
+                let meta = fs::symlink_metadata(dest_dir.join(&at))
+                    .map_err(|_| format!("Missing merged file: {}", p.rel.display()))?;
                 if crate::safecopy::is_link(&meta) || !meta.is_file() || meta.len() != p.size {
-                    return Err(format!("Merged file {} does not match the ISO.", p.rel.display()));
+                    return Err(format!(
+                        "Merged file {} does not match the ISO.",
+                        p.rel.display()
+                    ));
                 }
             }
         }
@@ -308,16 +356,36 @@ fn extract_inner(
     }
     let kept = kept_files.len();
     progress(100, "Done");
-    let catalog = exe_info.as_ref().and_then(|e| game_list::find_title_by_id(e.title_id)).filter(|n| !n.trim().is_empty());
-    let title_hex = exe_info.as_ref().map(|e| format!("{:08X}", e.title_id)).unwrap_or_default();
-    let typed = title_override.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-    let mut warning = (exe_info.is_some() && catalog.is_none() && typed.is_none()).then(|| god::unknown_title_warning(&title_hex));
+    let catalog = exe_info
+        .as_ref()
+        .and_then(|e| game_list::find_title_by_id(e.title_id))
+        .filter(|n| !n.trim().is_empty());
+    let title_hex = exe_info
+        .as_ref()
+        .map(|e| format!("{:08X}", e.title_id))
+        .unwrap_or_default();
+    let typed = title_override
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let mut warning = (exe_info.is_some() && catalog.is_none() && typed.is_none())
+        .then(|| god::unknown_title_warning(&title_hex));
     if !renamed.is_empty() {
         // R15 M3: never replace a different file from another disc without saying so.
-        let list: Vec<String> = renamed.iter().take(5).map(|(a, b)| format!("{} → {}", a.display(), b.display())).collect();
-        let more = if renamed.len() > 5 { format!(" and {} more", renamed.len() - 5) } else { String::new() };
+        let list: Vec<String> = renamed
+            .iter()
+            .take(5)
+            .map(|(a, b)| format!("{} → {}", a.display(), b.display()))
+            .collect();
+        let more = if renamed.len() > 5 {
+            format!(" and {} more", renamed.len() - 5)
+        } else {
+            String::new()
+        };
         let w = format!("{} file(s) on this disc differ from the copy already in the folder. The earlier copy was kept and this disc's was saved next to it: {}{more}.", renamed.len(), list.join(", "));
-        warning = Some(match warning { Some(x) => format!("{x} {w}"), None => w });
+        warning = Some(match warning {
+            Some(x) => format!("{x} {w}"),
+            None => w,
+        });
     }
     let name = typed.map(|t| clamp_title(&t)).or(catalog);
     Ok(ExtractResult {
@@ -337,7 +405,15 @@ fn extract_inner(
 /// Lay the finished temp tree over `dest` (a folder Unpack made earlier in this run). Existing files
 /// are replaced by set-aside-and-rename, never written through; links in the way are refused.
 /// Playable executables that were left alone are listed in `kept`.
-fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &mut Vec<PathBuf>, renamed: &mut Vec<(PathBuf, PathBuf)>) -> Result<(), String> {
+fn overlay(
+    src: &Path,
+    dest: &Path,
+    rel: &Path,
+    m: Merge,
+    job_id: &str,
+    kept: &mut Vec<PathBuf>,
+    renamed: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<(), String> {
     for e in fs::read_dir(src).map_err(|e| format!("Cannot read temp: {e}"))? {
         let e = e.map_err(|e| format!("Cannot read temp: {e}"))?;
         let name = e.file_name();
@@ -347,14 +423,23 @@ fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &m
         let to_meta = fs::symlink_metadata(&to).ok();
         if let Some(t) = &to_meta {
             if crate::safecopy::is_link(t) {
-                return Err(format!("{} is a link; refusing to write through it.", rel2.display()));
+                return Err(format!(
+                    "{} is a link; refusing to write through it.",
+                    rel2.display()
+                ));
             }
         }
         if from_meta.is_dir() {
             match &to_meta {
-                Some(t) if !t.is_dir() => return Err(format!("{} is a file where the disc has a folder.", rel2.display())),
+                Some(t) if !t.is_dir() => {
+                    return Err(format!(
+                        "{} is a file where the disc has a folder.",
+                        rel2.display()
+                    ))
+                }
                 Some(_) => {}
-                None => fs::create_dir(&to).map_err(|e| format!("Cannot create {}: {e}", rel2.display()))?,
+                None => fs::create_dir(&to)
+                    .map_err(|e| format!("Cannot create {}: {e}", rel2.display()))?,
             }
             overlay(&e.path(), &to, &rel2, m, job_id, kept, renamed)?;
             continue;
@@ -364,7 +449,12 @@ fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &m
                 kept.push(rel2);
                 continue;
             }
-            Some(t) if t.is_dir() => return Err(format!("{} is a folder where the disc has a file.", rel2.display())),
+            Some(t) if t.is_dir() => {
+                return Err(format!(
+                    "{} is a folder where the disc has a file.",
+                    rel2.display()
+                ))
+            }
             Some(_) if !is_playable_exe(&rel2) => {
                 // Same bytes: nothing to do. Different: keep the earlier disc's file and save this one beside it.
                 if same_content(&e.path(), &to) {
@@ -372,20 +462,35 @@ fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &m
                     continue;
                 }
                 let name_s = name.to_string_lossy();
-                let (stem, ext) = match name_s.rfind('.') { Some(i) if i > 0 => (&name_s[..i], &name_s[i..]), _ => (&name_s[..], "") };
+                let (stem, ext) = match name_s.rfind('.') {
+                    Some(i) if i > 0 => (&name_s[..i], &name_s[i..]),
+                    _ => (&name_s[..], ""),
+                };
                 let mut n = 1;
                 let alt = loop {
-                    let cand = if n == 1 { format!("{stem} (Disc {}){ext}", m.disc) } else { format!("{stem} (Disc {})-{n}{ext}", m.disc) };
-                    if fs::symlink_metadata(dest.join(&cand)).is_err() { break cand; }
+                    let cand = if n == 1 {
+                        format!("{stem} (Disc {}){ext}", m.disc)
+                    } else {
+                        format!("{stem} (Disc {})-{n}{ext}", m.disc)
+                    };
+                    if fs::symlink_metadata(dest.join(&cand)).is_err() {
+                        break cand;
+                    }
                     n += 1;
                 };
-                move_entry(&e.path(), &dest.join(&alt)).map_err(|err| format!("Could not place {}: {err}", rel2.display()))?;
+                move_entry(&e.path(), &dest.join(&alt))
+                    .map_err(|err| format!("Could not place {}: {err}", rel2.display()))?;
                 renamed.push((rel2.clone(), rel.join(&alt)));
             }
             Some(_) => {
-                let old = to.with_file_name(format!(".unpack-old-{}-{}", crate::archive::safe_segment(job_id), name.to_string_lossy()));
+                let old = to.with_file_name(format!(
+                    ".unpack-old-{}-{}",
+                    crate::archive::safe_segment(job_id),
+                    name.to_string_lossy()
+                ));
                 let _ = fs::remove_file(&old);
-                fs::rename(&to, &old).map_err(|e| format!("Cannot set aside {}: {e}", rel2.display()))?;
+                fs::rename(&to, &old)
+                    .map_err(|e| format!("Cannot set aside {}: {e}", rel2.display()))?;
                 if let Err(err) = move_entry(&e.path(), &to) {
                     let _ = fs::remove_file(&to);
                     let _ = fs::rename(&old, &to);
@@ -393,7 +498,8 @@ fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &m
                 }
                 let _ = fs::remove_file(&old);
             }
-            None => move_entry(&e.path(), &to).map_err(|err| format!("Could not place {}: {err}", rel2.display()))?,
+            None => move_entry(&e.path(), &to)
+                .map_err(|err| format!("Could not place {}: {err}", rel2.display()))?,
         }
     }
     Ok(())
@@ -402,14 +508,27 @@ fn overlay(src: &Path, dest: &Path, rel: &Path, m: Merge, job_id: &str, kept: &m
 /// Byte-for-byte equal regular files?
 fn same_content(a: &Path, b: &Path) -> bool {
     use std::io::Read;
-    let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b)) else { return false };
-    if ma.len() != mb.len() { return false; }
-    let (Ok(mut fa), Ok(mut fb)) = (fs::File::open(a), fs::File::open(b)) else { return false };
+    let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b)) else {
+        return false;
+    };
+    if ma.len() != mb.len() {
+        return false;
+    }
+    let (Ok(mut fa), Ok(mut fb)) = (fs::File::open(a), fs::File::open(b)) else {
+        return false;
+    };
     let (mut ba, mut bb) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
     loop {
-        let na = match fa.read(&mut ba) { Ok(n) => n, Err(_) => return false };
-        if na == 0 { return true; }
-        if fb.read_exact(&mut bb[..na]).is_err() || ba[..na] != bb[..na] { return false; }
+        let na = match fa.read(&mut ba) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if na == 0 {
+            return true;
+        }
+        if fb.read_exact(&mut bb[..na]).is_err() || ba[..na] != bb[..na] {
+            return false;
+        }
     }
 }
 
@@ -463,30 +582,57 @@ pub fn extract_named(
     let info = iso_info(iso_path);
     let hint = discs::disc_hint_from_name(iso_path);
     let (multi, disc, tid, game_name) = match &info {
-        Ok(i) => (discs::looks_multi_disc(iso_path, i.disc_number, i.disc_count), i.disc_number, Some(i.title_id.clone()), i.name.clone()),
+        Ok(i) => (
+            discs::looks_multi_disc(iso_path, i.disc_number, i.disc_count),
+            i.disc_number,
+            Some(i.title_id.clone()),
+            i.name.clone(),
+        ),
         // No default.xex: only a "(Disc N)" file name can attach it to a game that is already in `parent`.
-        Err(_) => (hint.map(|n| n > 1).unwrap_or(false), hint.unwrap_or(1), None, None),
+        Err(_) => (
+            hint.map(|n| n > 1).unwrap_or(false),
+            hint.unwrap_or(1),
+            None,
+            None,
+        ),
     };
     if let (Err(e), false) = (&info, multi) {
         return Err(e.clone());
     }
     let keys = discs::keys_for(tid.as_deref(), iso_path);
-    let stem = iso_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = iso_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     let title_hex = tid.clone().unwrap_or_default();
     let base = title_override
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .or(game_name)
-        .unwrap_or(if stem.trim().is_empty() { title_hex.clone() } else { stem });
+        .unwrap_or(if stem.trim().is_empty() {
+            title_hex.clone()
+        } else {
+            stem
+        });
     let mut seg = crate::archive::safe_segment(&base.chars().take(80).collect::<String>());
     if seg.is_empty() {
-        seg = if title_hex.is_empty() { "Game".into() } else { title_hex };
+        seg = if title_hex.is_empty() {
+            "Game".into()
+        } else {
+            title_hex
+        };
     }
-    let make = || crate::archive::claim_dir(parent, &seg).map_err(|e| format!("Cannot create output folder: {e}"));
+    let make = || {
+        crate::archive::claim_dir(parent, &seg)
+            .map_err(|e| format!("Cannot create output folder: {e}"))
+    };
     let claim = if multi {
         discs::claim(parent, Kind::Xex, &keys, disc, make)?
     } else {
-        discs::Claim { dir: make()?, joined: false }
+        discs::Claim {
+            dir: make()?,
+            joined: false,
+        }
     };
     if info.is_err() && !claim.joined {
         // Disc 2 with no executable and nothing to join: say why, leave nothing behind.
@@ -496,9 +642,20 @@ pub fn extract_named(
     }
     let merge = claim.joined.then(|| {
         let have = discs::exe_disc(parent, Kind::Xex, &keys);
-        Merge { replace_exe: have == 0 || disc < have, disc }
+        Merge {
+            replace_exe: have == 0 || disc < have,
+            disc,
+        }
     });
-    let r = extract_inner(iso_path, &claim.dir, title_override, jobs, job_id, progress, merge);
+    let r = extract_inner(
+        iso_path,
+        &claim.dir,
+        title_override,
+        jobs,
+        job_id,
+        progress,
+        merge,
+    );
     match &r {
         Ok(ok) => {
             if multi && ok.kept == 0 && !ok.title_id.is_empty() {
@@ -553,7 +710,10 @@ pub fn extract_registered(
         .to_path_buf();
     let r = extract_named(&path, &out_parent, None, jobs, job_id, progress)?;
     if god::identity(&path)? != ident {
-        return Err(format!("{changed} Output in {} may not match; delete it.", r.output));
+        return Err(format!(
+            "{changed} Output in {} may not match; delete it.",
+            r.output
+        ));
     }
     let mut out = ExtractedXex {
         output: r.output.clone(),
@@ -591,8 +751,15 @@ pub fn extract_registered(
     let sector_size = source.volume_descriptor.sector_size.max(SECTOR_SIZE);
     let mut planned = Vec::new();
     collect_files(&source.directory_table, Path::new(""), &mut planned);
-    verify_content_vs_iso(&path, root_offset, sector_size, Path::new(&r.output), &planned, !r.merged)
-        .map_err(|e| format!("{e}. The ISO was kept."))?;
+    verify_content_vs_iso(
+        &path,
+        root_offset,
+        sector_size,
+        Path::new(&r.output),
+        &planned,
+        !r.merged,
+    )
+    .map_err(|e| format!("{e}. The ISO was kept."))?;
     if jobs.is_cancelled(job_id) {
         return keep("ISO kept: cancelled.", out);
     }
@@ -601,7 +768,10 @@ pub fn extract_registered(
         _ => false,
     };
     if !inside {
-        return keep("ISO kept: it is no longer inside the extraction folder.", out);
+        return keep(
+            "ISO kept: it is no longer inside the extraction folder.",
+            out,
+        );
     }
     if god::identity(&path)? != ident {
         return keep("ISO kept: it changed during the check.", out);
@@ -611,7 +781,10 @@ pub fn extract_registered(
         Some(h) => {
             progress(100, "Verifying the ISO is unchanged");
             if god::full_hash(&path)? != h {
-                return keep("ISO kept: its contents changed after it was extracted.", out);
+                return keep(
+                    "ISO kept: its contents changed after it was extracted.",
+                    out,
+                );
             }
         }
     }
@@ -665,7 +838,7 @@ pub mod tests {
         b[20..24].copy_from_slice(&1u32.to_be_bytes()); // field_count
         b[24..28].copy_from_slice(&0x0004_0006u32.to_be_bytes()); // ExecutionId
         b[28..32].copy_from_slice(&0x40u32.to_be_bytes()); // offset of exec info
-        // exec info at 0x40
+                                                           // exec info at 0x40
         let exec = 0x40usize;
         // media, version, base
         for i in 0..3 {
@@ -698,9 +871,25 @@ pub mod tests {
 
         // Root table: default.xex + media (dir)
         let table = (root_table_sector as u64 * SECTOR_SIZE) as usize;
-        write_entry(&mut img, table, 0, xex_sector, xex.len() as u32, 0x20, b"default.xex");
+        write_entry(
+            &mut img,
+            table,
+            0,
+            xex_sector,
+            xex.len() as u32,
+            0x20,
+            b"default.xex",
+        );
         let e2 = table + entry_len(b"default.xex");
-        write_entry(&mut img, e2, 0, media_sector, SECTOR_SIZE as u32, 0x10, b"media");
+        write_entry(
+            &mut img,
+            e2,
+            0,
+            media_sector,
+            SECTOR_SIZE as u32,
+            0x10,
+            b"media",
+        );
         // pad rest of sector with 0xff end marker feel — zeros fine; size 0 terminates? size==0 ends. Fill remaining with left/right 0xffff
         let end_mark = e2 + entry_len(b"media");
         if end_mark + 4 <= table + SECTOR_SIZE as usize {
@@ -710,7 +899,15 @@ pub mod tests {
 
         // media dir: readme.txt
         let mt = (media_sector as u64 * SECTOR_SIZE) as usize;
-        write_entry(&mut img, mt, 0, readme_sector, readme.len() as u32, 0x20, b"readme.txt");
+        write_entry(
+            &mut img,
+            mt,
+            0,
+            readme_sector,
+            readme.len() as u32,
+            0x20,
+            b"readme.txt",
+        );
         let mend = mt + entry_len(b"readme.txt");
         img[mend..mend + 2].copy_from_slice(&0xffffu16.to_le_bytes());
         img[mend + 2..mend + 4].copy_from_slice(&0xffffu16.to_le_bytes());
@@ -727,7 +924,15 @@ pub mod tests {
         (raw + 3) & !3
     }
 
-    fn write_entry(img: &mut [u8], at: usize, _subtree: u16, sector: u32, size: u32, attr: u8, name: &[u8]) {
+    fn write_entry(
+        img: &mut [u8],
+        at: usize,
+        _subtree: u16,
+        sector: u32,
+        size: u32,
+        attr: u8,
+        name: &[u8],
+    ) {
         img[at..at + 2].copy_from_slice(&0u16.to_le_bytes());
         img[at + 2..at + 4].copy_from_slice(&0u16.to_le_bytes());
         img[at + 4..at + 8].copy_from_slice(&sector.to_le_bytes());
@@ -757,11 +962,22 @@ pub mod tests {
         fs::create_dir(&out).unwrap();
         let jobs = Jobs::default();
         jobs.register("t1");
-        let r = extract(&iso_path, &out, Some("Halo Test"), &jobs, "t1", &mut |_, _| {}).unwrap();
+        let r = extract(
+            &iso_path,
+            &out,
+            Some("Halo Test"),
+            &jobs,
+            "t1",
+            &mut |_, _| {},
+        )
+        .unwrap();
         assert_eq!(r.title_id, "41560817");
         assert_eq!(r.files, 2);
         assert!(out.join("default.xex").is_file());
-        assert_eq!(fs::read(out.join("media/readme.txt")).unwrap(), b"hello from iso");
+        assert_eq!(
+            fs::read(out.join("media/readme.txt")).unwrap(),
+            b"hello from iso"
+        );
         let (tid, _) = folder_title_id(&out).unwrap();
         assert_eq!(tid, "41560817");
         let _ = fs::remove_dir_all(&dir);
@@ -774,9 +990,11 @@ pub mod tests {
         fs::write(&iso_path, synthetic_xdvdfs()).unwrap();
         let jobs = Jobs::default();
         jobs.register("a");
-        let r1 = extract_named(&iso_path, &dir, Some("My Game"), &jobs, "a", &mut |_, _| {}).unwrap();
+        let r1 =
+            extract_named(&iso_path, &dir, Some("My Game"), &jobs, "a", &mut |_, _| {}).unwrap();
         jobs.register("b");
-        let r2 = extract_named(&iso_path, &dir, Some("My Game"), &jobs, "b", &mut |_, _| {}).unwrap();
+        let r2 =
+            extract_named(&iso_path, &dir, Some("My Game"), &jobs, "b", &mut |_, _| {}).unwrap();
         assert_ne!(r1.output, r2.output);
         assert!(Path::new(&r1.output).join("default.xex").is_file());
         assert!(Path::new(&r2.output).join("default.xex").is_file());
@@ -827,7 +1045,10 @@ pub mod tests {
         let jobs = Jobs::default();
         jobs.register("t");
         let e = extract(&iso_path, &out, None, &jobs, "t", &mut |_, _| {}).unwrap_err();
-        assert!(e.contains("incomplete") || e.contains("truncated") || e.contains("Not an Xbox"), "{e}");
+        assert!(
+            e.contains("incomplete") || e.contains("truncated") || e.contains("Not an Xbox"),
+            "{e}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -837,7 +1058,8 @@ pub mod tests {
 
     fn xex_disc(dir: &Path, name: &str, media: u32, n: u8, extra: &[(&str, &[u8])]) -> PathBuf {
         let p = dir.join(name);
-        let mut files: Vec<(&str, &[u8])> = vec![("default.xex", format!("disc{n}").leak().as_bytes())];
+        let mut files: Vec<(&str, &[u8])> =
+            vec![("default.xex", format!("disc{n}").leak().as_bytes())];
         files.extend_from_slice(extra);
         make_iso_files(&p, 0x4D53_07E6, media, (n, 2), &files);
         p
@@ -845,11 +1067,17 @@ pub mod tests {
 
     fn read_xex_marker(folder: &Path) -> String {
         let b = fs::read(folder.join("default.xex")).unwrap();
-        String::from_utf8_lossy(&b[b.len() - 5..]).trim_end_matches('\0').to_string()
+        String::from_utf8_lossy(&b[b.len() - 5..])
+            .trim_end_matches('\0')
+            .to_string()
     }
 
     fn xex_names(d: &Path) -> Vec<String> {
-        let mut v: Vec<String> = fs::read_dir(d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let mut v: Vec<String> = fs::read_dir(d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
         v.sort();
         v
     }
@@ -871,7 +1099,11 @@ pub mod tests {
         assert_eq!(fs::read(game.join("one.bin")).unwrap(), b"ONE");
         assert_eq!(fs::read(game.join("two.bin")).unwrap(), b"TWO");
         assert_eq!(b.kept, 1, "disc 2's own default.xex was not copied over");
-        assert!(xex_names(game).iter().all(|n| !n.starts_with('.')), "{:?}", xex_names(game));
+        assert!(
+            xex_names(game).iter().all(|n| !n.starts_with('.')),
+            "{:?}",
+            xex_names(game)
+        );
     }
 
     #[test]
@@ -886,7 +1118,11 @@ pub mod tests {
         let a = extract_named(&one, &out, None, &Jobs::default(), "y1", &mut |_, _| {}).unwrap();
         assert!(a.merged);
         let game = Path::new(&a.output);
-        assert_eq!(read_xex_marker(game), "disc1", "the lower disc number owns the executable");
+        assert_eq!(
+            read_xex_marker(game),
+            "disc1",
+            "the lower disc number owns the executable"
+        );
         assert!(game.join("one.bin").is_file() && game.join("two.bin").is_file());
         assert_eq!(xex_names(&out).len(), 1);
     }
@@ -899,8 +1135,12 @@ pub mod tests {
         let lone = d.join("Zed (Disc 2).iso");
         make_iso_files(&lone, 0, 0, (1, 1), &[("data.bin", b"DATA")]);
         // nothing to join: plain message, nothing created
-        let e = extract_named(&lone, &out, None, &Jobs::default(), "n0", &mut |_, _| {}).unwrap_err();
-        assert!(e.contains("Disc 2") && e.contains("Convert Disc 1 first"), "{e}");
+        let e =
+            extract_named(&lone, &out, None, &Jobs::default(), "n0", &mut |_, _| {}).unwrap_err();
+        assert!(
+            e.contains("Disc 2") && e.contains("Convert Disc 1 first"),
+            "{e}"
+        );
         assert!(xex_names(&out).is_empty(), "{:?}", xex_names(&out));
         // with disc 1 already extracted from a matching file name it overlays
         let one = d.join("Zed (Disc 1).iso");
@@ -909,7 +1149,10 @@ pub mod tests {
         let b = extract_named(&lone, &out, None, &Jobs::default(), "n2", &mut |_, _| {}).unwrap();
         assert!(b.merged && a.output == b.output);
         assert_eq!(read_xex_marker(Path::new(&a.output)), "disc1");
-        assert_eq!(fs::read(Path::new(&a.output).join("data.bin")).unwrap(), b"DATA");
+        assert_eq!(
+            fs::read(Path::new(&a.output).join("data.bin")).unwrap(),
+            b"DATA"
+        );
     }
 
     #[test]
@@ -927,7 +1170,8 @@ pub mod tests {
             fs::write(&victim, "victim").unwrap();
             fs::remove_file(game.join("a.bin")).unwrap();
             std::os::unix::fs::symlink(&victim, game.join("a.bin")).unwrap();
-            let e = extract_named(&two, &out, None, &Jobs::default(), "l2", &mut |_, _| {}).unwrap_err();
+            let e = extract_named(&two, &out, None, &Jobs::default(), "l2", &mut |_, _| {})
+                .unwrap_err();
             assert!(e.contains("link"), "{e}");
             assert_eq!(fs::read_to_string(&victim).unwrap(), "victim");
         }
@@ -940,15 +1184,36 @@ pub mod tests {
         let d = tmp("xex-swap");
         let out = d.join("out");
         fs::create_dir_all(&out).unwrap();
-        let one = xex_disc(&d, "Swap (Disc 1).iso", 1, 1, &[("shared.bin", b"FROM-ONE")]);
-        let two = xex_disc(&d, "Swap (Disc 2).iso", 2, 2, &[("shared.bin", b"FROM-TWO")]);
+        let one = xex_disc(
+            &d,
+            "Swap (Disc 1).iso",
+            1,
+            1,
+            &[("shared.bin", b"FROM-ONE")],
+        );
+        let two = xex_disc(
+            &d,
+            "Swap (Disc 2).iso",
+            2,
+            2,
+            &[("shared.bin", b"FROM-TWO")],
+        );
         let a = extract_named(&one, &out, None, &Jobs::default(), "s1", &mut |_, _| {}).unwrap();
         extract_named(&two, &out, None, &Jobs::default(), "s2", &mut |_, _| {}).unwrap();
         let game = Path::new(&a.output);
         // R15 M3: a differing file is never silently replaced; the later disc's copy sits beside it.
         assert_eq!(fs::read(game.join("shared.bin")).unwrap(), b"FROM-ONE");
-        assert_eq!(fs::read(game.join("shared (Disc 2).bin")).unwrap(), b"FROM-TWO");
-        assert!(xex_names(game).iter().all(|n| !n.starts_with(".unpack-old")), "{:?}", xex_names(game));
+        assert_eq!(
+            fs::read(game.join("shared (Disc 2).bin")).unwrap(),
+            b"FROM-TWO"
+        );
+        assert!(
+            xex_names(game)
+                .iter()
+                .all(|n| !n.starts_with(".unpack-old")),
+            "{:?}",
+            xex_names(game)
+        );
     }
 
     #[test]
@@ -956,15 +1221,37 @@ pub mod tests {
         let d = tmp("xex-pad");
         let out = d.join("out");
         fs::create_dir_all(&out).unwrap();
-        let one = xex_disc(&d, "Pad (Disc 1).iso", 1, 1, &[("pad.bin", &[1u8; 4096]), ("same.bin", b"SAME")]);
-        let two = xex_disc(&d, "Pad (Disc 2).iso", 2, 2, &[("pad.bin", &[2u8; 8192]), ("same.bin", b"SAME")]);
+        let one = xex_disc(
+            &d,
+            "Pad (Disc 1).iso",
+            1,
+            1,
+            &[("pad.bin", &[1u8; 4096]), ("same.bin", b"SAME")],
+        );
+        let two = xex_disc(
+            &d,
+            "Pad (Disc 2).iso",
+            2,
+            2,
+            &[("pad.bin", &[2u8; 8192]), ("same.bin", b"SAME")],
+        );
         let a = extract_named(&one, &out, None, &Jobs::default(), "p1", &mut |_, _| {}).unwrap();
         let b = extract_named(&two, &out, None, &Jobs::default(), "p2", &mut |_, _| {}).unwrap();
         assert!(b.merged && a.output == b.output);
         let game = Path::new(&a.output);
-        assert_eq!(fs::metadata(game.join("pad.bin")).unwrap().len(), 4096, "disc 1's pad.bin kept");
-        assert_eq!(fs::metadata(game.join("pad (Disc 2).bin")).unwrap().len(), 8192);
-        assert!(!game.join("same (Disc 2).bin").exists(), "identical files are not duplicated");
+        assert_eq!(
+            fs::metadata(game.join("pad.bin")).unwrap().len(),
+            4096,
+            "disc 1's pad.bin kept"
+        );
+        assert_eq!(
+            fs::metadata(game.join("pad (Disc 2).bin")).unwrap().len(),
+            8192
+        );
+        assert!(
+            !game.join("same (Disc 2).bin").exists(),
+            "identical files are not duplicated"
+        );
         let w = b.warning.expect("warning about the differing file");
         assert!(w.contains("pad.bin") && w.contains("differ"), "{w}");
     }
@@ -975,15 +1262,33 @@ pub mod tests {
         let out = d.join("out");
         fs::create_dir_all(&out).unwrap();
         let halo = d.join("Mix (Disc 1).iso");
-        make_iso_files(&halo, 0x4D53_07E6, 11, (1, 2), &[("default.xex", b"HALO"), ("maps.bin", b"H")]);
+        make_iso_files(
+            &halo,
+            0x4D53_07E6,
+            11,
+            (1, 2),
+            &[("default.xex", b"HALO"), ("maps.bin", b"H")],
+        );
         let quake = d.join("Mix (Disc 2).iso");
-        make_iso_files(&quake, 0x4156_07D2, 12, (2, 2), &[("default.xex", b"QUAKE"), ("maps.bin", b"Q")]);
+        make_iso_files(
+            &quake,
+            0x4156_07D2,
+            12,
+            (2, 2),
+            &[("default.xex", b"QUAKE"), ("maps.bin", b"Q")],
+        );
         let a = extract_named(&halo, &out, None, &Jobs::default(), "m1", &mut |_, _| {}).unwrap();
         let b = extract_named(&quake, &out, None, &Jobs::default(), "m2", &mut |_, _| {}).unwrap();
         assert!(!b.merged, "different TitleIDs must not merge");
         assert_ne!(a.output, b.output);
-        assert_eq!(fs::read(Path::new(&a.output).join("maps.bin")).unwrap(), b"H");
-        assert_eq!(fs::read(Path::new(&b.output).join("maps.bin")).unwrap(), b"Q");
+        assert_eq!(
+            fs::read(Path::new(&a.output).join("maps.bin")).unwrap(),
+            b"H"
+        );
+        assert_eq!(
+            fs::read(Path::new(&b.output).join("maps.bin")).unwrap(),
+            b"Q"
+        );
         assert!(!crate::discs::companions(&halo).unwrap().contains(&quake));
     }
 
@@ -1000,7 +1305,8 @@ pub mod tests {
             t
         };
         extract_registered(&reg(&one), false, &Jobs::default(), "d1", &mut |_, _| {}).unwrap();
-        let r = extract_registered(&reg(&two), true, &Jobs::default(), "d2", &mut |_, _| {}).unwrap();
+        let r =
+            extract_registered(&reg(&two), true, &Jobs::default(), "d2", &mut |_, _| {}).unwrap();
         assert!(r.merged && !r.iso_deleted && two.exists());
         assert!(r.kept_reason.unwrap().contains("default.xex"));
     }
@@ -1011,7 +1317,13 @@ pub mod tests {
         let out = d.join("out");
         fs::create_dir_all(&out).unwrap();
         let iso = d.join("Mystery.iso");
-        make_iso_files(&iso, 0xDEAD_BEEF, 9, (1, 1), &[("default.xex", b"M"), ("x.bin", b"X")]);
+        make_iso_files(
+            &iso,
+            0xDEAD_BEEF,
+            9,
+            (1, 1),
+            &[("default.xex", b"M"), ("x.bin", b"X")],
+        );
         let r = extract_named(&iso, &out, None, &Jobs::default(), "k", &mut |_, _| {}).unwrap();
         assert_eq!(r.title_id, "DEADBEEF");
         let w = r.warning.expect("warning for an unknown TitleID");

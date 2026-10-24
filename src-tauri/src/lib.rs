@@ -1,22 +1,29 @@
 pub mod archive;
-pub mod god;
-pub mod dlc;
-pub mod library;
-pub mod mods;
-pub mod gamedb;
-pub mod safecopy;
-pub mod download;
-pub mod iso_extract;
-pub mod modnames;
-pub mod ftp;
 pub mod catalog;
-pub mod discord;
+pub mod covers;
 pub mod destlock;
+pub mod discord;
 pub mod discs;
+pub mod dlc;
+pub mod download;
+pub mod ftp;
+pub mod gamedb;
+pub mod god;
+pub mod hints;
+pub mod iso_extract;
+pub mod lan;
+pub mod library;
 pub mod migrate;
+pub mod modnames;
+pub mod mods;
+pub mod preflight;
+pub mod safecopy;
+pub mod saves;
 #[cfg(test)]
 pub mod testutil;
+pub mod usbprep;
 
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use archive::{Collision, ExtractOptions, Jobs, Layout};
@@ -43,6 +50,7 @@ pub fn parse_args(args: &[String], cwd: &std::path::Path) -> Option<LaunchReques
             "--" if !only_paths => only_paths = true,
             "--extract-here" if !only_paths => action = "extract-here".into(),
             "--extract-folder" if !only_paths => action = "extract-folder".into(),
+            "--convert-god" if !only_paths => action = "convert-god".into(),
             s if s.starts_with('-') && !only_paths => {}
             s => {
                 let p = PathBuf::from(s);
@@ -53,7 +61,11 @@ pub fn parse_args(args: &[String], cwd: &std::path::Path) -> Option<LaunchReques
             }
         }
     }
-    if paths.is_empty() { None } else { Some(LaunchRequest { action, paths }) }
+    if paths.is_empty() {
+        None
+    } else {
+        Some(LaunchRequest { action, paths })
+    }
 }
 
 #[derive(Default)]
@@ -73,7 +85,8 @@ struct Progress {
 }
 
 fn seven_zip() -> Result<PathBuf, String> {
-    archive::find_7za().ok_or_else(|| "The bundled 7-Zip (7za) is missing. Reinstall Unpack.".to_string())
+    archive::find_7za()
+        .ok_or_else(|| "The bundled 7-Zip (7za) is missing. Reinstall Unpack.".to_string())
 }
 
 fn opt_pw(p: &Option<String>) -> Option<&str> {
@@ -89,8 +102,14 @@ struct NativeInfo {
 #[tauri::command]
 fn native_info() -> NativeInfo {
     match archive::find_7za() {
-        Some(p) => NativeInfo { available: true, path: p.display().to_string() },
-        None => NativeInfo { available: false, path: String::new() },
+        Some(p) => NativeInfo {
+            available: true,
+            path: p.display().to_string(),
+        },
+        None => NativeInfo {
+            available: false,
+            path: String::new(),
+        },
     }
 }
 
@@ -107,7 +126,10 @@ fn file_info(path: String) -> Result<FileInfo, String> {
     let p = PathBuf::from(&path);
     let m = std::fs::metadata(&p).map_err(|e| format!("{path}: {e}"))?;
     Ok(FileInfo {
-        name: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        name: p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         path,
         size: m.len(),
         is_dir: m.is_dir(),
@@ -117,16 +139,28 @@ fn file_info(path: String) -> Result<FileInfo, String> {
 #[tauri::command]
 async fn list_archive(path: String, password: Option<String>) -> Result<archive::Listing, String> {
     let exe = seven_zip()?;
-    tauri::async_runtime::spawn_blocking(move || archive::list(&exe, &PathBuf::from(path), opt_pw(&password)))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        archive::list(&exe, &PathBuf::from(path), opt_pw(&password))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn read_entry(path: String, entry: String, password: Option<String>) -> Result<tauri::ipc::Response, String> {
+async fn read_entry(
+    path: String,
+    entry: String,
+    password: Option<String>,
+) -> Result<tauri::ipc::Response, String> {
     let exe = seven_zip()?;
     let bytes = tauri::async_runtime::spawn_blocking(move || {
-        archive::read_entry(&exe, &PathBuf::from(path), &entry, opt_pw(&password), 4 * 1024 * 1024)
+        archive::read_entry(
+            &exe,
+            &PathBuf::from(path),
+            &entry,
+            opt_pw(&password),
+            4 * 1024 * 1024,
+        )
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -148,16 +182,21 @@ async fn extract_archive(
     skip_junk: bool,
     seal_isos: Option<bool>,
     nested: Option<bool>,
- ) -> Result<archive::ExtractResult, String> {
+) -> Result<archive::ExtractResult, String> {
     // Dest must be a picked folder, or (Extract beside) the archive's own parent.
     let dest_path = match grants.check(&dest) {
         Ok(d) => d,
         Err(e) => {
             let arch = PathBuf::from(&path);
             let parent = arch.parent().ok_or_else(|| e.clone())?;
-            let (Ok(d), Ok(p)) = (std::fs::canonicalize(&dest), std::fs::canonicalize(parent)) else { return Err(e) };
+            let (Ok(d), Ok(p)) = (std::fs::canonicalize(&dest), std::fs::canonicalize(parent))
+            else {
+                return Err(e);
+            };
             let d = safecopy::simplify(d);
-            if d != safecopy::simplify(p) { return Err(e); }
+            if d != safecopy::simplify(p) {
+                return Err(e);
+            }
             d
         }
     };
@@ -175,12 +214,23 @@ async fn extract_archive(
             dest_parent: &dest_path,
             password: opt_pw(&password),
             collision: Collision::parse(&collision),
-            layout: if layout == "here" { Layout::Here } else { Layout::Folder },
+            layout: if layout == "here" {
+                Layout::Here
+            } else {
+                Layout::Folder
+            },
             skip_junk,
             nested: nested.unwrap_or(false),
         };
         let mut cb = |percent: u32, file: &str| {
-            let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
         };
         let r = archive::extract(&exe, &opts, &jobs, &jid, &mut cb);
         if let (Ok(res), Some(true)) = (&r, seal_isos) {
@@ -193,9 +243,17 @@ async fn extract_archive(
     .map_err(|e| e.to_string());
     // Unregister on every exit path (success, error, panic in the worker).
     registry.finish(&id);
-    let r = res?.map_err(|e| safecopy::with_fat32_hint(e, &fat_dest, || {
-        archive::list(&fat_exe, &fat_arch, opt_pw(&fat_pw)).map(|l| l.entries.iter().any(|e| !e.dir && e.size > safecopy::FAT_MAX)).unwrap_or(false)
-    }))?;
+    let r = res?.map_err(|e| {
+        safecopy::with_fat32_hint(e, &fat_dest, || {
+            archive::list(&fat_exe, &fat_arch, opt_pw(&fat_pw))
+                .map(|l| {
+                    l.entries
+                        .iter()
+                        .any(|e| !e.dir && e.size > safecopy::FAT_MAX)
+                })
+                .unwrap_or(false)
+        })
+    })?;
     // Overseer R5 addendum: only session-grant folders we actually created this run.
     // Skip / Replace-merge / Extract-here never create a new claim_dir folder.
     if r.created && !r.skipped {
@@ -205,14 +263,29 @@ async fn extract_archive(
 }
 
 #[tauri::command]
-async fn extract_entry(jobs: State<'_, Jobs>, id: String, path: String, entry: String, password: Option<String>, out_file: String) -> Result<(), String> {
+async fn extract_entry(
+    jobs: State<'_, Jobs>,
+    id: String,
+    path: String,
+    entry: String,
+    password: Option<String>,
+    out_file: String,
+) -> Result<(), String> {
     let exe = seven_zip()?;
     let registry = jobs.inner().clone();
     registry.register(&id);
     let j = registry.clone();
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
-        archive::extract_entry_to(&exe, &PathBuf::from(path), &entry, opt_pw(&password), &PathBuf::from(out_file), &j, &jid)
+        archive::extract_entry_to(
+            &exe,
+            &PathBuf::from(path),
+            &entry,
+            opt_pw(&password),
+            &PathBuf::from(out_file),
+            &j,
+            &jid,
+        )
     })
     .await
     .map_err(|e| e.to_string());
@@ -232,7 +305,10 @@ async fn read_file(path: String) -> Result<tauri::ipc::Response, String> {
     if size > 1500 * 1024 * 1024 {
         return Err("ARCHIVE_TOO_LARGE".into());
     }
-    let bytes = tauri::async_runtime::spawn_blocking(move || std::fs::read(path)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    let bytes = tauri::async_runtime::spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -258,11 +334,35 @@ async fn create_archive(
     let res = tauri::async_runtime::spawn_blocking(move || {
         let srcs: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
         let mut cb = |percent: u32, file: &str| {
-            let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
         };
         let out_file = PathBuf::from(out_file);
-        let _dest_lock = match out_file.parent() { Some(p) => Some(destlock::acquire(p, || cb(0, destlock::WAIT_MESSAGE), &|| j.is_cancelled(&jid))?), None => None };
-        archive::create(&exe, &srcs, &out_file, &format, opt_pw(&password), level, &j, &jid, &mut cb)
+        let _dest_lock = match out_file.parent() {
+            Some(p) => Some(destlock::acquire(
+                p,
+                || cb(0, destlock::WAIT_MESSAGE),
+                &|| j.is_cancelled(&jid),
+            )?),
+            None => None,
+        };
+        archive::create(
+            &exe,
+            &srcs,
+            &out_file,
+            &format,
+            opt_pw(&password),
+            level,
+            &j,
+            &jid,
+            &mut cb,
+        )
     })
     .await
     .map_err(|e| e.to_string());
@@ -271,14 +371,27 @@ async fn create_archive(
 }
 
 #[tauri::command]
-async fn god_extracted(app: AppHandle, jobs: State<'_, Jobs>, id: String, token: String, delete_iso: bool) -> Result<god::ExtractedGod, String> {
+async fn god_extracted(
+    app: AppHandle,
+    jobs: State<'_, Jobs>,
+    id: String,
+    token: String,
+    delete_iso: bool,
+) -> Result<god::ExtractedGod, String> {
     let registry = jobs.inner().clone();
     registry.register(&id);
     let j = registry.clone();
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let mut cb = |percent: u32, file: &str| {
-            let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
         };
         god::convert_registered(&token, delete_iso, &j, &jid, &mut cb)
     })
@@ -289,26 +402,68 @@ async fn god_extracted(app: AppHandle, jobs: State<'_, Jobs>, id: String, token:
 }
 
 #[tauri::command]
-async fn dlc_install(grants: State<'_, safecopy::Grants>, path: String, libraries: Vec<String>, move_file: bool) -> Result<dlc::DlcResult, String> {
+async fn dlc_install(
+    grants: State<'_, safecopy::Grants>,
+    path: String,
+    libraries: Vec<String>,
+    move_file: bool,
+    game_path: Option<String>,
+) -> Result<dlc::DlcResult, String> {
     let path = grants.check(&path)?;
+    let game = game_path
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| grants.check(&s))
+        .transpose()?;
     // only libraries the user picked/approved (or extraction outputs); others are ignored
-    let libs: Vec<PathBuf> = libraries.iter().filter(|s| !s.trim().is_empty()).filter_map(|l| grants.check(l).ok()).collect();
+    let libs: Vec<PathBuf> = libraries
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .filter_map(|l| grants.check(l).ok())
+        .collect();
     tauri::async_runtime::spawn_blocking(move || {
-        dlc::install_dlc(&path, &libs, move_file)
+        dlc::install_dlc(&path, &libs, move_file, game.as_deref())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn library_scan(libraries: Vec<String>) -> Result<Vec<library::Game>, String> {
-    tauri::async_runtime::spawn_blocking(move || library::scan(&libraries.iter().filter(|s| !s.trim().is_empty()).map(PathBuf::from).collect::<Vec<_>>()))
-        .await
-        .map_err(|e| e.to_string())
+fn dlc_match_games(libraries: Vec<String>, title_id: String) -> Vec<String> {
+    let libs: Vec<PathBuf> = libraries
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .collect();
+    dlc::find_games(&libs, &title_id)
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect()
 }
 
 #[tauri::command]
-async fn copy_to_usb(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safecopy::Grants>, id: String, game: String, target: String) -> Result<library::CopyResult, String> {
+async fn library_scan(libraries: Vec<String>) -> Result<Vec<library::Game>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        library::scan(
+            &libraries
+                .iter()
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn copy_to_usb(
+    app: AppHandle,
+    jobs: State<'_, Jobs>,
+    grants: State<'_, safecopy::Grants>,
+    id: String,
+    game: String,
+    target: String,
+) -> Result<library::CopyResult, String> {
     let (game, target) = (grants.check(&game)?, grants.check(&target)?);
     let registry = jobs.inner().clone();
     registry.register(&id);
@@ -316,9 +471,18 @@ async fn copy_to_usb(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, sa
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let mut cb = |percent: u32, file: &str| {
-            let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
         };
-        let _dest_lock = destlock::acquire(&target, || cb(0, destlock::WAIT_MESSAGE), &|| j.is_cancelled(&jid))?;
+        let _dest_lock = destlock::acquire(&target, || cb(0, destlock::WAIT_MESSAGE), &|| {
+            j.is_cancelled(&jid)
+        })?;
         library::copy_to_usb(&game, &target, &mut cb, &|| j.is_cancelled(&jid))
     })
     .await
@@ -330,24 +494,84 @@ async fn copy_to_usb(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, sa
 // ---- Send to Xbox (FTP) ----
 /// Xbox FTP servers usually allow a single connection: one FTP session at a time, app-wide.
 static FTP_BUSY: Mutex<()> = Mutex::new(());
+static FTP_HOLDER: Mutex<Option<(String, String)>> = Mutex::new(None);
 
-pub(crate) fn ftp_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+pub struct FtpLockGuard {
+    _inner: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for FtpLockGuard {
+    fn drop(&mut self) {
+        *FTP_HOLDER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+pub(crate) fn ftp_lock(subsystem: &str, detail: &str) -> Result<FtpLockGuard, String> {
     match FTP_BUSY.try_lock() {
-        Ok(g) => Ok(g),
-        Err(std::sync::TryLockError::Poisoned(p)) => Ok(p.into_inner()),
-        Err(_) => Err("Unpack is already talking to the console. Wait for that to finish (Xbox FTP allows one connection).".into()),
+        Ok(g) => {
+            *FTP_HOLDER.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((subsystem.to_string(), detail.to_string()));
+            Ok(FtpLockGuard { _inner: g })
+        }
+        Err(std::sync::TryLockError::Poisoned(p)) => {
+            *FTP_HOLDER.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((subsystem.to_string(), detail.to_string()));
+            Ok(FtpLockGuard {
+                _inner: p.into_inner(),
+            })
+        }
+        Err(_) => {
+            let msg = FTP_HOLDER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|(s, d)| format!("Unpack is already using the console FTP for {s} ({d}). Wait for it to finish."))
+                .unwrap_or_else(|| "Unpack is already talking to the console. Wait for that to finish (Xbox FTP allows one connection).".into());
+            Err(msg)
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct FtpLockStatus {
+    busy: bool,
+    subsystem: String,
+    detail: String,
+}
+
+#[tauri::command]
+fn ftp_lock_status() -> FtpLockStatus {
+    let busy = FTP_BUSY.try_lock().is_err();
+    let (subsystem, detail) = FTP_HOLDER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| (String::new(), String::new()));
+    FtpLockStatus {
+        busy,
+        subsystem,
+        detail,
     }
 }
 
 pub fn ftp_console(host: &str, port: u16, user: &str, pass: &str) -> Result<ftp::Console, String> {
-    let user: String = if user.is_empty() { "xboxftp".into() } else { user.chars().take(64).collect() };
+    let user: String = if user.is_empty() {
+        "xboxftp".into()
+    } else {
+        user.chars().take(64).collect()
+    };
     let pass: String = pass.chars().take(128).collect();
-    Ok(ftp::Console { addr: ftp::check_target(host, port)?, user, pass, resume_dir: ftp::resume_dir() })
+    Ok(ftp::Console {
+        addr: ftp::check_target(host, port)?,
+        user,
+        pass,
+        resume_dir: ftp::resume_dir(),
+    })
 }
 
 /// Connect, log in, list `path` (root lists drives). Used by Test connection and the browser.
 pub fn ftp_list_blocking(con: ftp::Console, path: String) -> Result<Vec<ftp::Entry>, String> {
-    let _g = ftp_lock()?;
+    let _g = ftp_lock("Send to Xbox", "browse")?;
     let segs = ftp::split_remote(&path)?;
     let mut f = ftp::Ftp::connect(con.addr, &con.user, &con.pass)?;
     let r = f.list(&segs);
@@ -356,9 +580,17 @@ pub fn ftp_list_blocking(con: ftp::Console, path: String) -> Result<Vec<ftp::Ent
 }
 
 #[tauri::command]
-async fn ftp_list(host: String, port: u16, user: String, pass: String, path: String) -> Result<Vec<ftp::Entry>, String> {
+async fn ftp_list(
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    path: String,
+) -> Result<Vec<ftp::Entry>, String> {
     let con = ftp_console(&host, port, &user, &pass)?;
-    tauri::async_runtime::spawn_blocking(move || ftp_list_blocking(con, path)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || ftp_list_blocking(con, path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[derive(serde::Deserialize)]
@@ -388,7 +620,13 @@ pub struct FtpDest {
 
 /// Auto-detected destination for a queue item, or (with `dest`) a check of an edited one.
 pub fn ftp_dest_for(a: &FtpSendArgs, src: &Path) -> Result<(Vec<String>, bool), String> {
-    let (def, contents_only) = ftp::destination(&a.kind, &a.drive, src, a.title_id.as_deref(), a.custom.as_deref())?;
+    let (def, contents_only) = ftp::destination(
+        &a.kind,
+        &a.drive,
+        src,
+        a.title_id.as_deref(),
+        a.custom.as_deref(),
+    )?;
     match a.dest.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(p) => Ok((ftp::custom_dest(p)?, contents_only)),
         None => Ok((def, contents_only)),
@@ -398,19 +636,41 @@ pub fn ftp_dest_for(a: &FtpSendArgs, src: &Path) -> Result<(Vec<String>, bool), 
 #[tauri::command]
 fn ftp_dest(args: FtpSendArgs) -> Result<FtpDest, String> {
     // Only path text is computed here; no file is read, so no grant is needed.
-    ftp_dest_for(&args, Path::new(&args.src)).map(|(d, c)| FtpDest { path: ftp::join_remote(&d), contents_only: c })
+    ftp_dest_for(&args, Path::new(&args.src)).map(|(d, c)| FtpDest {
+        path: ftp::join_remote(&d),
+        contents_only: c,
+    })
 }
 
 /// Shared by the app and the test bridge: `src` must already be grant-checked.
-pub fn ftp_send_blocking(a: &FtpSendArgs, src: &Path, progress: &mut dyn FnMut(u32, &str), cancelled: &dyn Fn() -> bool) -> Result<ftp::SendResult, String> {
+pub fn ftp_send_blocking(
+    a: &FtpSendArgs,
+    src: &Path,
+    progress: &mut dyn FnMut(u32, &str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<ftp::SendResult, String> {
     let con = ftp_console(&a.host, a.port, &a.user, &a.pass)?;
     let (dest, contents_only) = ftp_dest_for(a, src)?;
-    let _g = ftp_lock()?;
-    ftp::send(&con, src, &dest, contents_only, a.parallel, progress, cancelled)
+    let _g = ftp_lock("Send to Xbox", "upload")?;
+    ftp::send(
+        &con,
+        src,
+        &dest,
+        contents_only,
+        a.parallel,
+        progress,
+        cancelled,
+    )
 }
 
 #[tauri::command]
-async fn ftp_send(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safecopy::Grants>, id: String, args: FtpSendArgs) -> Result<ftp::SendResult, String> {
+async fn ftp_send(
+    app: AppHandle,
+    jobs: State<'_, Jobs>,
+    grants: State<'_, safecopy::Grants>,
+    id: String,
+    args: FtpSendArgs,
+) -> Result<ftp::SendResult, String> {
     let src = grants.check(&args.src)?;
     let registry = jobs.inner().clone();
     registry.register(&id);
@@ -418,7 +678,14 @@ async fn ftp_send(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safec
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let mut cb = |percent: u32, file: &str| {
-            let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
         };
         ftp_send_blocking(&args, &src, &mut cb, &|| j.is_cancelled(&jid))
     })
@@ -429,20 +696,63 @@ async fn ftp_send(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safec
 }
 
 #[tauri::command]
-async fn mod_identify(builtin: State<'_, mods::BuiltinSet>, paths: Vec<String>, hints: Option<Vec<String>>, learned: Option<Vec<modnames::Learned>>) -> Result<Vec<Result<mods::ModInfo, String>>, String> {
+async fn mod_identify(
+    builtin: State<'_, mods::BuiltinSet>,
+    paths: Vec<String>,
+    hints: Option<Vec<String>>,
+    learned: Option<Vec<modnames::Learned>>,
+) -> Result<Vec<Result<mods::ModInfo, String>>, String> {
     let hints = hints.unwrap_or_default();
-    let learned: Vec<modnames::Learned> = mods::merge_learned(mods::merge_learned(learned.unwrap_or_default().into_iter().take(1000).collect(), &builtin.learned), &catalog::learned());
-    tauri::async_runtime::spawn_blocking(move || paths.iter().enumerate().map(|(i, p)| mods::identify_learned(&PathBuf::from(p), hints.get(i).map(|s| s.as_str()).filter(|s| !s.is_empty()), &learned)).collect()).await.map_err(|e| e.to_string())
+    let learned: Vec<modnames::Learned> = mods::merge_learned(
+        mods::merge_learned(
+            learned.unwrap_or_default().into_iter().take(1000).collect(),
+            &builtin.learned,
+        ),
+        &catalog::learned(),
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                mods::identify_learned(
+                    &PathBuf::from(p),
+                    hints.get(i).map(|s| s.as_str()).filter(|s| !s.is_empty()),
+                    &learned,
+                )
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
-struct ModNameKey { key: String, tid: String, game: String }
+struct ModNameKey {
+    key: String,
+    tid: String,
+    game: String,
+}
 
 /// Mod catalog (see catalog.rs). One command; `cmd` picks the action. `id` = progress job id.
 #[tauri::command]
-async fn catalog(app: AppHandle, jobs: State<'_, Jobs>, cmd: String, args: Option<serde_json::Value>, id: Option<String>) -> Result<serde_json::Value, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("catalog");
-    let ctx = catalog::install::Ctx { store: catalog::Store::new(dir), exe: archive::find_7za(), tuning: Default::default() };
+async fn catalog(
+    app: AppHandle,
+    jobs: State<'_, Jobs>,
+    cmd: String,
+    args: Option<serde_json::Value>,
+    id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("catalog");
+    let ctx = catalog::install::Ctx {
+        store: catalog::Store::new(dir),
+        exe: archive::find_7za(),
+        tuning: Default::default(),
+    };
     let jid = id.unwrap_or_else(|| format!("catalog-{cmd}"));
     let registry = jobs.inner().clone();
     registry.register(&jid);
@@ -451,9 +761,27 @@ async fn catalog(app: AppHandle, jobs: State<'_, Jobs>, cmd: String, args: Optio
     let app2 = app.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let grants = app2.state::<safecopy::Grants>();
-        let mut cb = |percent: u32, file: &str| { let _ = app.emit("job-progress", Progress { id: jid2.clone(), percent, file: file.to_string() }); };
-        catalog::call(&ctx, &cmd, args.unwrap_or(serde_json::json!({})), &|p| grants.check(p), &mut cb, &|| j.is_cancelled(&jid2))
-    }).await.map_err(|e| e.to_string());
+        let mut cb = |percent: u32, file: &str| {
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid2.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
+        };
+        catalog::call(
+            &ctx,
+            &cmd,
+            args.unwrap_or(serde_json::json!({})),
+            &|p| grants.check(p),
+            &mut cb,
+            &|| j.is_cancelled(&jid2),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string());
     registry.finish(&jid);
     res?
 }
@@ -475,7 +803,15 @@ fn game_search(q: String) -> Vec<gamedb::Entry> {
 }
 
 #[tauri::command]
-async fn mod_copy(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safecopy::Grants>, id: String, path: String, target: String, mode: String) -> Result<mods::ModCopyResult, String> {
+async fn mod_copy(
+    app: AppHandle,
+    jobs: State<'_, Jobs>,
+    grants: State<'_, safecopy::Grants>,
+    id: String,
+    path: String,
+    target: String,
+    mode: String,
+) -> Result<mods::ModCopyResult, String> {
     let (path, target) = (grants.check(&path)?, grants.check(&target)?);
     let registry = jobs.inner().clone();
     registry.register(&id);
@@ -483,9 +819,18 @@ async fn mod_copy(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safec
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let mut cb = |percent: u32, file: &str| {
-            let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
         };
-        let _dest_lock = destlock::acquire(&target, || cb(0, destlock::WAIT_MESSAGE), &|| j.is_cancelled(&jid))?;
+        let _dest_lock = destlock::acquire(&target, || cb(0, destlock::WAIT_MESSAGE), &|| {
+            j.is_cancelled(&jid)
+        })?;
         mods::copy_mod(&path, &target, &mode, &mut cb, &|| j.is_cancelled(&jid))
     })
     .await
@@ -496,27 +841,40 @@ async fn mod_copy(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safec
 
 #[tauri::command]
 async fn dlc_scan_drives(grants: State<'_, safecopy::Grants>) -> Result<Vec<String>, String> {
-    let roots = tauri::async_runtime::spawn_blocking(dlc::scan_content_roots).await.map_err(|e| e.to_string())?;
+    let roots = tauri::async_runtime::spawn_blocking(dlc::scan_content_roots)
+        .await
+        .map_err(|e| e.to_string())?;
     roots.iter().for_each(|r| grants.grant(Path::new(r)));
     Ok(roots)
 }
 
 /// Native pickers run from Rust so the picked paths can be granted (Overseer R5 L2).
 #[tauri::command]
-async fn pick_path(app: AppHandle, grants: State<'_, safecopy::Grants>, kind: String, title: String) -> Result<Vec<String>, String> {
+async fn pick_path(
+    app: AppHandle,
+    grants: State<'_, safecopy::Grants>,
+    kind: String,
+    title: String,
+) -> Result<Vec<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let a = app.clone();
     let picked: Vec<PathBuf> = tauri::async_runtime::spawn_blocking(move || {
         let d = a.dialog().file().set_title(&title);
-        let v = if kind == "folder" { d.blocking_pick_folder().map(|p| vec![p]) } else { d.blocking_pick_files() };
-        v.unwrap_or_default().into_iter().filter_map(|p| p.into_path().ok()).collect()
+        let v = if kind == "folder" {
+            d.blocking_pick_folder().map(|p| vec![p])
+        } else {
+            d.blocking_pick_files()
+        };
+        v.unwrap_or_default()
+            .into_iter()
+            .filter_map(|p| p.into_path().ok())
+            .collect()
     })
     .await
     .map_err(|e| e.to_string())?;
     picked.iter().for_each(|p| grants.grant(p));
     Ok(picked.iter().map(|p| p.display().to_string()).collect())
 }
-
 
 #[tauri::command]
 async fn download_url(
@@ -532,7 +890,11 @@ async fn download_url(
     let dir = match dest_dir {
         Some(d) if !d.trim().is_empty() => grants.check(&d)?,
         _ => {
-            let base = app.path().app_data_dir().map_err(|e| e.to_string())?.join("Downloads");
+            let base = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| e.to_string())?
+                .join("Downloads");
             std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
             grants.grant(&base);
             base
@@ -540,7 +902,9 @@ async fn download_url(
     };
     let expected_sha256 = download::parse_expected_sha256(expected_sha256.as_deref())?;
     let opts = download::DownloadOpts {
-        max_bytes: max_bytes.filter(|n| *n > 0).unwrap_or(download::DEFAULT_MAX_BYTES),
+        max_bytes: max_bytes
+            .filter(|n| *n > 0)
+            .unwrap_or(download::DEFAULT_MAX_BYTES),
         expected_sha256,
     };
     let registry = jobs.inner().clone();
@@ -549,7 +913,14 @@ async fn download_url(
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let mut cb = |percent: u32, file: &str| {
-            let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
         };
         download::download_with(&url, &dir, &opts, &mut cb, &|| j.is_cancelled(&jid))
     })
@@ -563,14 +934,21 @@ async fn download_url(
 
 #[tauri::command]
 fn download_folder(app: AppHandle, grants: State<'_, safecopy::Grants>) -> Result<String, String> {
-    let base = app.path().app_data_dir().map_err(|e| e.to_string())?.join("Downloads");
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("Downloads");
     std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     grants.grant(&base);
     Ok(base.display().to_string())
 }
 
 #[tauri::command]
-fn list_archives_in_folder(grants: State<'_, safecopy::Grants>, path: String) -> Result<Vec<String>, String> {
+fn list_archives_in_folder(
+    grants: State<'_, safecopy::Grants>,
+    path: String,
+) -> Result<Vec<String>, String> {
     let root = grants.check(&path)?;
     download::list_archives(&root)
 }
@@ -578,61 +956,99 @@ fn list_archives_in_folder(grants: State<'_, safecopy::Grants>, path: String) ->
 #[tauri::command]
 fn notify_done(app: AppHandle, title: String, body: String) -> Result<(), String> {
     use tauri_plugin_notification::NotificationExt;
-    app.notification().builder().title(title).body(body).show().map_err(|e| e.to_string())
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn set_taskbar_progress(app: AppHandle, pct: Option<u64>) -> Result<(), String> {
-    let Some(w) = app.get_webview_window("main") else { return Ok(()) };
+    let Some(w) = app.get_webview_window("main") else {
+        return Ok(());
+    };
     #[cfg(windows)]
     {
         use tauri::window::{ProgressBarState, ProgressBarStatus};
         if let Some(p) = pct {
-            let _ = w.set_progress_bar(ProgressBarState { status: Some(ProgressBarStatus::Normal), progress: Some(p.min(100)) });
+            let _ = w.set_progress_bar(ProgressBarState {
+                status: Some(ProgressBarStatus::Normal),
+                progress: Some(p.min(100)),
+            });
         } else {
-            let _ = w.set_progress_bar(ProgressBarState { status: Some(ProgressBarStatus::None), progress: None });
+            let _ = w.set_progress_bar(ProgressBarState {
+                status: Some(ProgressBarStatus::None),
+                progress: None,
+            });
         }
     }
     #[cfg(not(windows))]
-    { let _ = (w, pct); }
+    {
+        let _ = (w, pct);
+    }
     Ok(())
 }
 
-
 #[tauri::command]
-async fn pick_save(app: AppHandle, grants: State<'_, safecopy::Grants>, title: String, default_path: Option<String>) -> Result<Option<String>, String> {
+async fn pick_save(
+    app: AppHandle,
+    grants: State<'_, safecopy::Grants>,
+    title: String,
+    default_path: Option<String>,
+) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let a = app.clone();
     let picked = tauri::async_runtime::spawn_blocking(move || {
         let mut d = a.dialog().file().set_title(&title);
-        if let Some(p) = default_path { d = d.set_file_name(p); }
+        if let Some(p) = default_path {
+            d = d.set_file_name(p);
+        }
         d.blocking_save_file().and_then(|p| p.into_path().ok())
     })
     .await
     .map_err(|e| e.to_string())?;
     if let Some(ref p) = picked {
-        if let Some(parent) = p.parent() { grants.grant(parent); }
+        if let Some(parent) = p.parent() {
+            grants.grant(parent);
+        }
     }
     Ok(picked.map(|p| p.display().to_string()))
 }
 
 #[tauri::command]
 async fn iso_info(path: String) -> Result<god::IsoInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || god::iso_info(&PathBuf::from(path))).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || god::iso_info(&PathBuf::from(path)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Other discs of the same game found next to `path` (same folder, Disc/CD/DVD n naming), so the
 /// page can offer to convert them together. Read-only; only inside a granted folder.
 #[tauri::command]
-async fn iso_companions(grants: State<'_, safecopy::Grants>, path: String) -> Result<Vec<String>, String> {
+async fn iso_companions(
+    grants: State<'_, safecopy::Grants>,
+    path: String,
+) -> Result<Vec<String>, String> {
     let p = grants.check(&path)?;
-    tauri::async_runtime::spawn_blocking(move || discs::companions(&p).map(|v| v.into_iter().map(|x| x.display().to_string()).collect()))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        discs::companions(&p).map(|v| v.into_iter().map(|x| x.display().to_string()).collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn iso_to_god(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safecopy::Grants>, id: String, path: String, dest: String, title: Option<String>) -> Result<god::GodResult, String> {
+async fn iso_to_god(
+    app: AppHandle,
+    jobs: State<'_, Jobs>,
+    grants: State<'_, safecopy::Grants>,
+    id: String,
+    path: String,
+    dest: String,
+    title: Option<String>,
+) -> Result<god::GodResult, String> {
     let dest = grants.check(&dest)?;
     let registry = jobs.inner().clone();
     registry.register(&id);
@@ -640,9 +1056,23 @@ async fn iso_to_god(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, saf
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let mut cb = |percent: u32, file: &str| {
-            let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
         };
-        god::convert(&PathBuf::from(path), &dest, title.as_deref(), &j, &jid, &mut cb)
+        god::convert(
+            &PathBuf::from(path),
+            &dest,
+            title.as_deref(),
+            &j,
+            &jid,
+            &mut cb,
+        )
     })
     .await
     .map_err(|e| e.to_string());
@@ -650,9 +1080,16 @@ async fn iso_to_god(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, saf
     res?
 }
 
-
 #[tauri::command]
-async fn iso_to_xex(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, safecopy::Grants>, id: String, path: String, dest: String, title: Option<String>) -> Result<iso_extract::ExtractResult, String> {
+async fn iso_to_xex(
+    app: AppHandle,
+    jobs: State<'_, Jobs>,
+    grants: State<'_, safecopy::Grants>,
+    id: String,
+    path: String,
+    dest: String,
+    title: Option<String>,
+) -> Result<iso_extract::ExtractResult, String> {
     let dest = grants.check(&dest)?;
     let registry = jobs.inner().clone();
     registry.register(&id);
@@ -660,10 +1097,24 @@ async fn iso_to_xex(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, saf
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let mut cb = |percent: u32, file: &str| {
-            let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
         };
         // Manual: dest is parent; claim named folder inside.
-        iso_extract::extract_named(&PathBuf::from(path), &dest, title.as_deref(), &j, &jid, &mut cb)
+        iso_extract::extract_named(
+            &PathBuf::from(path),
+            &dest,
+            title.as_deref(),
+            &j,
+            &jid,
+            &mut cb,
+        )
     })
     .await
     .map_err(|e| e.to_string());
@@ -672,14 +1123,27 @@ async fn iso_to_xex(app: AppHandle, jobs: State<'_, Jobs>, grants: State<'_, saf
 }
 
 #[tauri::command]
-async fn xex_extracted(app: AppHandle, jobs: State<'_, Jobs>, id: String, token: String, delete_iso: bool) -> Result<iso_extract::ExtractedXex, String> {
+async fn xex_extracted(
+    app: AppHandle,
+    jobs: State<'_, Jobs>,
+    id: String,
+    token: String,
+    delete_iso: bool,
+) -> Result<iso_extract::ExtractedXex, String> {
     let registry = jobs.inner().clone();
     registry.register(&id);
     let j = registry.clone();
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let mut cb = |percent: u32, file: &str| {
-            let _ = app.emit("job-progress", Progress { id: jid.clone(), percent, file: file.to_string() });
+            let _ = app.emit(
+                "job-progress",
+                Progress {
+                    id: jid.clone(),
+                    percent,
+                    file: file.to_string(),
+                },
+            );
         };
         iso_extract::extract_registered(&token, delete_iso, &j, &jid, &mut cb)
     })
@@ -700,9 +1164,216 @@ fn cancel_job(jobs: State<'_, Jobs>, id: String) -> bool {
     jobs.cancel(&id)
 }
 
+#[tauri::command]
+fn error_help(message: String) -> hints::ErrorHelp {
+    hints::help_for(&message)
+}
+
+#[tauri::command]
+fn preflight_local(
+    dest: String,
+    paths: Vec<String>,
+    list_cap: Option<u64>,
+) -> Result<preflight::PreflightReport, String> {
+    let dest = PathBuf::from(dest);
+    let cap = list_cap.unwrap_or(64 << 20);
+    let pbs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    let need = preflight::estimate_local_need(&pbs).min(cap);
+    let large = preflight::large_files_in(&pbs);
+    Ok(preflight::check_local_dest(&dest, need, &large))
+}
+
+#[tauri::command]
+fn lan_discover(host: Option<String>, port: Option<u16>) -> Vec<lan::DiscoveredConsole> {
+    let port = port.unwrap_or(21);
+    let base = host
+        .and_then(|h| h.parse().ok())
+        .or_else(|| {
+            lan::local_ipv4()
+                .map(|ip| Ipv4Addr::new(ip.octets()[0], ip.octets()[1], ip.octets()[2], 0))
+        })
+        .unwrap_or(Ipv4Addr::new(192, 168, 1, 0));
+    let skip = lan::local_ipv4();
+    lan::discover(base, skip, port)
+}
+
+#[tauri::command]
+fn usb_prepare(root: String) -> Result<usbprep::UsbPrepReport, String> {
+    usbprep::prepare_usb(Path::new(&root))
+}
+
+#[tauri::command]
+async fn god_verify_only(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || god::verify_readonly_folder(&PathBuf::from(path)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_index(
+    app: AppHandle,
+    libraries: Vec<String>,
+    allow_cover_network: bool,
+    max_age_secs: Option<u64>,
+) -> Result<library::LibraryIndex, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("library-cache");
+    let libs: Vec<PathBuf> = libraries
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::index_cached(
+            &libs,
+            &dir,
+            allow_cover_network,
+            max_age_secs.unwrap_or(3600),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn ftp_mkdir(
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    path: String,
+) -> Result<(), String> {
+    let con = ftp_console(&host, port, &user, &pass)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = ftp_lock("Send to Xbox", "new folder")?;
+        let segs = ftp::split_remote(&path)?;
+        if segs.len() < 2 {
+            return Err("Pick a folder inside a drive, not the drive root.".into());
+        }
+        if segs
+            .last()
+            .map(|s| s.eq_ignore_ascii_case("launch.ini"))
+            .unwrap_or(false)
+        {
+            return Err("launch.ini can't be created here.".into());
+        }
+        let mut f = ftp::Ftp::connect(con.addr, &con.user, &con.pass)?;
+        f.mkdirs(&segs, &mut std::collections::HashSet::new())?;
+        f.quit();
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn ftp_rename(
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    let con = ftp_console(&host, port, &user, &pass)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = ftp_lock("Send to Xbox", "rename")?;
+        let (a, b) = (ftp::split_remote(&from)?, ftp::split_remote(&to)?);
+        if a.len() < 2 || b.len() < 2 {
+            return Err("Can't rename a drive root.".into());
+        }
+        for s in [&a, &b] {
+            if s.iter().any(|x| x.eq_ignore_ascii_case("launch.ini")) {
+                return Err("launch.ini can't be renamed from here.".into());
+            }
+        }
+        let mut f = ftp::Ftp::connect(con.addr, &con.user, &con.pass)?;
+        f.rename(&a, &b)?;
+        f.quit();
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn ftp_delete(
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    path: String,
+) -> Result<(), String> {
+    let con = ftp_console(&host, port, &user, &pass)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = ftp_lock("Send to Xbox", "delete")?;
+        let segs = ftp::split_remote(&path)?;
+        if segs.len() < 2 {
+            return Err("Can't delete a drive root.".into());
+        }
+        if segs.iter().any(|x| x.eq_ignore_ascii_case("launch.ini")) {
+            return Err("launch.ini can't be deleted from Unpack.".into());
+        }
+        let mut f = ftp::Ftp::connect(con.addr, &con.user, &con.pass)?;
+        if !f.dele(&segs)? {
+            return Err("The console refused to delete that file (or it wasn't there).".into());
+        }
+        f.quit();
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Deserialize)]
+struct SavesBackupArgs {
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    drive: String,
+    profile: String,
+    title_id: String,
+    dest: String,
+}
+
+#[tauri::command]
+async fn saves_backup(grants: State<'_, safecopy::Grants>, args: SavesBackupArgs) -> Result<saves::SaveBackupResult, String> {
+    let dest = grants.check(&args.dest)?;
+    let con = ftp_console(&args.host, args.port, &args.user, &args.pass)?;
+    let remote = saves::profile_save_remote(&args.drive, &args.profile, &args.title_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = ftp_lock("Send to Xbox", "save backup")?;
+        saves::backup_folder(&con, &remote, &dest, &mut |_, f| {
+            let _ = f;
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn check_release(current: String, opt_in: bool) -> Result<download::ReleaseInfo, String> {
+    if !opt_in {
+        return Ok(download::ReleaseInfo {
+            available: false,
+            latest: current,
+            url: String::new(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || download::check_github_release(&current))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 pub fn run() {
     // Before Tauri or the WebView touch their folders: carry data over from the old identifier.
-    for d in migrate::run_startup() { eprintln!("migrated app data into {}", d.display()); }
+    for d in migrate::run_startup() {
+        eprintln!("migrated app data into {}", d.display());
+    }
     let cwd = std::env::current_dir().unwrap_or_default();
     let first: Vec<String> = std::env::args().skip(1).collect();
     let pending = PendingLaunch::default();
@@ -717,9 +1388,16 @@ pub fn run() {
                 let _ = w.unminimize();
                 let _ = w.set_focus();
             }
-            if let Some(req) = parse_args(&argv.into_iter().skip(1).collect::<Vec<_>>(), std::path::Path::new(&cwd)) {
+            if let Some(req) = parse_args(
+                &argv.into_iter().skip(1).collect::<Vec<_>>(),
+                std::path::Path::new(&cwd),
+            ) {
                 // Queue it too, in case the page hasn't attached its listener yet.
-                app.state::<PendingLaunch>().0.lock().unwrap().push(req.clone());
+                app.state::<PendingLaunch>()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .push(req.clone());
                 let _ = app.emit("launch-request", ());
             }
         }))
@@ -729,14 +1407,26 @@ pub fn run() {
         .manage(pending)
         .manage(Jobs::default())
         .setup(|app| {
-            let dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("Unpack"));
+            let dir = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir().join("Unpack"));
             let grants = safecopy::Grants::with_file(dir.join("grants.json"));
             ftp::set_resume_dir(dir.join("ftp-resume"));
             // Built-in menus (ships empty): validated once; their files are granted for this
             // session so Copy to USB / Send to Xbox work on them. Read-only in the UI.
-            let menus = app.path().resource_dir().map(|d| d.join("menus")).map(|d| mods::load_builtin(&d)).unwrap_or_default();
-            for p in &menus.problems { eprintln!("built-in menus: skipped {p}"); }
-            for m in &menus.menus { grants.grant_session(Path::new(&m.path)); }
+            let menus = app
+                .path()
+                .resource_dir()
+                .map(|d| d.join("menus"))
+                .map(|d| mods::load_builtin(&d))
+                .unwrap_or_default();
+            for p in &menus.problems {
+                eprintln!("built-in menus: skipped {p}");
+            }
+            for m in &menus.menus {
+                grants.grant_session(Path::new(&m.path));
+            }
             app.manage(grants);
             app.manage(menus);
             app.manage(discord::PresenceHandle::start());
@@ -749,7 +1439,9 @@ pub fn run() {
                 for p in paths {
                     let meta = std::fs::symlink_metadata(p);
                     if let Ok(m) = meta {
-                        if safecopy::is_link(&m) { continue; }
+                        if safecopy::is_link(&m) {
+                            continue;
+                        }
                         if m.is_dir() {
                             grants.grant_session(p);
                         } else if m.is_file() {
@@ -761,7 +1453,60 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![native_info, file_info, list_archive, read_entry, extract_archive, extract_entry, read_file, cancel_job, take_launch_requests, create_archive, iso_info, iso_companions, iso_to_god, iso_to_xex, god_extracted, xex_extracted, dlc_install, dlc_scan_drives, library_scan, copy_to_usb, mod_identify, mod_name_key, mod_copy, game_search, pick_path, pick_save, download_url, download_folder, list_archives_in_folder, notify_done, set_taskbar_progress, ftp_list, ftp_send, ftp_dest, builtin_menus, catalog, discord_set_activity, discord_set_enabled, migration_notices])
+        .invoke_handler(tauri::generate_handler![
+            native_info,
+            file_info,
+            list_archive,
+            read_entry,
+            extract_archive,
+            extract_entry,
+            read_file,
+            cancel_job,
+            take_launch_requests,
+            create_archive,
+            iso_info,
+            iso_companions,
+            iso_to_god,
+            iso_to_xex,
+            god_extracted,
+            xex_extracted,
+            god_verify_only,
+            dlc_install,
+            dlc_match_games,
+            dlc_scan_drives,
+            library_scan,
+            library_index,
+            copy_to_usb,
+            mod_identify,
+            mod_name_key,
+            mod_copy,
+            game_search,
+            pick_path,
+            pick_save,
+            download_url,
+            download_folder,
+            list_archives_in_folder,
+            notify_done,
+            set_taskbar_progress,
+            ftp_list,
+            ftp_send,
+            ftp_dest,
+            ftp_mkdir,
+            ftp_rename,
+            ftp_delete,
+            ftp_lock_status,
+            saves_backup,
+            builtin_menus,
+            catalog,
+            discord_set_activity,
+            discord_set_enabled,
+            migration_notices,
+            error_help,
+            preflight_local,
+            lan_discover,
+            usb_prepare,
+            check_release
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Unpack");
 }
@@ -807,7 +1552,15 @@ mod launch_tests {
         // L6: after "--" a name starting with "-" is a file, not a flag
         let dash = d.join("-dash-launch-test.zip");
         std::fs::write(&dash, b"x").unwrap();
-        let r = parse_args(&["--extract-here".into(), "--".into(), "-dash-launch-test.zip".into()], &d).unwrap();
+        let r = parse_args(
+            &[
+                "--extract-here".into(),
+                "--".into(),
+                "-dash-launch-test.zip".into(),
+            ],
+            &d,
+        )
+        .unwrap();
         assert_eq!((r.action.as_str(), r.paths.len()), ("extract-here", 1));
         assert!(parse_args(&["-dash-launch-test.zip".into()], &d).is_none());
         let _ = std::fs::remove_file(dash);
