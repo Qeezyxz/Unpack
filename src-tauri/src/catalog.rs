@@ -147,7 +147,7 @@ fn hex_lower(b: &[u8]) -> String {
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !s.len().is_multiple_of(2) || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
     (0..s.len())
@@ -229,7 +229,7 @@ fn valid_id(s: &str) -> bool {
 pub fn url_ok(u: &str) -> Result<(), String> {
     let p = url::Url::parse(u).map_err(|_| format!("\"{}\" isn't a valid URL", clean(u, 80)))?;
     if p.scheme() == "https" || (p.scheme() == "http" && crate::download::allow_test_loopback()) {
-        if p.host_str().map_or(true, |h| h.is_empty())
+        if p.host_str().is_none_or(|h| h.is_empty())
             || !p.username().is_empty()
             || p.password().is_some()
         {
@@ -297,7 +297,7 @@ pub fn dest_segments(
             .eq(default.iter().map(|s| s.to_ascii_uppercase()))
     } else {
         segs.first()
-            .map_or(false, |f| allowed.iter().any(|a| a.eq_ignore_ascii_case(f)))
+            .is_some_and(|f| allowed.iter().any(|a| a.eq_ignore_ascii_case(f)))
             && (segs.len() >= 2 || handler == "plugin")
     };
     if !ok || segs.len() > 12 {
@@ -460,7 +460,7 @@ pub fn file_name_of(u: &str) -> Result<String, String> {
     let p = url::Url::parse(u).map_err(|e| e.to_string())?;
     let last = p
         .path_segments()
-        .and_then(|s| s.last())
+        .and_then(|mut s| s.next_back())
         .unwrap_or("")
         .to_string();
     let name = crate::download::sanitize_name(&percent(&last));
@@ -685,7 +685,7 @@ impl Store {
             Ok(v) => Ok(v),
             Err(_) => {
                 let sha = target::sha256_bytes(&b);
-                let exists = std::fs::read_dir(&self.dir).ok().map_or(false, |rd| {
+                let exists = std::fs::read_dir(&self.dir).ok().is_some_and(|rd| {
                     rd.flatten().any(|d| {
                         let n = d.file_name().to_string_lossy().to_string();
                         n.starts_with(&format!("{name}.bad-"))
@@ -953,6 +953,7 @@ fn entry_of<'a>(l: &'a Loaded, id: &str) -> Result<&'a Entry, String> {
 }
 
 static CATALOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[allow(dead_code)] // held in catalog tests to exercise catalog_lock_wait while blocked
 pub(crate) fn catalog_lock() -> std::sync::MutexGuard<'static, ()> {
     CATALOG_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }

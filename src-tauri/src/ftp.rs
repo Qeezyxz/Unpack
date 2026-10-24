@@ -981,10 +981,7 @@ fn send_one(
     ) {
         Ok(u) => u,
         Err(e) => {
-            match rd {
-                Some(d) => save_record(ftp, d, addr, &part_segs, &j.pf.local),
-                None => {}
-            }
+            if let Some(d) = rd { save_record(ftp, d, addr, &part_segs, &j.pf.local) }
             return Err(e);
         }
     };

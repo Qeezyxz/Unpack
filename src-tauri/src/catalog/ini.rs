@@ -155,7 +155,7 @@ impl Ini {
                 self.kind.insert(at + 1, classify(&self.raw[at + 1]));
             }
             _ => {
-                if self.raw.last().map_or(false, |l| !l.trim().is_empty()) {
+                if self.raw.last().is_some_and(|l| !l.trim().is_empty()) {
                     self.raw.push(String::new());
                     self.kind.push(Line::Other);
                 }
@@ -198,7 +198,7 @@ pub fn choose_slot(
     let slots = ini.plugin_slots();
     if let Some(n) = slots.iter().position(|v| {
         v.as_deref()
-            .map_or(false, |v| v.eq_ignore_ascii_case(value))
+            .is_some_and(|v| v.eq_ignore_ascii_case(value))
     }) {
         return Ok((n as u8 + 1, slots[n].clone())); // already there: no change
     }

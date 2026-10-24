@@ -289,7 +289,7 @@ pub fn preflight(store: &Store, l: &Loaded, e: &Entry, t: &Target) -> Preflight 
             .entries
             .iter()
             .find(|x| x.id == i.entry_id)
-            .map_or(false, |x| x.conflicts.contains(&e.id));
+            .is_some_and(|x| x.conflicts.contains(&e.id));
         if e.conflicts.contains(&i.entry_id) || theirs {
             p.blockers.push(format!(
                 "Conflicts with {} (installed). Uninstall it first.",
@@ -592,7 +592,7 @@ pub struct Staged {
 
 fn is_xex(p: &Path) -> bool {
     let mut b = [0u8; 4];
-    crate::ftp::open_no_follow(p).ok().map_or(false, |mut f| {
+    crate::ftp::open_no_follow(p).ok().is_some_and(|mut f| {
         std::io::Read::read_exact(&mut f, &mut b).is_ok() && &b == b"XEX2"
     })
 }
@@ -619,10 +619,7 @@ fn two_sizes(a: u64, b: u64) -> (String, String) {
 }
 
 pub fn unpack_cap(declared: u64) -> u64 {
-    declared
-        .saturating_mul(4)
-        .max(256 << 20)
-        .min(UNPACK_ABS_MAX)
+    declared.saturating_mul(4).clamp(256 << 20, UNPACK_ABS_MAX)
 }
 
 pub fn stage(
@@ -859,6 +856,7 @@ fn old_problem(b: &[u8], backups: &[(String, Vec<u8>)]) -> Option<&'static str> 
 /// - stray `.new.part` / `.unpack-new` removed;
 /// - with launch.ini present and parseable, `.old*` copies byte-identical to one of Unpack's backups
 ///   for this target (or to the current launch.ini) are deleted; anything else is left alone.
+///
 /// Holds the launch.ini lock so it can't interleave with a local `replace`.
 pub fn repair_ini(store: &Store, t: &Target) -> Result<Vec<String>, String> {
     let _g = super::target::ini_lock();
@@ -881,9 +879,9 @@ pub fn repair_ini(store: &Store, t: &Target) -> Result<Vec<String>, String> {
         lower(&format!("{LAUNCH_INI}.unpack-new")),
     ];
     for n in names.iter().filter(|n| strays.contains(&lower(n))) {
-        if let Some(b) = t.read(&[n.clone()], 1 << 20, true).ok().flatten() {
+        if let Some(b) = t.read(std::slice::from_ref(n), 1 << 20, true).ok().flatten() {
             let _ = t.delete_if(
-                &[n.clone()],
+                std::slice::from_ref(n),
                 b.len() as u64,
                 &super::target::sha256_bytes(&b),
             );
@@ -959,7 +957,7 @@ pub fn repair_ini(store: &Store, t: &Target) -> Result<Vec<String>, String> {
                     .join("; ");
                 return Err(format!("launch.ini is missing on this drive. Unpack found {why}, so it won't put that back automatically. Check the file, rename the right one to launch.ini yourself, then try again."));
             };
-            t.rename_new(&[o.clone()], &[LAUNCH_INI.into()]).map_err(|e| format!("launch.ini is missing on this drive and Unpack couldn't put back your previous one from {o} ({}). Rename {o} to launch.ini yourself, then try again.", e.trim_end_matches('.')))?;
+            t.rename_new(std::slice::from_ref(&o), &[LAUNCH_INI.into()]).map_err(|e| format!("launch.ini is missing on this drive and Unpack couldn't put back your previous one from {o} ({}). Rename {o} to launch.ini yourself, then try again.", e.trim_end_matches('.')))?;
             notes.push(format!(
                 "launch.ini was missing; Unpack put back your previous one from {o}."
             ));
@@ -974,7 +972,7 @@ pub fn repair_ini(store: &Store, t: &Target) -> Result<Vec<String>, String> {
                 if let Ok(ob) = read_old(o) {
                     if backups.iter().any(|(_, bb)| *bb == ob) || ob == b {
                         let _ = t.delete_if(
-                            &[o.clone()],
+                            std::slice::from_ref(o),
                             ob.len() as u64,
                             &super::target::sha256_bytes(&ob),
                         );
@@ -1015,15 +1013,15 @@ fn write_ini(
     )?;
     // `replace` never leaves the target without launch.ini and restores the original itself on error.
     let name = ini_name(t)?;
-    t.replace(&[name.clone()], &out).map_err(|e| {
+    t.replace(std::slice::from_ref(&name), &out).map_err(|e| {
         format!(
             "Writing launch.ini failed: {} (backup: {backup}).",
             e.trim_end_matches('.')
         )
     })?;
-    let back = t.read(&[name.clone()], ini::INI_MAX, true)?;
+    let back = t.read(std::slice::from_ref(&name), ini::INI_MAX, true)?;
     if back.as_deref() != Some(&out[..]) {
-        let _ = t.replace(&[name.clone()], before_bytes);
+        let _ = t.replace(std::slice::from_ref(&name), before_bytes);
         return Err(format!(
             "launch.ini didn't read back as written; the original was put back (backup: {backup})."
         ));
@@ -1103,7 +1101,7 @@ pub fn install(
             .iter()
             .position(|v| {
                 v.as_ref()
-                    .map_or(false, |v| old.iter().any(|o| o.eq_ignore_ascii_case(v)))
+                    .is_some_and(|v| old.iter().any(|o| o.eq_ignore_ascii_case(v)))
             })
             .map(|n| n as u8 + 1);
         if own.is_none() {
@@ -1264,7 +1262,7 @@ pub fn install(
                 if before
                     .get(ini::PLUGIN_SECTION, &key)
                     .as_deref()
-                    .map_or(false, |v| v.eq_ignore_ascii_case(&value))
+                    .is_some_and(|v| v.eq_ignore_ascii_case(&value))
                 {
                     report.ini = Some(format!("{key} already points at the plugin"));
                 } else {
@@ -1338,7 +1336,7 @@ pub fn uninstall(
                         && l.entries
                             .iter()
                             .find(|e| e.id == i.entry_id)
-                            .map_or(false, |e| e.requires.iter().any(|r| r == id))
+                            .is_some_and(|e| e.requires.iter().any(|r| r == id))
                 })
                 .map(|i| i.name.clone())
                 .collect();
@@ -1405,7 +1403,7 @@ pub fn uninstall(
                 if after
                     .get(ini::PLUGIN_SECTION, &c.key)
                     .as_deref()
-                    .map_or(false, |v| v.eq_ignore_ascii_case(&c.value))
+                    .is_some_and(|v| v.eq_ignore_ascii_case(&c.value))
                 {
                     match &c.previous {
                         Some(p) => after.set(ini::PLUGIN_SECTION, &c.key, p),

@@ -333,7 +333,7 @@ pub fn lookup<'a>(learned: &'a [Learned], texts: &[&str]) -> Option<&'a Learned>
         let hit = hays.iter().any(|h| {
             k.len() <= h.len() && (0..=h.len() - k.len()).any(|i| h[i..i + k.len()] == *k)
         });
-        if hit && best.map_or(true, |b| k.len() > b.key.split(' ').count()) {
+        if hit && best.is_none_or(|b| k.len() > b.key.split(' ').count()) {
             best = Some(l);
         }
     }

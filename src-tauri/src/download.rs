@@ -127,7 +127,7 @@ pub(crate) fn tests_env_lock() -> std::sync::MutexGuard<'static, ()> {
 pub(crate) fn allow_test_loopback() -> bool {
     #[cfg(any(test, feature = "download-test-loopback"))]
     {
-        return std::env::var("UNPACK_TEST_ALLOW_LOOPBACK").ok().as_deref() == Some("1");
+        std::env::var("UNPACK_TEST_ALLOW_LOOPBACK").ok().as_deref() == Some("1")
     }
     #[cfg(not(any(test, feature = "download-test-loopback")))]
     {
@@ -202,8 +202,7 @@ fn agent_pinned(host_key: String, addrs: Vec<SocketAddr>) -> ureq::Agent {
             if host == host_key {
                 Ok(addrs.clone())
             } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                Err(std::io::Error::other(
                     "pinned resolver host mismatch",
                 ))
             }
@@ -402,7 +401,7 @@ fn filename_from(url: &str, cd: Option<&str>) -> String {
     }
     let path = Url::parse(url)
         .ok()
-        .and_then(|u| u.path_segments()?.last().map(|s| s.to_string()))
+        .and_then(|u| u.path_segments()?.next_back().map(|s| s.to_string()))
         .unwrap_or_else(|| "download".into());
     let name = percent_decode(&path);
     sanitize_name(if name.is_empty() { "download" } else { &name })
@@ -496,7 +495,7 @@ fn is_bidi_control(c: char) -> bool {
 pub fn is_windows_reserved_stem(stem: &str) -> bool {
     let s: String = stem
         .trim()
-        .trim_end_matches(|c| c == ' ' || c == '.')
+        .trim_end_matches([' ', '.'])
         .chars()
         .map(|c| match c {
             '\u{00B9}' => '1',
@@ -753,6 +752,9 @@ pub fn download(
     download_with(url, dir, &DownloadOpts::default(), progress, cancelled)
 }
 
+/// Cached response metadata from the final hop (etag, last-modified, length, type, disposition).
+type FetchHeaderMeta = (Option<String>, Option<String>, Option<u64>, Option<String>, String);
+
 pub fn download_with(
     url: &str,
     dir: &Path,
@@ -770,13 +772,7 @@ pub fn download_with(
     current = parse_url(&resolve_direct(current.as_str())?)?;
 
     let mut resp_holder = None;
-    let mut final_headers: Option<(
-        Option<String>,
-        Option<String>,
-        Option<u64>,
-        Option<String>,
-        String,
-    )> = None;
+    let mut final_headers: Option<FetchHeaderMeta> = None;
     // etag, last_modified, content_length, content_type, content_disposition
     let mut pinned_agent = None;
 
@@ -894,11 +890,11 @@ pub fn download_with(
             have = 0;
         } else if let Some(old) = load_meta(&partial) {
             // URL changed, or nothing strong to compare a resumed body with → restart
-            let weak = old.etag.as_deref().map_or(true, |e| e.starts_with("W/"))
+            let weak = old.etag.as_deref().is_none_or(|e| e.starts_with("W/"))
                 && old
                     .last_modified
                     .as_deref()
-                    .map_or(true, |l| l.trim().is_empty());
+                    .is_none_or(|l| l.trim().is_empty());
             if old.url != current.as_str() || weak {
                 clear_partial(&partial);
                 have = 0;

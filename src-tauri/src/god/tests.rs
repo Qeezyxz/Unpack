@@ -28,7 +28,7 @@ fn make_iso(path: &Path, title_id: u32, pad_bytes: u64) {
         dir.push(0x80);
         dir.push(name.len() as u8);
         dir.extend_from_slice(name.as_bytes());
-        while dir.len() % 4 != 0 {
+        while !dir.len().is_multiple_of(4) {
             dir.push(0xff);
         }
     };
@@ -457,7 +457,7 @@ fn auto_named_claims_new_folder_and_rejects_non_xbox() {
     .unwrap();
     assert!(!r.iso_deleted && iso.exists() && r.kept_reason.unwrap().contains("fingerprint"));
     let t = reg(&iso, true);
-    seal_tokens(&[t.clone()]);
+    seal_tokens(std::slice::from_ref(&t));
     let r = convert_registered(&t, true, &Jobs::default(), "z", &mut |_, _| {}).unwrap();
     assert!(r.iso_deleted && !iso.exists());
     // single use
@@ -507,7 +507,7 @@ fn r3l1_late_cancel_keeps_iso() {
     let iso = ext.join("g.iso");
     make_iso(&iso, 0x4D53_07E6, 0);
     let t = register_extracted(&[iso.display().to_string()], &ext, true).remove(0);
-    seal_tokens(&[t.clone()]);
+    seal_tokens(std::slice::from_ref(&t));
     let jobs = Jobs::default();
     jobs.register("l");
     let j2 = jobs.clone();
@@ -662,7 +662,7 @@ fn r4m1_restored_mtime_swap_is_caught() {
     let iso = ext.join("g.iso");
     make_iso(&iso, 0x4D53_07E6, 400 * 1024 * 1024);
     let t = register_extracted(&[iso.display().to_string()], &ext, true).remove(0);
-    seal_tokens(&[t.clone()]);
+    seal_tokens(std::slice::from_ref(&t));
     let mtime = fs::metadata(&iso).unwrap().modified().unwrap();
     // change 12 bytes at 100 MiB during the conversion (after the pre-convert identity check)
     let mut done = false;

@@ -51,8 +51,8 @@ pub fn parse_stfs_bytes(b: &[u8]) -> Result<StfsInfo, String> {
         b"PIRS" => "PIRS",
         _ => return Err("Not an Xbox 360 package.".into()),
     };
-    let content_type = be32(&b, 0x344);
-    let tid = be32(&b, 0x360);
+    let content_type = be32(b, 0x344);
+    let tid = be32(b, 0x360);
     let units: Vec<u16> = b[0x411..0x411 + 0x80]
         .chunks(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]))

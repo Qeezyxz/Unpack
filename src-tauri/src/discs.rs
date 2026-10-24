@@ -40,7 +40,7 @@ fn digit_after_label(haystack: &str, label: &str) -> Option<u8> {
     while let Some(pos) = haystack[start..].find(label) {
         let abs = start + pos + label.len();
         let rest =
-            haystack[abs..].trim_start_matches(|c: char| matches!(c, ' ' | '-' | '_' | '.' | '#'));
+            haystack[abs..].trim_start_matches([' ', '-', '_', '.', '#']);
         if let Some(ch) = rest.chars().next() {
             if let Some(d) = ch.to_digit(10) {
                 if (1..=9).contains(&d) {

@@ -99,7 +99,7 @@ pub fn is_old_name(n: &str, name: &str) -> bool {
     let rest = n[name.len()..].to_ascii_lowercase();
     let rest = rest.as_str();
     rest == ".old"
-        || rest.strip_prefix(".old-").map_or(false, |d| {
+        || rest.strip_prefix(".old-").is_some_and(|d| {
             !d.is_empty() && d.len() <= 10 && d.bytes().all(|b| b.is_ascii_digit())
         })
 }
@@ -226,7 +226,7 @@ impl Target {
     pub fn is_fat(&self) -> bool {
         match self {
             Target::Local { root } => {
-                crate::safecopy::fs_type(root).map_or(false, |t| crate::safecopy::is_fat(&t))
+                crate::safecopy::fs_type(root).is_some_and(|t| crate::safecopy::is_fat(&t))
             }
             Target::Console { .. } => true,
         }
@@ -292,6 +292,7 @@ impl Target {
     }
 
     /// (name, size, is_dir) of a folder's entries; None when the folder is missing.
+    #[allow(clippy::type_complexity)] // flat Result<Option<Vec<...>>> matches other Target helpers
     pub fn list(&self, rel: &[String]) -> Result<Option<Vec<(String, u64, bool)>>, String> {
         match self {
             Target::Local { .. } => {
@@ -629,6 +630,7 @@ impl Target {
 
     /// After a failed swap: reconnect (up to 3 tries, with backoff) and make sure launch.ini exists.
     /// Returns (true, _) when the new file turned out to be fully in place after all.
+    #[allow(clippy::too_many_arguments)] // recovery needs every path segment and byte snapshot for rollback
     fn ftp_recover(
         &self,
         full: &[String],

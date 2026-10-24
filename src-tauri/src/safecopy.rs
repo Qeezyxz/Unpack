@@ -308,7 +308,7 @@ pub fn fat_check_type(
     sizes: impl Iterator<Item = (PathBuf, u64)>,
 ) -> Result<(), String> {
     let Some(t) = t else { return Ok(()) };
-    if !is_fat(&t) {
+    if !is_fat(t) {
         return Ok(());
     }
     for (p, n) in sizes {

@@ -132,7 +132,7 @@ mod tests {
     fn blocks_when_need_exceeds_free() {
         let d = TmpDir::new("pf-space");
         let p = d.path().join("big.bin");
-        std::fs::write(&p, &[0u8; 1024]).unwrap();
+        std::fs::write(&p, [0u8; 1024]).unwrap();
         let r = check_local_dest(d.path(), 1 << 40, &[]);
         assert!(!r.ok);
         assert!(r.issues.iter().any(|i| i.text.contains("free space")));

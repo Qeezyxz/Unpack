@@ -496,7 +496,7 @@ mod tests {
         let xex = crate::iso_extract::tests::minimal_xex(0x4156_0817);
         fs::write(game.join("default.xex"), &xex).unwrap();
         fs::write(game.join("media/readme.txt"), b"hi").unwrap();
-        let v = scan(&[d.clone()]);
+        let v = scan(std::slice::from_ref(&d));
         let g = v
             .iter()
             .find(|x| x.kind == "extracted")

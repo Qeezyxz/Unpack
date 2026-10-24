@@ -1301,7 +1301,7 @@ pub mod tests {
         let two = xex_disc(&ext, "Del (Disc 2).iso", 2, 2, &[("t.bin", b"T")]);
         let reg = |p: &Path| {
             let t = god::register_extracted(&[p.display().to_string()], &ext, true).remove(0);
-            god::seal_tokens(&[t.clone()]);
+            god::seal_tokens(std::slice::from_ref(&t));
             t
         };
         extract_registered(&reg(&one), false, &Jobs::default(), "d1", &mut |_, _| {}).unwrap();

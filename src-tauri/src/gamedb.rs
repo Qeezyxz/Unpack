@@ -166,9 +166,9 @@ fn contains_seq(hay: &[String], needle: &[String]) -> bool {
         && n <= hay.len()
         && (0..=hay.len() - n).any(|i| {
             hay[i..i + n] == *needle
-                && hay.get(i + n).map_or(true, |nx| {
+                && hay.get(i + n).is_none_or(|nx| {
                     nx.parse::<u32>().is_err()
-                        || needle.last().map_or(false, |l| l.parse::<u32>().is_ok())
+                        || needle.last().is_some_and(|l| l.parse::<u32>().is_ok())
                 })
         })
 }
@@ -315,15 +315,11 @@ pub fn guess(texts: &[&str], max: usize) -> Vec<Guess> {
 
 /// A guess is "confident" when it's strong and clearly ahead of the runner-up.
 pub fn confident(g: &[Guess]) -> bool {
-    match g {
-        [a, ..]
-            if a.confidence >= 85
-                && g.get(1).map_or(true, |b| a.confidence >= b.confidence + 8) =>
-        {
-            true
-        }
-        _ => false,
-    }
+    matches!(
+        g,
+        [a, ..] if a.confidence >= 85
+            && g.get(1).is_none_or(|b| a.confidence >= b.confidence + 8)
+    )
 }
 
 #[derive(Debug, Serialize)]

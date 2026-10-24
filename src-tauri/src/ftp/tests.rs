@@ -288,7 +288,7 @@ fn serve(c: TcpStream, fs: &Arc<Mutex<Fs>>, size_cmd: bool, unix_list: bool) {
                 .faults
                 .iter()
                 .map(|x| {
-                    x.after.as_ref().map_or(true, |a| {
+                    x.after.as_ref().is_none_or(|a| {
                         f.log[..n].iter().any(|l| {
                             !l.starts_with("FAULT")
                                 && match a.strip_suffix('$') {
@@ -686,7 +686,7 @@ fn bad_names_and_missing_drive() {
     let f = fake(true, true);
     let d = tmp("names");
     std::fs::write(d.join("bad:name.txt"), b"x").ok();
-    std::fs::write(d.join(&"n".repeat(50)), b"x").unwrap();
+    std::fs::write(d.join("n".repeat(50)), b"x").unwrap();
     let e = send(
         &con(f.port),
         &d,

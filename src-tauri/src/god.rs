@@ -438,7 +438,7 @@ pub fn convert(
             .con_header_file_path()
             .parent()
             .and_then(|d| fs::read_dir(d).ok())
-            .map_or(false, |rd| {
+            .is_some_and(|rd| {
                 rd.flatten().any(|e| {
                     let name = e.file_name();
                     let stem = std::path::Path::new(&name)
@@ -778,8 +778,9 @@ pub struct ExtractedGod {
 /// folder next to the extraction folder. Rust alone decides deletion: only if the user wants
 /// it, the extraction allowed it (fresh folder, not Replace), the job wasn't cancelled, the
 /// file still has its recorded identity, and the GOD package re-hashes cleanly.
-
+///
 /// Consume a one-shot extracted-ISO token (shared by GOD and XEX extract paths).
+#[allow(clippy::type_complexity)] // tuple bundles paths, delete flag, identity, and optional disc hash
 pub fn take_extracted_token(
     token: &str,
 ) -> Result<(PathBuf, PathBuf, bool, IsoIdentity, Option<[u8; 20]>), String> {

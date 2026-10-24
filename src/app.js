@@ -1347,11 +1347,93 @@ function renderXbox() {
         <p class="meta" style="margin-top:.6rem">Uploads go to a <code>.part</code> file, are renamed when complete and their size is checked on the console. Existing files are never overwritten. Only local network addresses are allowed.</p></section>
       <section class="xb-browse">${X.drives.length ? `<div class="xb-drives" data-xb-drives><span class="meta">Send to drive</span><select data-xb-defdrive aria-label="Default drive for this console">${X.drives.map((d) => `<option ${xboxDrive() === d ? "selected" : ""}>${escapeHtml(d)}</option>`).join("")}</select><span class="meta">${X.drives.length} drive${X.drives.length === 1 ? "" : "s"} on this console${X.drives.filter((d) => /^usb/i.test(d)).length > 1 ? " · pick which USB" : ""}</span>
         <button class="btn btn-quiet btn-sm" data-xb-preset-save type="button" title="Save current folder as a named preset">Save preset</button></div>` : ""}${X.pickFor != null && X.sends[X.pickFor] ? `<div class="xb-pick" data-xb-pickbar>Pick a folder for <b>${escapeHtml(X.sends[X.pickFor].name)}</b>, then <button class="btn btn-primary btn-sm" data-xb-usehere type="button" ${X.entries && X.path !== "/" ? "" : "disabled"}>Use ${escapeHtml(X.path)}</button><button class="btn btn-quiet btn-sm" data-xb-pickcancel type="button">Cancel</button></div>` : ""}${browser}${X.entries ? `<div class="actions" style="margin-top:.5rem"><button class="btn btn-quiet btn-sm" data-xb-refresh type="button">Refresh</button>${X.path !== "/" ? `<button class="btn btn-quiet btn-sm" data-xb-mkdir type="button">New folder</button>` : ""}${X.sends.length && X.path !== "/" ? `<button class="btn btn-secondary btn-sm" data-xb-allhere type="button" title="Set every queued item's destination to this folder" ${X.sends.some((o) => o.running) ? "disabled" : ""}>Send all to this folder</button>` : ""}
-        <button class="btn btn-quiet btn-sm" data-xb-saves type="button" title="Console save backup (needs FTP)">Save backup</button>
-        <button class="btn btn-quiet btn-sm" data-xb-shots type="button" title="Screenshot gallery (needs console)">Screenshots</button></div>` : ""}</section>
+        <button class="btn btn-quiet btn-sm" data-xb-save-back type="button" title="Download save from console to your PC">Backup save</button>
+        <button class="btn btn-quiet btn-sm" data-xb-save-restore type="button" title="Upload save to console (backs up existing files first)">Restore save</button>
+        <button class="btn btn-quiet btn-sm" data-xb-shots type="button" title="Aurora screenshot gallery">Screenshots</button></div>` : ""}</section>
     </div>
     <div class="actions" style="justify-content:flex-end;margin-top:1rem"><button class="btn btn-primary" data-xb-close type="button">Done</button></div>
-  </div></div>`;
+  </div></div>${X.shots || X.shotsBusy ? `<div class="overlay" data-xb-shots-overlay><div class="dialog dialog-lg" data-xb-shots role="dialog" aria-modal="true">
+    <h3>${icon("image")} Screenshot gallery <span class="meta">${escapeHtml(X.shots?.drive || xboxDrive() || "")}</span></h3>
+    ${X.shotsBusy ? `<div class="meta"><span class="spin">◌</span> Listing screenshots…</div>` : `<div class="xb-shot-grid" data-xb-shot-grid>${(X.shots?.list || []).map((s, i) => `<figure class="xb-shot" data-xb-shot="${i}"><div class="xb-shot-thumb">${X.shots.thumbs?.[s.name] ? `<img src="${X.shots.thumbs[s.name]}" alt="">` : icon("image")}</div><figcaption><span class="meta">${escapeHtml(s.name)}</span><br>${formatBytes(s.size)}</figcaption></figure>`).join("") || `<div class="meta">No screenshots on this drive.</div>`}</div>
+    <div class="actions"><button class="btn btn-primary btn-sm" data-xb-shots-dl type="button" ${X.shots?.list?.length ? "" : "disabled"}>Save all to PC…</button><button class="btn btn-quiet btn-sm" data-xb-shots-close type="button">Close</button></div>`}
+  </div></div>` : ""}`;
+}
+async function xboxSavePickMeta() {
+  const X = xboxView;
+  const drive = xboxDrive() || X.drives[0];
+  if (!drive || X.entries === null) { toast("Connect to the console first."); return null; }
+  const profile = prompt("Profile folder under Content (e.g. 0000000000000000)", "0000000000000000");
+  if (profile === null) return null;
+  const prof = profile.trim();
+  if (!prof || /[\\/]/.test(prof)) { toast("Profile must be a single folder name."); return null; }
+  const tidRaw = prompt("Title ID (8 hex characters)", "4D5307E6");
+  if (tidRaw === null) return null;
+  const tid = tidRaw.trim().toUpperCase();
+  if (!/^[\dA-F]{8}$/.test(tid)) { toast("Title ID must be 8 hex characters."); return null; }
+  return { drive, profile: prof, title_id: tid };
+}
+async function xboxBackupSave() {
+  const X = xboxView, meta = await xboxSavePickMeta();
+  if (!meta) return;
+  const dest = await N.pickFolder("Save backup into this folder on your PC");
+  if (!dest) return;
+  X.status = "Backing up save from console…"; render();
+  try {
+    const r = await N.invoke("saves_backup", { ...xboxCon(), ...meta, dest });
+    toast(`Backed up ${r.files} file${r.files === 1 ? "" : "s"} (${formatBytes(r.bytes)}) → ${r.dest}`);
+    X.status = "";
+  } catch (err) { showError(xboxError(err)); X.status = ""; }
+  render();
+}
+async function xboxRestoreSave() {
+  const X = xboxView, meta = await xboxSavePickMeta();
+  if (!meta) return;
+  const src = await N.pickFolder("Pick the folder that contains the save files to restore");
+  if (!src) return;
+  if (!confirm("Restore uploads these files to the console. Any existing save files there are moved into a .unpack-save-backup folder on the console first, then sizes are verified. Continue?")) return;
+  X.status = "Restoring save to console…"; render();
+  try {
+    const r = await N.invoke("saves_restore", { ...xboxCon(), ...meta, src });
+    const extra = r.backed_up ? ` ${r.backed_up} existing file${r.backed_up === 1 ? "" : "s"} backed up on console (${r.backup_remote}).` : "";
+    toast(`Restored ${r.uploaded} file${r.uploaded === 1 ? "" : "s"} (${formatBytes(r.bytes)}) → ${r.remote}.${extra}`);
+    X.status = "";
+  } catch (err) { showError(xboxError(err)); X.status = ""; }
+  render();
+}
+async function xboxOpenScreenshots() {
+  const X = xboxView;
+  const drive = xboxDrive() || X.drives[0];
+  if (!drive || X.entries === null) { toast("Connect to the console first."); return; }
+  X.shotsBusy = true; X.shots = { drive, list: [], thumbs: {} }; render();
+  try {
+    const list = await N.invoke("screenshots_list", { ...xboxCon(), drive });
+    X.shots = { drive, list, thumbs: {} };
+    if (!list.length) toast("No screenshots found in Aurora folders on this drive.");
+  } catch (err) { X.shots = null; showError(xboxError(err)); }
+  finally { X.shotsBusy = false; render(); }
+}
+async function xboxPullScreenshots() {
+  const X = xboxView;
+  if (!X.shots?.list?.length) return;
+  const dest = await N.pickFolder("Save screenshots into this folder");
+  if (!dest) return;
+  X.shotsBusy = true; render();
+  try {
+    const r = await N.invoke("screenshots_pull", { ...xboxCon(), shots: X.shots.list, dest });
+    toast(`Saved ${r.files} screenshot${r.files === 1 ? "" : "s"} (${formatBytes(r.bytes)}) → ${r.dest}`);
+    for (const s of X.shots.list) {
+      const local = `${r.dest}/${s.name}`;
+      try {
+        const buf = await N.invoke("read_file", { path: local });
+        const bytes = new Uint8Array(buf);
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
+        const mime = /\.jpe?g$/i.test(s.name) ? "image/jpeg" : "image/png";
+        X.shots.thumbs[s.name] = `data:${mime};base64,${btoa(bin)}`;
+      } catch { /* thumb optional */ }
+    }
+  } catch (err) { showError(xboxError(err)); }
+  finally { X.shotsBusy = false; render(); }
 }
 function bindXbox() {
   const root = app.querySelector("[data-xbox]");
@@ -1456,8 +1538,12 @@ function bindXbox() {
       } catch (err) { showError(String(err?.message || err)); }
     });
   });
-  root.querySelector("[data-xb-saves]")?.addEventListener("click", () => toast("Save backup needs a connected console — browse to Content and copy saves manually for now."));
-  root.querySelector("[data-xb-shots]")?.addEventListener("click", () => toast("Screenshot gallery needs console support — not wired in this build."));
+  root.querySelector("[data-xb-save-back]")?.addEventListener("click", () => xboxBackupSave().catch((e) => showError(String(e))));
+  root.querySelector("[data-xb-save-restore]")?.addEventListener("click", () => xboxRestoreSave().catch((e) => showError(String(e))));
+  root.querySelector("[data-xb-shots]")?.addEventListener("click", () => xboxOpenScreenshots().catch((e) => showError(String(e))));
+  app.querySelector("[data-xb-shots-overlay]")?.addEventListener("click", (e) => { if (e.target === e.currentTarget) { xboxView.shots = null; render(); } });
+  app.querySelector("[data-xb-shots-close]")?.addEventListener("click", () => { xboxView.shots = null; render(); });
+  app.querySelector("[data-xb-shots-dl]")?.addEventListener("click", () => xboxPullScreenshots().catch((e) => showError(String(e))));
 }
 let xboxLockTimer = null;
 async function refreshXboxLock() {
@@ -1939,11 +2025,15 @@ function catTarget() {
   return t.path ? { kind: "local", path: t.path } : null;
 }
 async function openCatalog() {
-  if (catalogView) return;
-  catalogView = { cfg: null, loaded: null, states: {}, target: { kind: "local", path: "", console: 0, drive: "" }, drives: {}, drivesBusy: false, drivesError: "", busy: false, error: "", q: "", pf: {}, run: {}, confirm: {}, updates: 0, edit: false };
-  try { catalogView.cfg = await catCall("config_get"); catalogView.loaded = await catCall("current"); } catch (e) { catalogView.error = String(e); }
-  catalogView.edit = !catalogView.cfg?.source;
-  if (catalogView.cfg?.source && !catalogView.loaded) await catRefresh(); else render();
+  if (!catalogView) {
+    catalogView = { cfg: null, loaded: null, states: {}, target: { kind: "local", path: "", console: 0, drive: "" }, drives: {}, drivesBusy: false, drivesError: "", busy: false, error: "", q: "", pf: {}, run: {}, confirm: {}, updates: 0, edit: false };
+    try { catalogView.cfg = await catCall("config_get"); catalogView.loaded = await catCall("current"); } catch (e) { catalogView.error = String(e); }
+    catalogView.edit = !catalogView.cfg?.source;
+  }
+  if (catalogView.cfg?.source) {
+    if (!catalogView.loaded) await catRefresh();
+    else { await catStates(); render(); }
+  } else render();
 }
 async function catRefresh() {
   const C = catalogView; C.busy = true; C.error = ""; render();
@@ -2160,7 +2250,7 @@ function bindMods() {
   const close = () => { modsView = null; render(); };
   root.querySelector("[data-mods-close]")?.addEventListener("click", close);
   app.querySelector("[data-mods-overlay]")?.addEventListener("click", (e) => { if (e.target === e.currentTarget) close(); });
-  root.querySelectorAll("[data-mods-tab]").forEach((b) => b.addEventListener("click", () => { M.tab = b.dataset.modsTab; if (M.tab === "catalog") openCatalog(); render(); }));
+  root.querySelectorAll("[data-mods-tab]").forEach((b) => b.addEventListener("click", async () => { M.tab = b.dataset.modsTab; if (M.tab === "catalog") await openCatalog(); else render(); }));
   bindCatalog(root);
   const saveNames = () => { N.settings.modNames = M.names; M.names = N.settings.modNames; };
   root.querySelectorAll("[data-mn-del]").forEach((b) => b.addEventListener("click", () => { M.names = M.names.filter((_, i) => i !== +b.dataset.mnDel); M.namePick = null; saveNames(); render(); }));

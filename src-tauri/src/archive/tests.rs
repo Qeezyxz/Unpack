@@ -470,7 +470,7 @@ fn create_zip_and_7z_with_password_roundtrip() {
             names.contains(&"a.txt") && names.contains(&"nested/deep/er/d.txt"),
             "{fmt}: {names:?}"
         );
-        if let Some(_) = pw {
+        if pw.is_some() {
             assert!(l.encrypted, "{fmt} should be encrypted");
             if fmt == "7z" {
                 // names hidden too
@@ -503,7 +503,7 @@ fn create_zip_and_7z_with_password_roundtrip() {
     // refuse to write the archive inside a folder being archived
     let e = create(
         &exe(),
-        &[d.clone()],
+        std::slice::from_ref(&d),
         &d.join("x.zip"),
         "zip",
         None,

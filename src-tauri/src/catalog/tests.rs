@@ -60,8 +60,10 @@ struct Http {
 impl Http {
     fn start() -> Http {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut h = Http::default();
-        h.port = l.local_addr().unwrap().port();
+        let h = Http {
+            port: l.local_addr().unwrap().port(),
+            ..Http::default()
+        };
         let h2 = h.clone();
         std::thread::spawn(move || {
             for c in l.incoming().flatten() {
@@ -476,7 +478,7 @@ fn catalog_aliases_and_names_feed_detection() {
     activate(&Loaded::default());
     assert!(crate::gamedb::guess(&["zqxgame stuff"], 3)
         .first()
-        .map_or(true, |g| g.title_id != TID));
+        .is_none_or(|g| g.title_id != TID));
 }
 
 // ---- launch.ini ----
@@ -910,7 +912,7 @@ fn downloads_are_capped_in_parallel() {
     .unwrap();
     assert_eq!(out.len(), 5);
     let max = h.max.load(Ordering::SeqCst);
-    assert!(max >= 1 && max <= 2, "max parallel {max}");
+    assert!((1..=2).contains(&max), "max parallel {max}");
 }
 
 #[test]

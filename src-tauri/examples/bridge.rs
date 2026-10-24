@@ -480,6 +480,61 @@ fn extra(
             unpack_lib::ftp_dest_for(&args, std::path::Path::new(&args.src))
                 .map(|(d, c)| json!({"path": unpack_lib::ftp::join_remote(&d), "contents_only": c}))
         }
+        "saves_backup" => {
+            let dest = GRANTS.check(a["dest"].as_str().unwrap_or(""))?;
+            let con = unpack_lib::ftp_console(
+                a["host"].as_str().unwrap_or(""),
+                a["port"].as_u64().unwrap_or(21) as u16,
+                a["user"].as_str().unwrap_or(""),
+                a["pass"].as_str().unwrap_or(""),
+            )?;
+            let remote = unpack_lib::saves::profile_save_remote(
+                a["drive"].as_str().unwrap_or("Hdd1"),
+                a["profile"].as_str().unwrap_or(""),
+                a["title_id"].as_str().unwrap_or(""),
+            )?;
+            unpack_lib::saves::backup_folder(&con, &remote, &dest, &mut |_, _| {}).map(|v| serde_json::to_value(v).unwrap())
+        }
+        "saves_restore" => {
+            let src = GRANTS.check(a["src"].as_str().unwrap_or(""))?;
+            let con = unpack_lib::ftp_console(
+                a["host"].as_str().unwrap_or(""),
+                a["port"].as_u64().unwrap_or(21) as u16,
+                a["user"].as_str().unwrap_or(""),
+                a["pass"].as_str().unwrap_or(""),
+            )?;
+            let remote = unpack_lib::saves::profile_save_remote(
+                a["drive"].as_str().unwrap_or("Hdd1"),
+                a["profile"].as_str().unwrap_or(""),
+                a["title_id"].as_str().unwrap_or(""),
+            )?;
+            unpack_lib::saves::restore_folder(&con, &remote, &src, &mut |_, _| {})
+                .map(|v| serde_json::to_value(v).unwrap())
+        }
+        "screenshots_list" => {
+            let con = unpack_lib::ftp_console(
+                a["host"].as_str().unwrap_or(""),
+                a["port"].as_u64().unwrap_or(21) as u16,
+                a["user"].as_str().unwrap_or(""),
+                a["pass"].as_str().unwrap_or(""),
+            )?;
+            let drive = a["drive"].as_str().unwrap_or("Hdd1").to_string();
+            unpack_lib::saves::list_screenshots(&con, &drive)
+                .map(|v| serde_json::to_value(v).unwrap())
+        }
+        "screenshots_pull" => {
+            let dest = GRANTS.check(a["dest"].as_str().unwrap_or(""))?;
+            let shots: Vec<unpack_lib::saves::ScreenshotFile> =
+                serde_json::from_value(a["shots"].clone()).map_err(|e| e.to_string())?;
+            let con = unpack_lib::ftp_console(
+                a["host"].as_str().unwrap_or(""),
+                a["port"].as_u64().unwrap_or(21) as u16,
+                a["user"].as_str().unwrap_or(""),
+                a["pass"].as_str().unwrap_or(""),
+            )?;
+            unpack_lib::saves::pull_screenshots(&con, &shots, &dest, &mut |_, _| {})
+                .map(|v| serde_json::to_value(v).unwrap())
+        }
         "ftp_send" => {
             let id = a["id"].as_str().unwrap_or("").to_string();
             let args: unpack_lib::FtpSendArgs =

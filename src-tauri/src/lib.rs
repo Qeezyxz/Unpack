@@ -876,6 +876,7 @@ async fn pick_path(
     Ok(picked.iter().map(|p| p.display().to_string()).collect())
 }
 
+#[allow(clippy::too_many_arguments)] // Tauri command surface: one arg per invoke parameter
 #[tauri::command]
 async fn download_url(
     app: AppHandle,
@@ -1355,6 +1356,82 @@ async fn saves_backup(grants: State<'_, safecopy::Grants>, args: SavesBackupArgs
     .map_err(|e| e.to_string())?
 }
 
+#[derive(serde::Deserialize)]
+struct SavesRestoreArgs {
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    drive: String,
+    profile: String,
+    title_id: String,
+    src: String,
+}
+
+#[tauri::command]
+async fn saves_restore(grants: State<'_, safecopy::Grants>, args: SavesRestoreArgs) -> Result<saves::SaveRestoreResult, String> {
+    let src = grants.check(&args.src)?;
+    let con = ftp_console(&args.host, args.port, &args.user, &args.pass)?;
+    let remote = saves::profile_save_remote(&args.drive, &args.profile, &args.title_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = ftp_lock("Send to Xbox", "save restore")?;
+        saves::restore_folder(&con, &remote, &src, &mut |_, f| {
+            let _ = f;
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Deserialize)]
+struct ScreenshotsListArgs {
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    drive: String,
+}
+
+#[tauri::command]
+async fn screenshots_list(args: ScreenshotsListArgs) -> Result<Vec<saves::ScreenshotFile>, String> {
+    let con = ftp_console(&args.host, args.port, &args.user, &args.pass)?;
+    let drive = args.drive;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = ftp_lock("Send to Xbox", "screenshot list")?;
+        saves::list_screenshots(&con, &drive)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Deserialize)]
+struct ScreenshotsPullArgs {
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    shots: Vec<saves::ScreenshotFile>,
+    dest: String,
+}
+
+#[tauri::command]
+async fn screenshots_pull(
+    grants: State<'_, safecopy::Grants>,
+    args: ScreenshotsPullArgs,
+) -> Result<saves::SaveBackupResult, String> {
+    let dest = grants.check(&args.dest)?;
+    let con = ftp_console(&args.host, args.port, &args.user, &args.pass)?;
+    let shots = args.shots;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = ftp_lock("Send to Xbox", "screenshot pull")?;
+        saves::pull_screenshots(&con, &shots, &dest, &mut |_, f| {
+            let _ = f;
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn check_release(current: String, opt_in: bool) -> Result<download::ReleaseInfo, String> {
     if !opt_in {
@@ -1496,6 +1573,9 @@ pub fn run() {
             ftp_delete,
             ftp_lock_status,
             saves_backup,
+            saves_restore,
+            screenshots_list,
+            screenshots_pull,
             builtin_menus,
             catalog,
             discord_set_activity,

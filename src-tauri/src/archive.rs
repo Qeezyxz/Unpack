@@ -106,7 +106,7 @@ where
 }
 
 pub fn check_password(password: Option<&str>) -> Result<(), String> {
-    if cfg!(windows) && password.map_or(false, |p| p.contains('"')) {
+    if cfg!(windows) && password.is_some_and(|p| p.contains('"')) {
         return Err("Passwords containing a double quote (\") can't be passed to 7-Zip on Windows. Please use a password without it.".into());
     }
     Ok(())
@@ -171,7 +171,7 @@ pub fn clean_entry_path(raw: &str) -> String {
 }
 
 pub fn list(exe: &Path, archive: &Path, password: Option<&str>) -> Result<Listing, String> {
-    let had_pw = password.map_or(false, |p| !p.is_empty());
+    let had_pw = password.is_some_and(|p| !p.is_empty());
     check_password(password)?;
     let mut cmd = base_command(exe);
     add_args(
@@ -205,8 +205,8 @@ pub fn list(exe: &Path, archive: &Path, password: Option<&str>) -> Result<Listin
                 entries.push(Entry {
                     path,
                     size: cur.get("Size").and_then(|s| s.parse().ok()).unwrap_or(0),
-                    dir: cur.get("Folder").map_or(false, |f| f == "+") || attrs.starts_with('D'),
-                    encrypted: cur.get("Encrypted").map_or(false, |f| f == "+"),
+                    dir: cur.get("Folder").is_some_and(|f| f == "+") || attrs.starts_with('D'),
+                    encrypted: cur.get("Encrypted").is_some_and(|f| f == "+"),
                 });
             }
         }
@@ -302,7 +302,7 @@ impl Jobs {
         }
     }
     pub fn is_cancelled(&self, id: &str) -> bool {
-        self.inner.lock().unwrap().get(id).map_or(false, |h| {
+        self.inner.lock().unwrap().get(id).is_some_and(|h| {
             h.cancelled.load(std::sync::atomic::Ordering::SeqCst)
         })
     }
@@ -741,7 +741,7 @@ fn merge_replace(src: &Path, dst: &Path, warnings: &mut Vec<String>) -> std::io:
     }
     if src.is_dir() {
         let dst_meta = fs::symlink_metadata(dst).ok();
-        if dst_meta.as_ref().map_or(false, |m| !m.is_dir()) {
+        if dst_meta.as_ref().is_some_and(|m| !m.is_dir()) {
             fs::remove_file(dst)?;
         }
         if fs::symlink_metadata(dst).is_err() {
@@ -1002,7 +1002,7 @@ pub fn extract(
     let _guard = StagingGuard(staging.clone());
 
     check_password(opts.password)?;
-    let had_pw = opts.password.map_or(false, |p| !p.is_empty());
+    let had_pw = opts.password.is_some_and(|p| !p.is_empty());
     let mut out_arg = std::ffi::OsString::from("-o");
     out_arg.push(staging.as_os_str());
     let args: Vec<std::ffi::OsString> = vec![
@@ -1280,7 +1280,7 @@ fn human(b: u64) -> String {
     } else if b >= 1 << 20 {
         format!("{:.1} MB", b as f64 / (1u64 << 20) as f64)
     } else {
-        format!("{} KB", (b + 1023) / 1024)
+        format!("{} KB", b.div_ceil(1024))
     }
 }
 
@@ -1529,7 +1529,7 @@ pub fn read_entry(
     password: Option<&str>,
     max: usize,
 ) -> Result<Vec<u8>, String> {
-    let had_pw = password.map_or(false, |p| !p.is_empty());
+    let had_pw = password.is_some_and(|p| !p.is_empty());
     check_password(password)?;
     ensure_entry(exe, archive, entry, password)?;
     let lf = ListFile::new(entry)?;
@@ -1625,7 +1625,7 @@ pub fn create(
         "-bsp1".into(),
         "-sccUTF-8".into(),
     ];
-    let had_pw = password.map_or(false, |p| !p.is_empty());
+    let had_pw = password.is_some_and(|p| !p.is_empty());
     if had_pw {
         args.push(format!("-p{}", password.unwrap()).into());
         if fmt == "7z" {
@@ -1661,7 +1661,7 @@ pub fn extract_entry_to(
     jobs: &Jobs,
     job_id: &str,
 ) -> Result<(), String> {
-    let had_pw = password.map_or(false, |p| !p.is_empty());
+    let had_pw = password.is_some_and(|p| !p.is_empty());
     check_password(password)?;
     ensure_entry(exe, archive, entry, password)?;
     let parent = out_file.parent().ok_or("Bad output path")?;

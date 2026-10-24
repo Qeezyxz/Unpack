@@ -66,13 +66,13 @@ fn installs_into_god_game_and_never_overwrites() {
     let g = game(&lib, "Halo 3 (GOD)", "4D5307E6");
     let src = d.join("dlc1");
     make_stfs(&src, b"LIVE", CT_DLC, 0x4D53_07E6, "Map Pack", b"one");
-    let r = install_dlc(&src, &[lib.clone()], false, None).unwrap();
+    let r = install_dlc(&src, std::slice::from_ref(&lib), false, None).unwrap();
     assert_eq!(r.status, "installed");
     assert_eq!(PathBuf::from(&r.dest), g.join("00000002/dlc1"));
     assert!(src.exists(), "copy, not move");
     // identical again -> skipped
     assert_eq!(
-        install_dlc(&src, &[lib.clone()], false, None)
+        install_dlc(&src, std::slice::from_ref(&lib), false, None)
             .unwrap()
             .status,
         "identical"
@@ -80,13 +80,13 @@ fn installs_into_god_game_and_never_overwrites() {
     // different content, same name -> new name, original untouched
     let before = fs::read(g.join("00000002/dlc1")).unwrap();
     make_stfs(&src, b"LIVE", CT_DLC, 0x4D53_07E6, "Map Pack", b"two");
-    let r = install_dlc(&src, &[lib.clone()], false, None).unwrap();
+    let r = install_dlc(&src, std::slice::from_ref(&lib), false, None).unwrap();
     assert_eq!(PathBuf::from(&r.dest), g.join("00000002/dlc1-2"));
     assert_eq!(fs::read(g.join("00000002/dlc1")).unwrap(), before);
     // move: source removed only after verified copy
     let s2 = d.join("dlc2");
     make_stfs(&s2, b"PIRS", CT_DLC, 0x4D53_07E6, "Other", b"");
-    let r = install_dlc(&s2, &[lib.clone()], true, None).unwrap();
+    let r = install_dlc(&s2, std::slice::from_ref(&lib), true, None).unwrap();
     assert!(r.moved && !s2.exists() && PathBuf::from(&r.dest).exists());
     fs::remove_dir_all(&d).unwrap();
 }
@@ -98,19 +98,19 @@ fn not_found_title_update_and_layouts() {
     make_stfs(&src, b"LIVE", CT_DLC, 0x0ABC_DEF1, "X", b"");
     let lib = d.join("lib");
     fs::create_dir_all(&lib).unwrap();
-    let r = install_dlc(&src, &[lib.clone()], true, None).unwrap();
+    let r = install_dlc(&src, std::slice::from_ref(&lib), true, None).unwrap();
     assert_eq!(r.status, "not_found");
     assert!(r.message.contains("0ABCDEF1") && src.exists());
     // a bare TitleID folder without a game isn't a match
     fs::create_dir_all(lib.join("0ABCDEF1")).unwrap();
-    assert_eq!(find_game(&[lib.clone()], "0ABCDEF1"), None);
+    assert_eq!(find_game(std::slice::from_ref(&lib), "0ABCDEF1"), None);
     // console layout Content/0000000000000000/<TID>/00007000
     let g = game(&lib, "Content/0000000000000000", "0ABCDEF1");
-    assert_eq!(find_game(&[lib.clone()], "0abcdef1"), Some(g));
-    assert_eq!(find_game(&[lib.clone()], "../../x"), None);
+    assert_eq!(find_game(std::slice::from_ref(&lib), "0abcdef1"), Some(g));
+    assert_eq!(find_game(std::slice::from_ref(&lib), "../../x"), None);
     let tu = d.join("tu");
     make_stfs(&tu, b"CON ", CT_TITLE_UPDATE, 0x0ABC_DEF1, "TU", b"");
-    let r = install_dlc(&tu, &[lib.clone()], false, None).unwrap();
+    let r = install_dlc(&tu, std::slice::from_ref(&lib), false, None).unwrap();
     assert_eq!(r.status, "tu_installed");
     assert!(
         tu.exists()
@@ -120,7 +120,7 @@ fn not_found_title_update_and_layouts() {
     );
     // drive scan only looks at fixed top-level paths
     assert_eq!(
-        scan_roots(&[lib.clone()]),
+        scan_roots(std::slice::from_ref(&lib)),
         vec![lib
             .join("Content")
             .join("0000000000000000")

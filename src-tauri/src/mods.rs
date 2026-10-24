@@ -129,7 +129,7 @@ pub fn identify_learned(
         if let Some(l) = crate::modnames::lookup(learned, &t) {
             let tid = l.tid.to_ascii_uppercase();
             // The file name itself confidently names a different game: don't auto-confirm, ask.
-            let conflict = m.confident && m.guesses.first().map_or(false, |g| g.title_id != tid);
+            let conflict = m.confident && m.guesses.first().is_some_and(|g| g.title_id != tid);
             m.guesses.retain(|g| g.title_id != tid);
             let name = crate::modnames::parse_tid(&tid)
                 .and_then(game_name)
@@ -493,7 +493,7 @@ mod tests {
             let top_halo_confident = r.confident
                 && r.guesses
                     .first()
-                    .map_or(false, |g| g.title_id == "4D5307E6");
+                    .is_some_and(|g| g.title_id == "4D5307E6");
             assert!(
                 !top_halo_confident,
                 "{f}: must not auto-confirm Halo 3: {:?}",

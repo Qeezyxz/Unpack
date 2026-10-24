@@ -265,6 +265,10 @@
   .dialog .xb-dest input{flex:1 1 14rem;min-width:10rem;margin:0;padding:.35rem .55rem;font-size:.84rem;font-family:ui-monospace,Consolas,monospace;border-radius:9px}
   .dialog .xb-dest input.bad{border-color:var(--danger,#e5484d)}
   .xb-pick{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;padding:.5rem .6rem;margin-bottom:.5rem;border:1px dashed var(--accent);border-radius:10px}
+  .xb-shot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:.6rem;max-height:50vh;overflow:auto;margin:.6rem 0}
+  .xb-shot{margin:0;text-align:center}
+  .xb-shot-thumb{aspect-ratio:16/9;background:var(--sunk);border:1px solid var(--border);border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .xb-shot-thumb img{max-width:100%;max-height:100%;object-fit:contain}
   .dialog .xb-con input:not([type=checkbox]),.xb-con select,.xb-send select,.dialog .xb-send input:not([type=checkbox]){padding:.35rem .55rem;font-size:.86rem;margin:0;border-radius:9px}
   .dialog .xb-con input:not([type=checkbox]){flex:0 0 auto}
   .xb-send-head select{max-width:100%}
