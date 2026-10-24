@@ -183,9 +183,20 @@ fn scratch_dir() -> Result<PathBuf, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let d = std::env::temp_dir().join(format!("unpack-catalog-{}-{n}", std::process::id()));
-    fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-    Ok(d)
+    // R22 L(e): a per-process counter makes the name unique (the clock alone can repeat), and
+    // create_dir (not _all) refuses a folder that already exists.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let base = std::env::temp_dir();
+    for _ in 0..100 {
+        let k = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = base.join(format!("unpack-catalog-{}-{n}-{k}", std::process::id()));
+        match fs::create_dir(&d) {
+            Ok(()) => return Ok(d),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("Couldn't create a scratch folder.".into())
 }
 
 impl Target {
@@ -821,5 +832,36 @@ impl Target {
         })();
         let _ = fs::remove_dir_all(&tmpdir);
         res
+    }
+}
+
+#[cfg(test)]
+mod r22_tests {
+    /// R22 L(e): scratch folders for console uploads are unique even when many installs run at
+    /// once. They were named by pid + clock alone, so under load two threads could get the same
+    /// folder, overwrite each other's upload.bin and delete it under the other (the catalog
+    /// console-install tests flaked under load; 1 duplicate in 4,800 with 4 suites in parallel).
+    #[test]
+    fn r22_le_scratch_dirs_never_collide() {
+        let all = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|sc| {
+            for _ in 0..16 {
+                sc.spawn(|| {
+                    let mut mine = vec![];
+                    for _ in 0..300 {
+                        mine.push(super::scratch_dir().unwrap());
+                    }
+                    all.lock().unwrap().extend(mine);
+                });
+            }
+        });
+        let mut v = all.into_inner().unwrap();
+        for d in &v {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        let n = v.len();
+        v.sort();
+        v.dedup();
+        assert_eq!(v.len(), n, "{} scratch folders were handed out twice", n - v.len());
     }
 }

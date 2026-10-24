@@ -1504,3 +1504,914 @@ fn r18_l2_inner_file_count_cap_from_listing() {
     );
     assert!(no_staging_left(&dest));
 }
+
+/// Justin: extracting into a console Content profile folder places just the GOD <TitleID> tree,
+/// with no archive-name or "(GOD)" wrapper folders. Disc 2 joins, the same MediaID is skipped,
+/// non-GOD content keeps today's behaviour plus a hint, and normal folders are unchanged.
+#[test]
+fn content_profile_gets_only_the_title_id_tree() {
+    let d = tmp("content-prof");
+    let prof = d.join("usb").join("content").join("0000000000000000");
+    fs::create_dir_all(&prof).unwrap();
+    let ex = |zip: &Path, dest: &Path, c: Collision, l: Layout| {
+        let o = ExtractOptions {
+            archive: zip,
+            dest_parent: dest,
+            password: None,
+            collision: c,
+            layout: l,
+            skip_junk: true,
+            nested: false,
+        };
+        extract(&exe(), &o, &Jobs::default(), "cp", &mut |_, _| {}).unwrap()
+    };
+    let wrapped = d.join("bo3.zip");
+    write_zip(
+        &wrapped,
+        &[
+            ("Bo3game (GOD)/415608C3/00007000/AAAA0001", b"hdr1", 0o644),
+            (
+                "Bo3game (GOD)/415608C3/00007000/AAAA0001.data/Data0000",
+                b"d1",
+                0o644,
+            ),
+            ("Bo3game (GOD)/readme.txt", b"hi", 0o644),
+        ],
+    );
+    let r = ex(&wrapped, &prof, Collision::Number, Layout::Folder);
+    assert_eq!(names_in_dir(&prof), vec!["415608C3"]);
+    assert_eq!(Path::new(&r.output), prof.join("415608C3"));
+    assert!(prof
+        .join("415608C3/00007000/AAAA0001.data/Data0000")
+        .is_file());
+    assert!(
+        r.warnings.iter().any(|w| w.contains("1 other file")),
+        "{:?}",
+        r.warnings
+    );
+    // Disc 2 with a bare TitleID at the archive root joins the existing folder.
+    let bare = d.join("disc2.zip");
+    write_zip(
+        &bare,
+        &[
+            ("415608C3/00007000/AAAA0002", b"hdr2", 0o644),
+            ("415608C3/00007000/AAAA0002.data/Data0000", b"d2", 0o644),
+        ],
+    );
+    let r = ex(&bare, &prof, Collision::Number, Layout::Here);
+    assert!(r.merged && !r.skipped);
+    assert_eq!(names_in_dir(&prof), vec!["415608C3"]);
+    assert_eq!(names_in_dir(&prof.join("415608C3/00007000")).len(), 4);
+    // Same MediaID again: skipped (Number and Skip), never numbered or replaced.
+    for c in [Collision::Number, Collision::Skip] {
+        let r = ex(&wrapped, &prof, c, Layout::Folder);
+        assert!(r.skipped, "{c:?}");
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("Skipped:") && w.contains("AAAA0001")),
+            "{:?}",
+            r.warnings
+        );
+        assert_eq!(
+            fs::read(prof.join("415608C3/00007000/AAAA0001")).unwrap(),
+            b"hdr1"
+        );
+    }
+    // Replace swaps the package (header and data folder) in place.
+    let newer = d.join("newer.zip");
+    write_zip(
+        &newer,
+        &[
+            ("415608C3/00007000/AAAA0001", b"NEW", 0o644),
+            ("415608C3/00007000/AAAA0001.data/Data0000", b"N", 0o644),
+        ],
+    );
+    ex(&newer, &prof, Collision::Replace, Layout::Folder);
+    assert_eq!(
+        fs::read(prof.join("415608C3/00007000/AAAA0001")).unwrap(),
+        b"NEW"
+    );
+    assert_eq!(names_in_dir(&prof), vec!["415608C3"]);
+    // Picking the drive root sends the GOD tree into Content\0000000000000000.
+    fs::remove_dir_all(prof.join("415608C3")).unwrap();
+    ex(&wrapped, &d.join("usb"), Collision::Number, Layout::Folder);
+    assert_eq!(names_in_dir(&prof), vec!["415608C3"]);
+    assert_eq!(names_in_dir(&d.join("usb")), vec!["content"]);
+    // Non-GOD content: extracted as before, with the hint.
+    let plain = d.join("notes.zip");
+    write_zip(&plain, &[("a.txt", b"x", 0o644)]);
+    let r = ex(&plain, &prof, Collision::Number, Layout::Folder);
+    assert!(prof.join("notes/a.txt").is_file());
+    assert!(r
+        .warnings
+        .iter()
+        .any(|w| w.contains("doesn't look like a GOD game")));
+    // A normal destination is unchanged: the wrapper folder stays.
+    let out = d.join("out");
+    ex(&wrapped, &out, Collision::Number, Layout::Folder);
+    assert!(out
+        .join("Bo3game (GOD)/415608C3/00007000/AAAA0001")
+        .is_file());
+    assert!(no_staging_left(&prof) && no_staging_left(&out));
+}
+
+fn names_in_dir(d: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(d)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != FOLDER_LOCK)
+        .collect();
+    v.sort();
+    v
+}
+
+/// Content mode + ISOs: the extraction folder holding the ISO goes next to the Content folder,
+/// never inside Content (or its profile folder), so nothing but GOD trees ends up in Content.
+#[test]
+fn content_profile_iso_extraction_folder_goes_outside_content() {
+    let d = tmp("content-iso-out");
+    let usb = d.join("usb");
+    let prof = usb.join("Content").join("0000000000000000");
+    fs::create_dir_all(&prof).unwrap();
+    let zip = d.join("Bo3game.zip");
+    write_zip(&zip, &[("Bo3game/game.iso", b"not really an iso", 0o644)]);
+    for dest in [prof.clone(), usb.join("Content")] {
+        let o = ExtractOptions {
+            archive: &zip,
+            dest_parent: &dest,
+            password: None,
+            collision: Collision::Number,
+            layout: Layout::Folder,
+            skip_junk: true,
+            nested: false,
+        };
+        let r = extract(&exe(), &o, &Jobs::default(), "ci", &mut |_, _| {}).unwrap();
+        let out = Path::new(&r.output);
+        assert_eq!(out.parent().unwrap(), usb, "{dest:?} -> {out:?}");
+        assert!(out.join("game.iso").is_file());
+        assert!(names_in_dir(&prof).is_empty(), "{:?}", names_in_dir(&prof));
+        assert_eq!(names_in_dir(&usb.join("Content")), vec!["0000000000000000"]);
+        assert!(r.warnings.iter().any(|w| w.contains("next to the Content folder, not inside it")), "{:?}", r.warnings);
+        assert!(no_staging_left(&prof) && no_staging_left(&usb.join("Content")));
+    }
+    // R23 L6: Skip with the folder already there says it was skipped, not "the GOD game goes".
+    let o = ExtractOptions {
+        archive: &zip,
+        dest_parent: &prof,
+        password: None,
+        collision: Collision::Skip,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: false,
+    };
+    let r = extract(&exe(), &o, &Jobs::default(), "ci", &mut |_, _| {}).unwrap();
+    assert!(r.skipped);
+    assert!(r.warnings.iter().any(|w| w.contains("was skipped")), "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.contains("GOD game goes")), "{:?}", r.warnings);
+}
+
+/// R23 M2/L3: in a Content folder a GOD package (header + .data) moves as one unit; half
+/// packages on either side are never mixed, and stray files are left out with a warning.
+#[test]
+fn r23_content_packages_move_as_a_unit() {
+    let d = tmp("r23-unit");
+    let ex = |zip: &Path, prof: &Path, c: Collision| {
+        let o = ExtractOptions {
+            archive: zip,
+            dest_parent: prof,
+            password: None,
+            collision: c,
+            layout: Layout::Folder,
+            skip_junk: true,
+            nested: false,
+        };
+        extract(&exe(), &o, &Jobs::default(), "un", &mut |_, _| {}).unwrap()
+    };
+    let full = d.join("full.zip");
+    write_zip(
+        &full,
+        &[
+            ("415608C3/00007000/AAAA0001", b"NEWHDR", 0o644),
+            ("415608C3/00007000/AAAA0001.data/Data0000", b"NEWDATA", 0o644),
+            ("415608C3/README.txt", b"r", 0o644),
+            ("415608C3/zzz/evil.bin", b"e", 0o644),
+            ("415608C3/00007000/notes.txt", b"n", 0o644),
+        ],
+    );
+    let pk = |prof: &Path| prof.join("415608C3/00007000");
+    // target has only .data: nothing mixed, a clear warning (not "Nothing was changed")
+    let p1 = d.join("a/Content/0000000000000000");
+    fs::create_dir_all(pk(&p1).join("AAAA0001.data")).unwrap();
+    fs::write(pk(&p1).join("AAAA0001.data/Data0000"), b"OLDDATA").unwrap();
+    let r = ex(&full, &p1, Collision::Number);
+    assert!(!pk(&p1).join("AAAA0001").exists(), "no new header over old data");
+    assert_eq!(fs::read(pk(&p1).join("AAAA0001.data/Data0000")).unwrap(), b"OLDDATA");
+    assert!(r.warnings.iter().any(|w| w.contains("incomplete") && w.contains("no header")), "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.contains("Nothing was changed")), "{:?}", r.warnings);
+    // L3: stray files and folders stay out, with warnings
+    assert_eq!(names_in_dir(&p1.join("415608C3")), vec!["00007000"]);
+    assert_eq!(names_in_dir(&pk(&p1)), vec!["AAAA0001.data"]);
+    assert!(r.warnings.iter().any(|w| w.contains("README.txt") && w.contains("left out")), "{:?}", r.warnings);
+    assert!(r.warnings.iter().any(|w| w.contains("zzz") && w.contains("left out")), "{:?}", r.warnings);
+    // target has only the header: old header not paired with new data
+    let p2 = d.join("b/Content/0000000000000000");
+    fs::create_dir_all(pk(&p2)).unwrap();
+    fs::write(pk(&p2).join("AAAA0001"), b"OLDHDR").unwrap();
+    let r = ex(&full, &p2, Collision::Number);
+    assert!(!pk(&p2).join("AAAA0001.data").exists());
+    assert_eq!(fs::read(pk(&p2).join("AAAA0001")).unwrap(), b"OLDHDR");
+    assert!(r.warnings.iter().any(|w| w.contains("incomplete") && w.contains("no .data")), "{:?}", r.warnings);
+    // Replace with the whole package fixes a half package: both parts are new
+    let r = ex(&full, &p2, Collision::Replace);
+    assert_eq!(fs::read(pk(&p2).join("AAAA0001")).unwrap(), b"NEWHDR");
+    assert_eq!(fs::read(pk(&p2).join("AAAA0001.data/Data0000")).unwrap(), b"NEWDATA");
+    assert!(!r.skipped);
+    // Replace with a header-only archive: refused, the complete package stays as it is
+    let half = d.join("half.zip");
+    write_zip(&half, &[("415608C3/00007000/AAAA0001", b"HALFHDR", 0o644)]);
+    let r = ex(&half, &p2, Collision::Replace);
+    assert_eq!(fs::read(pk(&p2).join("AAAA0001")).unwrap(), b"NEWHDR");
+    assert!(pk(&p2).join("AAAA0001.data/Data0000").is_file());
+    assert!(r.warnings.iter().any(|w| w.contains("only half")), "{:?}", r.warnings);
+}
+
+/// R24 L2/L3/INFO: packages are matched by MediaID case-insensitively, the summary line is only
+/// "already there" when it is, and Replace swaps the pair without losing the old one first.
+#[test]
+fn r24_content_units_case_summary_and_replace() {
+    let td = crate::testutil::TmpDir::new("arch-r24-units");
+    let run = |name: &str, setup: &dyn Fn(&Path, &Path), col: Collision| {
+        let st = td.path().join(format!("{name}-st"));
+        let prof = td.path().join(format!("{name}-prof"));
+        let tree = st.join("4D5307E6");
+        fs::create_dir_all(tree.join("00007000")).unwrap();
+        fs::create_dir_all(&prof).unwrap();
+        setup(&tree.join("00007000"), &prof.join("4D5307E6").join("00007000"));
+        let r = place_title_trees(&st, &[tree], &prof, col, 1, 0, 0, vec![], &Jobs::default(), "t", &mut |_, _| {}).unwrap();
+        (r, prof.join("4D5307E6").join("00007000"))
+    };
+    let pkg = |d: &Path, data: &str, body: &[u8]| {
+        fs::write(d.join(&data[..8]), body).unwrap();
+        fs::create_dir_all(d.join(data)).unwrap();
+        fs::write(d.join(data).join("Data0000"), body).unwrap();
+    };
+    // L2: an upper-case .DATA folder is a whole package and is copied with its real name.
+    let (r, dst) = run("upper", &|s, _| pkg(s, "abcd0001.DATA", b"N"), Collision::Skip);
+    assert!(dst.join("abcd0001.DATA").join("Data0000").is_file(), "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.contains("only half")), "{:?}", r.warnings);
+    // L2: already on the drive under another case -> skipped as present, nothing duplicated.
+    let (r, dst) = run(
+        "present",
+        &|s, d| {
+            pkg(s, "abcd0001.data", b"N");
+            fs::create_dir_all(d).unwrap();
+            pkg(d, "ABCD0001.DATA", b"O");
+        },
+        Collision::Skip,
+    );
+    assert!(r.warnings.iter().any(|w| w.contains("every package was already there")), "{:?}", r.warnings);
+    assert_eq!(names_in_dir(&dst).len(), 2);
+    // L3: half package in the archive -> no "already there" claim.
+    let (r, _) = run("half", &|s, _| fs::write(s.join("abcd0001"), b"N").unwrap(), Collision::Skip);
+    assert!(r.warnings.iter().any(|w| w.contains("only half")), "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.contains("already there")), "{:?}", r.warnings);
+    // L3: incomplete on the drive -> no "already there" claim either.
+    let (r, _) = run(
+        "incomplete",
+        &|s, d| {
+            pkg(s, "abcd0001.data", b"N");
+            fs::create_dir_all(d).unwrap();
+            fs::write(d.join("abcd0001"), b"O").unwrap();
+        },
+        Collision::Skip,
+    );
+    assert!(r.warnings.iter().any(|w| w.contains("is incomplete")), "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.contains("already there")), "{:?}", r.warnings);
+    // Replace: the new pair lands, the old (differently cased) pair and the aside copies are gone.
+    let (r, dst) = run(
+        "replace",
+        &|s, d| {
+            pkg(s, "abcd0001.data", b"N");
+            fs::create_dir_all(d).unwrap();
+            pkg(d, "ABCD0001.DATA", b"O");
+        },
+        Collision::Replace,
+    );
+    assert!(r.warnings.iter().any(|w| w.contains("replaced")), "{:?}", r.warnings);
+    assert_eq!(names_in_dir(&dst), ["abcd0001", "abcd0001.data"]);
+    assert_eq!(fs::read(dst.join("abcd0001.data").join("Data0000")).unwrap(), b"N");
+}
+
+/// R25/R27: a failed Replace puts the old pair back and leaves no manifest; asides without a
+/// manifest are only reported (with correct grammar) and never moved or deleted; a stale aside
+/// name is never reused.
+#[test]
+fn r25_replace_all_or_nothing_and_leftover_asides() {
+    let td = crate::testutil::TmpDir::new("arch-r25-aside");
+    let d = td.path().join("dst");
+    fs::create_dir_all(d.join("ABCD0001.data")).unwrap();
+    fs::write(d.join("ABCD0001"), b"OLD").unwrap();
+    fs::write(d.join("ABCD0001.data").join("Data0000"), b"OLD").unwrap();
+    let sh = td.path().join("abcd0001");
+    fs::write(&sh, b"NEW").unwrap();
+    let sd0 = td.path().join("x").join("abcd0001.data");
+    fs::create_dir_all(&sd0).unwrap();
+    let (dh, dd) = (d.join("abcd0001"), d.join("abcd0001.data"));
+    // The new .data vanishes after the old pair is set aside: its move fails, undo runs.
+    let _serial = R27_PAUSE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let blk = sd0.clone();
+    *REPLACE_PAUSE.lock().unwrap() = Some(Box::new(move |n| {
+        if std::thread::current().name() == Some("r25-undo") && n == 5 {
+            fs::remove_dir_all(&blk).unwrap();
+        }
+    }));
+    let (d2, sh2, dh2, sd2, dd2) = (d.clone(), sh.clone(), dh.clone(), sd0.clone(), dd.clone());
+    let e = std::thread::Builder::new()
+        .name("r25-undo".into())
+        .spawn(move || replace_unit(&d2, [Some(d2.join("ABCD0001")), Some(d2.join("ABCD0001.data"))], [(&sh2, &dh2), (&sd2, &dd2)]))
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap_err();
+    *REPLACE_PAUSE.lock().unwrap() = None;
+
+    assert!(e.contains("left as it was"), "{e}");
+    assert_eq!(names_in_dir(&d), ["ABCD0001", "ABCD0001.data"], "old pair back, no manifest left");
+    assert_eq!(fs::read(d.join("ABCD0001")).unwrap(), b"OLD");
+    // One stray aside: reported in the singular, untouched.
+    fs::write(d.join(".unpack-old.0.ABCD0001"), b"PRECIOUS").unwrap();
+    let mut w = vec![];
+    recover_asides(&d, &mut w);
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains(" is left over") && w[0].contains("it was not touched"), "{w:?}");
+    assert_eq!(fs::read(d.join(".unpack-old.0.ABCD0001")).unwrap(), b"PRECIOUS");
+    // Two: plural.
+    fs::create_dir_all(d.join(".unpack-old.1.ABCD0001.data")).unwrap();
+    let mut w = vec![];
+    recover_asides(&d, &mut w);
+    assert!(w[0].contains(" are left over") && w[0].contains("they were not touched"), "{w:?}");
+    fs::remove_dir(d.join(".unpack-old.1.ABCD0001.data")).unwrap();
+    // A successful Replace with a stale aside present uses a fresh tag and keeps the stale one.
+    fs::write(&sh, b"NEW").unwrap();
+    let sd = td.path().join("abcd0001.data");
+    fs::create_dir_all(&sd).unwrap();
+    fs::write(sd.join("Data0000"), b"NEW").unwrap();
+    replace_unit(&d, [Some(d.join("ABCD0001")), Some(d.join("ABCD0001.data"))], [(&sh, &dh), (&sd, &dd)]).unwrap();
+    assert_eq!(fs::read(d.join(".unpack-old.0.ABCD0001")).unwrap(), b"PRECIOUS");
+    assert_eq!(fs::read(dd.join("Data0000")).unwrap(), b"NEW");
+    assert_eq!(names_in_dir(&d), [".unpack-old.0.ABCD0001", "abcd0001", "abcd0001.data"]);
+    // A damaged manifest is reported, nothing moved.
+    fs::write(d.join(".unpack-replace.7.json"), b"{not json").unwrap();
+    let mut w = vec![];
+    recover_asides(&d, &mut w);
+    assert!(w.iter().any(|x| x.contains("couldn't be read")), "{w:?}");
+    assert!(d.join(".unpack-replace.7.json").exists());
+}
+
+/// R27 H: move_new never replaces a file or merges into an existing folder.
+#[test]
+fn r27_move_new_refuses_existing_destination() {
+    let td = crate::testutil::TmpDir::new("arch-r27-movenew");
+    let d = td.path();
+    fs::create_dir_all(d.join("src.data")).unwrap();
+    fs::write(d.join("src.data").join("a"), b"N").unwrap();
+    fs::create_dir_all(d.join("dst.data")).unwrap();
+    fs::write(d.join("dst.data").join("b"), b"O").unwrap();
+    let e = move_new(&d.join("src.data"), &d.join("dst.data")).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(names_in_dir(&d.join("dst.data")), ["b"], "no merge");
+    assert!(d.join("src.data").join("a").exists());
+    fs::write(d.join("f"), b"N").unwrap();
+    fs::write(d.join("g"), b"O").unwrap();
+    assert!(move_new(&d.join("f"), &d.join("g")).is_err());
+    assert_eq!(fs::read(d.join("g")).unwrap(), b"O");
+    move_new(&d.join("f"), &d.join("h")).unwrap();
+    assert_eq!(fs::read(d.join("h")).unwrap(), b"N");
+}
+
+fn r27_setup(prof: &Path) -> PathBuf {
+    let dst = prof.join("4D5307E6").join("00007000");
+    fs::create_dir_all(dst.join("ABCD0001.data")).unwrap();
+    fs::write(dst.join("ABCD0001"), b"OLD").unwrap();
+    fs::write(dst.join("ABCD0001.data").join("Data0000"), b"OLD").unwrap();
+    dst
+}
+
+fn r27_stage(root: &Path, tag: &str, body: &[u8]) -> (PathBuf, PathBuf) {
+    let st = root.join(format!("st-{tag}"));
+    let ct = st.join("4D5307E6").join("00007000");
+    fs::create_dir_all(ct.join("abcd0001.data")).unwrap();
+    fs::write(ct.join("abcd0001"), body).unwrap();
+    fs::write(ct.join("abcd0001.data").join("Data0000"), body).unwrap();
+    (st.clone(), st.join("4D5307E6"))
+}
+
+/// The whole folder's state: the live pair (must match), and every byte body found anywhere.
+fn r27_check(dst: &Path, ctx: &str) -> Vec<u8> {
+    let live = |n: &str| fs::read_dir(dst).unwrap().flatten().find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(n)).map(|e| e.path());
+    let h = fs::read(live("abcd0001").unwrap_or_else(|| panic!("{ctx}: header {:?}", names_in_dir(dst)))).unwrap();
+    let d = fs::read(live("abcd0001.data").unwrap_or_else(|| panic!("{ctx}: data {:?}", names_in_dir(dst))).join("Data0000")).unwrap();
+    assert_eq!(h, d, "{ctx}: never a mixed package {:?}", names_in_dir(dst));
+    assert!(!names_in_dir(dst).iter().any(|n| n.starts_with(".unpack-replace.")), "{ctx}: note and temp note gone {:?}", names_in_dir(dst));
+    h
+}
+
+/// R27 M: a Replace killed right before each of its steps (1 manifest, 2-3 old halves aside,
+/// 4-5 new halves in, 6 mark finishing, 7-8 delete asides, 9 delete manifest) is recovered on
+/// the next run to a whole package (old before the new pair is complete, new after), with a
+/// true message and nothing of the old copy lost.
+#[test]
+fn r27_killed_replace_recovers_whole_pair() {
+    let td = crate::testutil::TmpDir::new("arch-r27-kill");
+    for step in 1..=10 {
+        let prof = td.path().join(format!("prof{step}"));
+        let dst = r27_setup(&prof);
+        let (st, tree) = r27_stage(td.path(), &format!("{step}a"), b"NEW");
+        REPLACE_KILL_AT.with(|k| k.set(step));
+        let r = place_title_trees(&st, &[tree], &prof, Collision::Replace, 1, 0, 0, vec![], &Jobs::default(), "t", &mut |_, _| {});
+        REPLACE_KILL_AT.with(|k| k.set(0));
+        assert_eq!(r.is_err(), step <= 9, "step {step}");
+        let (st, tree) = r27_stage(td.path(), &format!("{step}b"), b"NEW");
+        let r = place_title_trees(&st, &[tree], &prof, Collision::Skip, 1, 0, 0, vec![], &Jobs::default(), "t", &mut |_, _| {}).unwrap();
+        let ctx = format!("step {step}: {:?}", r.warnings);
+        let h = r27_check(&dst, &ctx);
+        let finished = step >= 6;
+        assert_eq!(h, if finished { b"NEW" } else { b"OLD" }, "{ctx}");
+        let put_back = r.warnings.iter().any(|w| w.contains("put the old package back"));
+        let cleaned = r.warnings.iter().any(|w| w.contains("had finished moving the new copy in"));
+        assert_eq!(put_back, (3..=5).contains(&step), "{ctx}");
+        assert_eq!(cleaned, (6..=8).contains(&step), "{ctx}");
+        if step == 5 {
+            assert!(r.warnings.iter().any(|w| w.contains("set aside as") && w.contains(".unpack-new.")), "{ctx}");
+        }
+        if !finished {
+            assert!(!names_in_dir(&dst).iter().any(|n| n.starts_with(".unpack-old.")), "{ctx}: no old aside left");
+        } else {
+            assert_eq!(names_in_dir(&dst), ["abcd0001", "abcd0001.data"], "{ctx}");
+        }
+        assert!(r.warnings.iter().any(|w| w.contains("already there")), "{ctx}");
+    }
+}
+
+/// R27 M: every double crash. The Replace is killed before step k, the first recovery is killed
+/// before its write j, and a final recovery must still leave one whole package, the right one,
+/// with no manifest left behind.
+#[test]
+fn r27_double_crash_every_case() {
+    let td = crate::testutil::TmpDir::new("arch-r27-double");
+    let mut cases = 0;
+    for k in 2..=9 {
+        for j in 1..=8 {
+            let prof = td.path().join(format!("p{k}-{j}"));
+            let dst = r27_setup(&prof);
+            let (st, tree) = r27_stage(td.path(), &format!("{k}-{j}a"), b"NEW");
+            REPLACE_KILL_AT.with(|x| x.set(k));
+            assert!(place_title_trees(&st, &[tree], &prof, Collision::Replace, 1, 0, 0, vec![], &Jobs::default(), "t", &mut |_, _| {}).is_err());
+            REPLACE_KILL_AT.with(|x| x.set(0));
+            RECOVER_KILL_AT.with(|x| x.set(j));
+            let mut w1 = vec![];
+            recover_asides(&dst, &mut w1);
+            RECOVER_KILL_AT.with(|x| x.set(0));
+            let mut w2 = vec![];
+            recover_asides(&dst, &mut w2);
+            let ctx = format!("k={k} j={j}: {w1:?} / {w2:?} {:?}", names_in_dir(&dst));
+            let h = r27_check(&dst, &ctx);
+            assert_eq!(h, if k >= 6 { b"NEW" } else { b"OLD" }, "{ctx}");
+            assert!(!names_in_dir(&dst).iter().any(|n| n.starts_with(".unpack-old.")), "{ctx}");
+            // A third pass has nothing to do.
+            let mut w3 = vec![];
+            recover_asides(&dst, &mut w3);
+            assert!(w3.is_empty(), "{ctx}: {w3:?}");
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 64);
+}
+
+/// R27 H: two jobs on the same type folder. Job A pauses inside its Replace at each step in
+/// turn; job B (a Replace of the same package, or an add of another) must wait for A's lock
+/// and never repair or touch A's half-done Replace. The end state is whole and consistent.
+#[test]
+fn r27_concurrent_jobs_are_serialized_per_type_folder() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    let _serial = R27_PAUSE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let td = crate::testutil::TmpDir::new("arch-r27-conc");
+    for pause_at in 1..=9 {
+        for b_adds in [false, true] {
+            let prof = td.path().join(format!("c{pause_at}-{b_adds}"));
+            let dst = r27_setup(&prof);
+            let (sta, ta) = r27_stage(td.path(), &format!("c{pause_at}{b_adds}a"), b"AAA");
+            let (stb, tb) = if b_adds {
+                let st = td.path().join(format!("st-c{pause_at}{b_adds}b"));
+                let ct = st.join("4D5307E6").join("00007000");
+                fs::create_dir_all(ct.join("beef0002.data")).unwrap();
+                fs::write(ct.join("beef0002"), b"BBB").unwrap();
+                fs::write(ct.join("beef0002.data").join("Data0000"), b"BBB").unwrap();
+                (st.clone(), st.join("4D5307E6"))
+            } else {
+                r27_stage(td.path(), &format!("c{pause_at}{b_adds}b"), b"BBB")
+            };
+            let (paused_tx, paused_rx) = mpsc::channel::<()>();
+            let (go_tx, go_rx) = mpsc::channel::<()>();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let go_rx = Mutex::new(go_rx);
+            let paused_tx = Mutex::new(paused_tx);
+            let h2 = hits.clone();
+            *REPLACE_PAUSE.lock().unwrap() = Some(Box::new(move |n| {
+                if std::thread::current().name() == Some("r27-a") && n == pause_at && h2.fetch_add(1, Ordering::SeqCst) == 0 {
+                    paused_tx.lock().unwrap().send(()).unwrap();
+                    go_rx.lock().unwrap().recv().unwrap();
+                }
+            }));
+            let pa = prof.clone();
+            let a = std::thread::Builder::new()
+                .name("r27-a".into())
+                .spawn(move || place_title_trees(&sta, &[ta], &pa, Collision::Replace, 1, 0, 0, vec![], &Jobs::default(), "a", &mut |_, _| {}))
+                .unwrap();
+            paused_rx.recv().unwrap();
+            let b_done = Arc::new(AtomicUsize::new(0));
+            let (pb, bd) = (prof.clone(), b_done.clone());
+            let b = std::thread::spawn(move || {
+                let r = place_title_trees(&stb, &[tb], &pb, Collision::Replace, 1, 0, 0, vec![], &Jobs::default(), "b", &mut |_, _| {});
+                bd.store(1, Ordering::SeqCst);
+                r
+            });
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            assert_eq!(b_done.load(Ordering::SeqCst), 0, "pause {pause_at}: B waited for A");
+            go_tx.send(()).unwrap();
+            let ra = a.join().unwrap().unwrap();
+            let rb = b.join().unwrap().unwrap();
+            *REPLACE_PAUSE.lock().unwrap() = None;
+            let ctx = format!("pause {pause_at} add={b_adds}: {:?} / {:?}", ra.warnings, rb.warnings);
+            assert!(!rb.warnings.iter().any(|w| w.contains("earlier Replace")), "{ctx}: B never repaired A");
+            let h = r27_check(&dst, &ctx);
+            assert_eq!(h, if b_adds { b"AAA" } else { b"BBB" }, "{ctx}");
+            let mut want = vec!["abcd0001", "abcd0001.data"];
+            if b_adds {
+                want.extend(["beef0002", "beef0002.data"]);
+            }
+            assert_eq!(names_in_dir(&dst), want, "{ctx}");
+        }
+    }
+}
+
+static R27_PAUSE_TEST: Mutex<()> = Mutex::new(());
+
+/// R26/R27 L: staging left by a killed run is removed only when its lock is a real, free file
+/// with Unpack's signature; one in use is left alone silently; anything else is reported.
+#[test]
+fn r26_stale_staging_is_swept_or_reported() {
+    let td = crate::testutil::TmpDir::new("arch-r26-sweep");
+    let d = td.path();
+    let mk = |n: &str| {
+        fs::create_dir_all(d.join(n).join("sub")).unwrap();
+        fs::write(d.join(n).join("sub").join("f"), b"x").unwrap();
+    };
+    // The lock is made before the folder.
+    drop(lock_staging(&d.join(".unpack-tmp-dead")).expect("lock"));
+    mk(".unpack-tmp-dead");
+    let held = lock_staging(&d.join(".unpack-tmp-busy")).expect("lock");
+    assert!(lock_staging(&d.join(".unpack-tmp-busy")).is_none(), "never reuses a lock file");
+    mk(".unpack-tmp-busy");
+    mk(".unpack-tmp-nolock");
+    mk(".unpack-tmp-foreign");
+    fs::write(d.join(".unpack-tmp-foreign.lock"), b"someone else").unwrap();
+    mk(".unpack-tmp-own");
+    // A lock with no folder (killed between the two) is tidied when it's ours and free.
+    drop(lock_staging(&d.join(".unpack-tmp-orphan")).expect("lock"));
+    #[cfg(unix)]
+    {
+        mk(".unpack-tmp-link");
+        fs::write(d.join("target.lock"), b"unpack-staging v1").unwrap();
+        std::os::unix::fs::symlink(d.join("target.lock"), d.join(".unpack-tmp-link.lock")).unwrap();
+    }
+    let mut w = vec![];
+    sweep_stale_staging(d, &d.join(".unpack-tmp-own"), &mut w);
+    assert!(!d.join(".unpack-tmp-dead").exists() && !d.join(".unpack-tmp-dead.lock").exists());
+    assert!(!d.join(".unpack-tmp-orphan.lock").exists());
+    assert!(d.join(".unpack-tmp-busy/sub/f").exists() && d.join(".unpack-tmp-busy.lock").exists(), "in use: untouched");
+    assert!(d.join(".unpack-tmp-nolock/sub/f").exists() && d.join(".unpack-tmp-own/sub/f").exists());
+    assert!(d.join(".unpack-tmp-foreign/sub/f").exists());
+    assert!(w.iter().any(|x| x.contains(".unpack-tmp-nolock") && x.contains("no lock file")), "{w:?}");
+    assert!(w.iter().any(|x| x.contains(".unpack-tmp-foreign") && x.contains("isn't one of mine")), "{w:?}");
+    #[cfg(unix)]
+    {
+        assert!(d.join(".unpack-tmp-link/sub/f").exists() && d.join("target.lock").exists());
+        assert!(w.iter().any(|x| x.contains(".unpack-tmp-link") && x.contains("is a link")), "{w:?}");
+    }
+    assert!(!w.iter().any(|x| x.contains("busy")), "{w:?}");
+    drop(held);
+}
+
+/// R28 M: hand-made hostile notes are reported and nothing is moved or deleted.
+#[test]
+fn r28_hostile_notes_are_reported_not_acted_on() {
+    let td = crate::testutil::TmpDir::new("arch-r28-hostile");
+    let notes = [
+        // The three Overseer triggers.
+        r#"{"phase":"finishing","old":[["ABCD0001","ABCD0002.data",true]],"new":[]}"#,
+        r#"{"phase":"finishing","old":[["X","ABCD0002",false]],"new":[]}"#,
+        r#"{"phase":"undoing","old":[["ABCD0009","ABCD0002",false]],"new":[]}"#,
+        // Aside names with another tag, or the right shape but someone else's package.
+        r#"{"phase":"finishing","old":[["ABCD0002",".unpack-old.5.ABCD0002",false]],"new":[["abcd0002",".unpack-new.5.abcd0002",false,""],["abcd0002.data",".unpack-new.5.abcd0002.data",true,""]]}"#,
+        // Mixed MediaIDs.
+        r#"{"phase":"finishing","old":[["ABCD0002",".unpack-old.0.ABCD0002",false]],"new":[["abcd0001",".unpack-new.0.abcd0001",false,""],["abcd0001.data",".unpack-new.0.abcd0001.data",true,""]]}"#,
+        // Unknown phase.
+        r#"{"phase":"nuke","old":[["ABCD0002",".unpack-old.0.ABCD0002",false]],"new":[["ABCD0002",".unpack-new.0.ABCD0002",false,""],["ABCD0002.data",".unpack-new.0.ABCD0002.data",true,""]]}"#,
+        // is_data flag lying.
+        r#"{"phase":"finishing","old":[["ABCD0002.data",".unpack-old.0.ABCD0002.data",false]],"new":[["ABCD0002",".unpack-new.0.ABCD0002",false,""],["ABCD0002.data",".unpack-new.0.ABCD0002.data",true,""]]}"#,
+        // Not hex.
+        r#"{"phase":"finishing","old":[["ZZZZ0002",".unpack-old.0.ZZZZ0002",false]],"new":[["ZZZZ0002",".unpack-new.0.ZZZZ0002",false,""],["ZZZZ0002.data",".unpack-new.0.ZZZZ0002.data",true,""]]}"#,
+    ];
+    for (i, note) in notes.iter().enumerate() {
+        let d = td.path().join(format!("n{i}"));
+        fs::create_dir_all(d.join("ABCD0002.data")).unwrap();
+        fs::write(d.join("ABCD0002"), b"DISC2").unwrap();
+        fs::write(d.join("ABCD0002.data").join("Data0000"), b"DISC2").unwrap();
+        fs::write(d.join(".unpack-old.0.ABCD0002"), b"KEEP").unwrap();
+        fs::write(d.join(".unpack-replace.0.json"), note).unwrap();
+        let before = names_in_dir(&d);
+        let mut w = vec![];
+        recover_asides(&d, &mut w);
+        assert!(w.iter().any(|x| x.contains("isn't one I can trust")), "note {i}: {w:?}");
+        assert!(!w.iter().any(|x| x.contains("removed the old copy") || x.contains("put the old package back")), "note {i}: {w:?}");
+        assert_eq!(names_in_dir(&d), before, "note {i}: nothing moved");
+        assert_eq!(fs::read(d.join("ABCD0002")).unwrap(), b"DISC2");
+        assert_eq!(fs::read(d.join("ABCD0002.data").join("Data0000")).unwrap(), b"DISC2");
+        assert_eq!(fs::read(d.join(".unpack-old.0.ABCD0002")).unwrap(), b"KEEP");
+    }
+}
+
+/// R28 H: undo removes only what still matches what it moved in, and never puts an old half
+/// back over something; whatever it can't prove is reported and left.
+#[test]
+fn r28_undo_leaves_what_it_cannot_prove() {
+    let _serial = R27_PAUSE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let td = crate::testutil::TmpDir::new("arch-r28-undo");
+    let d = td.path().join("dst");
+    fs::create_dir_all(d.join("ABCD0001.data")).unwrap();
+    fs::write(d.join("ABCD0001"), b"OLD").unwrap();
+    fs::write(d.join("ABCD0001.data").join("Data0000"), b"OLD").unwrap();
+    let sh = td.path().join("abcd0001");
+    fs::write(&sh, b"NEW").unwrap();
+    let sd = td.path().join("abcd0001.data");
+    fs::create_dir_all(&sd).unwrap();
+    fs::write(sd.join("Data0000"), b"NEW").unwrap();
+    let (dh, dd) = (d.join("abcd0001"), d.join("abcd0001.data"));
+    let dc = d.clone();
+    *REPLACE_PAUSE.lock().unwrap() = Some(Box::new(move |n| {
+        if std::thread::current().name() == Some("r28-undo") && n == 5 {
+            // Someone else swaps the header we just moved in and takes the .data's place
+            // (and the old header's).
+            fs::write(dc.join("abcd0001"), b"FOREIGN").unwrap();
+            fs::create_dir_all(dc.join("abcd0001.data")).unwrap();
+            #[cfg(not(windows))]
+            fs::write(dc.join("ABCD0001"), b"THIRD").unwrap();
+        }
+    }));
+    let e = std::thread::Builder::new()
+        .name("r28-undo".into())
+        .spawn(move || replace_unit(&d.clone(), [Some(d.join("ABCD0001")), Some(d.join("ABCD0001.data"))], [(&sh, &dh), (&sd, &dd)]))
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap_err();
+    *REPLACE_PAUSE.lock().unwrap() = None;
+    let d = td.path().join("dst");
+    assert!(e.contains("no longer what I moved there") && e.contains("something else is in its place"), "{e}");
+    assert_eq!(fs::read(d.join("abcd0001")).unwrap(), b"FOREIGN", "not deleted");
+    #[cfg(not(windows))]
+    assert_eq!(fs::read(d.join("ABCD0001")).unwrap(), b"THIRD", "not overwritten");
+    let tag_old = names_in_dir(&d).into_iter().find(|n| n.starts_with(".unpack-old.") && n.ends_with("ABCD0001")).expect("old header kept aside");
+    assert_eq!(fs::read(d.join(tag_old)).unwrap(), b"OLD");
+    #[cfg(not(windows))]
+    assert!(d.join("ABCD0001.data").join("Data0000").exists(), "old .data back");
+    assert!(names_in_dir(&d).iter().any(|n| n.starts_with(".unpack-replace.") && n.ends_with(".json")), "note kept for the user");
+}
+
+/// R28 L: a temp note left by a kill mid-write is removed when it is provably ours, and
+/// reported otherwise.
+#[test]
+fn r28_stale_temp_notes() {
+    let td = crate::testutil::TmpDir::new("arch-r28-tmp");
+    let d = td.path();
+    let ours = r#"{"phase":"replacing","old":[["ABCD0001",".unpack-old.3.ABCD0001",false]],"new":[["abcd0001",".unpack-new.3.abcd0001",false,"x"],["abcd0001.data",".unpack-new.3.abcd0001.data",true,"y"]]}"#;
+    fs::write(d.join(".unpack-replace.3.tmp"), ours).unwrap();
+    fs::write(d.join(".unpack-replace.4.tmp"), b"{half wr").unwrap();
+    let mut w = vec![];
+    recover_asides(d, &mut w);
+    assert!(!d.join(".unpack-replace.3.tmp").exists());
+    assert!(d.join(".unpack-replace.4.tmp").exists());
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains(".unpack-replace.4.tmp") && w[0].contains("not touched"), "{w:?}");
+}
+
+/// R28 H helper: one Unpack job in its own process. Driven by r28_two_processes_*; does
+/// nothing when run on its own.
+#[test]
+#[ignore]
+fn r28_child_job() {
+    let Ok(prof) = std::env::var("R28_PROF") else { return };
+    let st = PathBuf::from(std::env::var("R28_STAGE").unwrap());
+    let ctl = PathBuf::from(std::env::var("R28_CTL").unwrap());
+    let pause: usize = std::env::var("R28_PAUSE").ok().and_then(|x| x.parse().ok()).unwrap_or(0);
+    if pause > 0 {
+        let c = ctl.clone();
+        *REPLACE_PAUSE.lock().unwrap() = Some(Box::new(move |n| {
+            if n == pause {
+                fs::write(c.join("paused"), b"").unwrap();
+                while !c.join("go").exists() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }));
+    }
+    let col = if std::env::var("R28_SKIP").is_ok() { Collision::Skip } else { Collision::Replace };
+    let r = place_title_trees(&st, &[st.join("4D5307E6")], Path::new(&prof), col, 1, 0, 0, vec![], &Jobs::default(), "c", &mut |_, m| {
+        let _ = fs::write(ctl.join("waiting"), m);
+    });
+    fs::write(ctl.join(if pause > 0 { "a.out" } else { "b.out" }), format!("{:?}", r.map(|r| r.warnings))).unwrap();
+}
+
+/// R28 H: two real processes on one Content folder. Process A's Replace is held at each step in
+/// turn; process B (Skip disc 2, Skip the same package, or Replace the same package) must wait
+/// for A's lock and never repair A's Replace. A finishes cleanly; the end state is consistent.
+#[test]
+fn r28_two_processes_are_serialized() {
+    let td = crate::testutil::TmpDir::new("arch-r28-proc");
+    let exe = std::env::current_exe().unwrap();
+    let spawn = |prof: &Path, st: &Path, ctl: &Path, pause: usize, skip: bool| {
+        let mut c = Command::new(&exe);
+        c.args(["archive::tests::r28_child_job", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+            .env("R28_PROF", prof)
+            .env("R28_STAGE", st)
+            .env("R28_CTL", ctl)
+            .env("R28_PAUSE", pause.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if skip {
+            c.env("R28_SKIP", "1");
+        }
+        c.spawn().unwrap()
+    };
+    let wait_for = |p: &Path| {
+        let t = Instant::now();
+        while !p.exists() {
+            assert!(t.elapsed() < Duration::from_secs(60), "timed out waiting for {}", p.display());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    for pause in [1, 3, 4, 5, 6, 8] {
+        for variant in ["skip-disc2", "skip-same", "replace-same"] {
+            let tag = format!("{pause}-{variant}");
+            let prof = td.path().join(format!("p{tag}"));
+            let dst = r27_setup(&prof);
+            let (sta, _) = r27_stage(td.path(), &format!("{tag}a"), b"AAA");
+            let (stb, _) = if variant == "skip-disc2" {
+                let st = td.path().join(format!("st-{tag}b"));
+                let ct = st.join("4D5307E6").join("00007000");
+                fs::create_dir_all(ct.join("beef0002.data")).unwrap();
+                fs::write(ct.join("beef0002"), b"BBB").unwrap();
+                fs::write(ct.join("beef0002.data").join("Data0000"), b"BBB").unwrap();
+                (st.clone(), st.join("4D5307E6"))
+            } else {
+                r27_stage(td.path(), &format!("{tag}b"), b"BBB")
+            };
+            let (ca, cb) = (td.path().join(format!("ctl-{tag}-a")), td.path().join(format!("ctl-{tag}-b")));
+            fs::create_dir_all(&ca).unwrap();
+            fs::create_dir_all(&cb).unwrap();
+            let mut a = spawn(&prof, &sta, &ca, pause, false);
+            wait_for(&ca.join("paused"));
+            // R29: the Overseer attack: delete (k4) or replace (k5) the lock while A holds it.
+            if pause == 4 {
+                let _ = fs::remove_file(dst.join(FOLDER_LOCK));
+            } else if pause == 5 {
+                fs::write(dst.join(".x"), b"x").unwrap();
+                let _ = fs::rename(dst.join(".x"), dst.join(FOLDER_LOCK));
+                let _ = fs::remove_file(dst.join(".x"));
+            }
+            let mut b = spawn(&prof, &stb, &cb, 0, variant != "replace-same");
+            wait_for(&cb.join("waiting"));
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(b.try_wait().unwrap().is_none() && !cb.join("b.out").exists(), "{tag}: B waits for A");
+            fs::write(ca.join("go"), b"").unwrap();
+            assert!(a.wait().unwrap().success(), "{tag}");
+            assert!(b.wait().unwrap().success(), "{tag}");
+            let (ra, rb) = (fs::read_to_string(ca.join("a.out")).unwrap(), fs::read_to_string(cb.join("b.out")).unwrap());
+            let ctx = format!("{tag}: A {ra} / B {rb}");
+            assert!(ra.starts_with("Ok(") && ra.contains("replaced"), "{ctx}");
+            assert!(rb.starts_with("Ok(") && !rb.contains("earlier Replace"), "{ctx}: B never repaired A");
+            let h = r27_check(&dst, &ctx);
+            assert_eq!(h, if variant == "replace-same" { b"BBB" } else { b"AAA" }, "{ctx}");
+            let mut want = vec!["abcd0001", "abcd0001.data"];
+            if variant == "skip-disc2" {
+                want.extend(["beef0002", "beef0002.data"]);
+            }
+            assert_eq!(names_in_dir(&dst), want, "{ctx}");
+        }
+    }
+}
+
+/// R29 M: deleting or replacing the lock while it is held never lets a second job in.
+#[test]
+fn r29_lock_survives_delete_and_replace() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let td = crate::testutil::TmpDir::new("arch-r29-lock");
+    for attack in ["delete", "replace"] {
+        let ct = td.path().join(attack).join("4D5307E6").join("00007000");
+        let held = lock_type_folder(&ct, &|| false, &mut || {}).unwrap();
+        let lp = ct.join(FOLDER_LOCK);
+        let other = ct.join(".other");
+        fs::write(&other, b"x").unwrap();
+        let r = if attack == "delete" { fs::remove_file(&lp) } else { fs::rename(&other, &lp) };
+        if cfg!(windows) {
+            assert!(r.is_err(), "{attack}: the held lock file can't be deleted or replaced");
+        }
+        let got = Arc::new(AtomicBool::new(false));
+        let (g, c) = (got.clone(), ct.clone());
+        let b = std::thread::spawn(move || {
+            let l = lock_type_folder(&c, &|| false, &mut || {}).unwrap();
+            g.store(true, Ordering::SeqCst);
+            drop(l);
+        });
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!got.load(Ordering::SeqCst), "{attack}: second job must still wait");
+        drop(held);
+        b.join().unwrap();
+        assert!(got.load(Ordering::SeqCst), "{attack}");
+    }
+}
+
+/// R29 M: if the path is swapped between opening and locking, the lock is retaken on what the
+/// path names now, so two jobs never hold "the" lock on different objects.
+#[test]
+#[cfg(unix)]
+fn r29_lock_identity_is_rechecked() {
+    use std::os::unix::fs::MetadataExt;
+    let td = crate::testutil::TmpDir::new("arch-r29-ident");
+    let ct = td.path().join("00007000");
+    fs::create_dir_all(&ct).unwrap();
+    let old = td.path().join("old");
+    LOCK_RACE.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move |c: &Path| {
+            fs::rename(c, &old).unwrap();
+            fs::create_dir(c).unwrap();
+        }))
+    });
+    let l = lock_type_folder(&ct, &|| false, &mut || {}).unwrap();
+    assert_eq!(l.metadata().unwrap().ino(), fs::metadata(&ct).unwrap().ino(), "locked the folder now at the path");
+    // The swapped-out folder is not locked by us.
+    let o = fs::File::open(td.path().join("old")).unwrap();
+    assert!(o.try_lock().is_ok());
+}
+
+/// R29 M: moves into place never overwrite.
+#[test]
+fn r29_rename_noreplace() {
+    let td = crate::testutil::TmpDir::new("arch-r29-norepl");
+    let d = td.path();
+    fs::write(d.join("a"), b"A").unwrap();
+    fs::write(d.join("b"), b"B").unwrap();
+    let e = rename_noreplace(&d.join("a"), &d.join("b")).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e}");
+    assert_eq!(fs::read(d.join("b")).unwrap(), b"B");
+    fs::create_dir_all(d.join("da")).unwrap();
+    fs::create_dir_all(d.join("db")).unwrap();
+    assert!(rename_noreplace(&d.join("da"), &d.join("db")).is_err(), "not even onto an empty folder");
+    rename_noreplace(&d.join("a"), &d.join("c")).unwrap();
+    assert_eq!(fs::read(d.join("c")).unwrap(), b"A");
+}
+
+/// R29: notes larger than 64 KiB are never read, only reported.
+#[test]
+fn r29_oversized_note_is_refused() {
+    let td = crate::testutil::TmpDir::new("arch-r29-big");
+    let d = td.path();
+    let mut big = br#"{"phase":"finishing","old":[],"new":[]}"#.to_vec();
+    big.resize(70 * 1024, b' ');
+    fs::write(d.join(".unpack-replace.0.json"), &big).unwrap();
+    fs::write(d.join(".unpack-replace.1.tmp"), &big).unwrap();
+    let mut w = vec![];
+    recover_asides(d, &mut w);
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(d.join(".unpack-replace.0.json").exists() && d.join(".unpack-replace.1.tmp").exists());
+}
+
+/// R29: the .data fingerprint sees a same-size change past the first MiB (tail hash).
+#[test]
+fn r29_fingerprint_sees_tail_change() {
+    let td = crate::testutil::TmpDir::new("arch-r29-fp");
+    let d = td.path().join("x.data");
+    fs::create_dir_all(&d).unwrap();
+    let mut body = vec![7u8; 5 << 20];
+    fs::write(d.join("Data0000"), &body).unwrap();
+    let a = fingerprint(&d).unwrap();
+    let n = body.len();
+    body[n - 10] = 8;
+    fs::write(d.join("Data0000"), &body).unwrap();
+    assert_ne!(a, fingerprint(&d).unwrap());
+}

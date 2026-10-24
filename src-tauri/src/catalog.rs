@@ -780,8 +780,10 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let k = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let d = self.dir.join("stage").join(format!(
-            "{}-{n}",
+            "{}-{n}-{k}",
             label
                 .chars()
                 .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
