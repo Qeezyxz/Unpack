@@ -9,7 +9,7 @@ WebView2 is already part of Windows 10 and 11.
 
 ## What’s new in 1.6.0
 
-- **Discord Rich Presence** (optional, on by default, switch in Settings → Discord). Shows the screen you are on and how many jobs run, never file names. Local IPC only.
+- **Discord Rich Presence** (optional, off by default, turn on in Settings → Discord). Shows the screen you are on and how many jobs run, never file names. Local IPC only.
 - **Open zips inside zips** (Settings → Extraction, on by default) with a summary of how many were opened and how many were left closed.
 - **Jobs at once** (Settings → Extraction, 1–4, default 2). Jobs that write the same folder wait for each other.
 - **Multi-disc games.** Disc 1 and Disc 2 end up in one playable folder, in any order; Unpack offers other discs found next to an ISO.
