@@ -490,7 +490,7 @@ fn is_bidi_control(c: char) -> bool {
     )
 }
 
-/// Windows device names (CON, NUL, COM1..9, LPT1..9 incl. superscript ¹²³, CONIN$, CONOUT$).
+/// Windows device names (CON, NUL, COM0..9, LPT0..9 incl. superscript ¹²³, CONIN$, CONOUT$, CLOCK$).
 /// `stem` is the part before the first dot; surrounding spaces/dots are ignored like Windows does.
 pub fn is_windows_reserved_stem(stem: &str) -> bool {
     let s: String = stem
@@ -513,6 +513,9 @@ pub fn is_windows_reserved_stem(stem: &str) -> bool {
             | "NUL"
             | "CONIN$"
             | "CONOUT$"
+            | "CLOCK$"
+            | "COM0"
+            | "LPT0"
             | "COM1"
             | "COM2"
             | "COM3"

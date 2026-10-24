@@ -122,7 +122,7 @@ pub fn parse_list_line(line: &str) -> Option<Entry> {
             }
         }
     };
-    if e.name.is_empty() || e.name == "." || e.name == ".." || e.name.contains('/') {
+    if e.name.is_empty() || e.name == "." || e.name == ".." || e.name.contains('/') || e.name.contains('\\') {
         return None;
     }
     Some(e)
@@ -163,6 +163,71 @@ pub fn check_segment(s: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// A name that came from the console (LIST, or a screenshot entry) and is about to become a
+/// local file name: it must be exactly one plain path segment on every OS (R21 H1).
+pub fn check_local_name(s: &str) -> Result<(), String> {
+    let bad = || Err(format!("The console sent an unsafe file name ({s:?}); nothing was written for it."));
+    if s.is_empty() || s == "." || s == ".." || s.len() > 255 {
+        return bad();
+    }
+    if s.chars().any(|c| (c as u32) < 32 || c as u32 == 127 || "\\/:*?\"<>|".contains(c)) {
+        return bad();
+    }
+    if s.ends_with('.') || s.ends_with(' ') || s.starts_with(' ') {
+        return bad();
+    }
+    let stem = s.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    // R22 INFO: Windows also treats COM¹-³ / LPT¹-³ (superscript digits) and CONIN$/CONOUT$ as devices.
+    // R23 INFO: COM0/LPT0 and CLOCK$ are reserved too (current Windows docs).
+    let digit = |c: char| matches!(c, '0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}');
+    let reserved = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$"
+    )
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.chars().count() == 4
+            && stem.chars().nth(3).is_some_and(digit));
+    if reserved {
+        return bad();
+    }
+    Ok(())
+}
+
+/// `dest/name` for a console-supplied `name`, checked: one segment, and the joined path's
+/// parent is exactly the canonical `dest` (which must exist).
+pub fn local_child(dest: &Path, name: &str) -> Result<PathBuf, String> {
+    check_local_name(name)?;
+    let cdest = dest.canonicalize().map_err(|e| format!("{}: {e}", dest.display()))?;
+    let p = cdest.join(name);
+    if p.parent() != Some(cdest.as_path()) || p.file_name().map(|f| f != std::ffi::OsStr::new(name)).unwrap_or(true) {
+        return Err(format!("The console sent an unsafe file name ({name:?}); nothing was written for it."));
+    }
+    Ok(p)
+}
+
+/// Console folders the file browser must never rename or delete (R21 suggestion): drive roots,
+/// the top-level system folders, profile folders under Content, and the files directly inside
+/// Aurora / DashLaunch (their exe and settings). Returns the message to show, or None.
+pub fn protected_remote(segs: &[String]) -> Option<String> {
+    const TOP: &[&str] = &[
+        "Content", "Aurora", "DashLaunch", "Apps", "Games", "Plugins", "Cache", "Compatibility",
+        "Homebrew", "FSD", "FreeStyle", "XeXMenu", "Xbox360", "Partition1",
+    ];
+    let shown = join_remote(segs);
+    let msg = || Some(format!("{shown} is a console system folder; Unpack won't rename or delete it."));
+    // R22 L(f): trailing spaces/dots don't make a different folder on FATX/Windows.
+    let norm: Vec<&str> = segs.iter().map(|s| s.trim_end_matches([' ', '.'])).collect();
+    let segs = &norm;
+    let is = |i: usize, n: &str| segs.get(i).map(|s| s.eq_ignore_ascii_case(n)).unwrap_or(false);
+    match segs.len() {
+        0 | 1 => Some("Drive roots can't be renamed or deleted.".into()),
+        2 if TOP.iter().any(|t| is(1, t)) => msg(),
+        3 if is(1, "Content") && segs[2].len() == 16 && segs[2].chars().all(|c| c.is_ascii_hexdigit()) => msg(),
+        3 if is(1, "Aurora") || is(1, "DashLaunch") => msg(),
+        _ => None,
+    }
 }
 
 /// Turn any display name into one FATX-safe segment (bad characters become "_", 42 max).
@@ -230,7 +295,7 @@ fn io_err(e: std::io::Error) -> String {
         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => "The console stopped answering (timed out). Check it's on and the FTP server is running.".into(),
         std::io::ErrorKind::ConnectionRefused => "The console refused the connection. Is the FTP server on (Aurora: Settings > Network > FTP)?".into(),
         std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::UnexpectedEof => {
-            "The connection to the console dropped. Check the Wi-Fi or cable and that the console is still on, then send again; the partial .part file is kept and the upload resumes.".into()
+            "The connection to the console dropped. Check the Wi-Fi or cable and that the console is still on, then try again. (For Send to Xbox, the partial .part file is kept and the upload resumes.)".into()
         }
         _ => format!("Network error: {e}"),
     }

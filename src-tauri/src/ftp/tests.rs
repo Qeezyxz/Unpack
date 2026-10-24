@@ -303,7 +303,7 @@ fn serve(c: TcpStream, fs: &Arc<Mutex<Fs>>, size_cmd: bool, unix_list: bool) {
                 .faults
                 .iter_mut()
                 .zip(armed)
-                .find(|(x, a)| *a && x.times > 0 && x.cmd == cmd && x.path == target)
+                .find(|(x, a)| *a && x.times > 0 && x.cmd == cmd && (x.path == target || x.path == "*"))
                 .map(|(x, _)| {
                     x.times -= 1;
                     x.drop
@@ -1389,4 +1389,68 @@ fn existing_different_launch_ini_is_never_replaced() {
         "{:?}",
         fs.log
     );
+}
+
+#[test]
+fn r21_h1_local_names_are_single_segments() {
+    for bad in [
+        "", ".", "..", "a\\b", "..\\..\\x", "a/b", "C:x", "Z:\\tmp\\a", "a\u{1}", "x.", "x ", "CON",
+        "con.txt", "Nul", "COM1.sav", "lpt9", "a*b", "a?b",
+    ] {
+        assert!(check_local_name(bad).is_err(), "{bad:?}");
+    }
+    for ok in ["profile.sav", "shot 1.png", "COM10.png", "CONSOLE.png", "a..b"] {
+        assert!(check_local_name(ok).is_ok(), "{ok:?}");
+    }
+    let td = crate::testutil::TmpDir::new("ftp-localchild");
+    let p = local_child(td.path(), "ok.sav").unwrap();
+    assert_eq!(p.parent().unwrap(), td.path().canonicalize().unwrap());
+    assert!(local_child(td.path(), "..\\x").is_err());
+    // LIST lines with a backslash name are dropped.
+    assert!(parse_list_line("-rw-r--r-- 1 root root 4 Jan 01 2000 ..\\..\\x.txt").is_none());
+}
+
+#[test]
+fn r21_protected_folders_refused_for_rename_and_delete() {
+    let v = |p: &str| split_remote(p).unwrap();
+    for p in [
+        "/Hdd1", "/Hdd1/Content", "/Usb0/content", "/Hdd1/Content/0000000000000000",
+        "/Hdd1/Content/E00012345678ABCD", "/Hdd1/Aurora", "/Hdd1/Aurora/Aurora.xex",
+        "/Hdd1/DashLaunch", "/Hdd1/DashLaunch/default.xex", "/Hdd1/Apps", "/Hdd1/Games",
+    ] {
+        assert!(protected_remote(&v(p)).is_some(), "{p}");
+    }
+    for p in [
+        "/Hdd1/Games/Halo 3", "/Hdd1/Content/0000000000000000/4D5307E6",
+        "/Hdd1/Aurora/Screenshots/shot1.png", "/Hdd1/Apps/MyApp", "/Hdd1/notes.txt",
+    ] {
+        assert!(protected_remote(&v(p)).is_none(), "{p}");
+    }
+}
+
+/// R22 L(f): "Content " / "Content." are the same folder on the console; still protected.
+#[test]
+fn r22_lf_protected_remote_ignores_trailing_space_and_dot() {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    for p in [
+        s(&["Hdd1", "Content "]),
+        s(&["Hdd1", "Content."]),
+        s(&["Hdd1", "content. ."]),
+        s(&["Hdd1", "Aurora.", "Aurora.xex"]),
+        s(&["Hdd1", "Content ", "0000000000000000."]),
+    ] {
+        assert!(protected_remote(&p).is_some(), "{p:?}");
+    }
+    assert!(protected_remote(&s(&["Hdd1", "Content2"])).is_none());
+}
+
+/// R22 INFO: superscript-digit device names and the console devices are refused as local names.
+#[test]
+fn r22_info_device_names_with_superscripts_and_conin() {
+    for bad in ["COM¹.png", "com².txt", "LPT³", "CONIN$", "conout$.log", "CONIN$.png", "COM\u{b9}", "COM0", "lpt0.txt", "CLOCK$", "clock$.png"] {
+        assert!(check_local_name(bad).is_err(), "{bad}");
+    }
+    for ok in ["COM10.png", "CONINX.txt", "console.png", "CLOCK.txt", "com.png"] {
+        assert!(check_local_name(ok).is_ok(), "{ok}");
+    }
 }
