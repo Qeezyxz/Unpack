@@ -159,6 +159,12 @@ pub struct LibraryIndex {
     pub scanned_at: u64,
     pub stale: bool,
     pub games: Vec<Game>,
+    /// Library folders this index was built from; a cache for other folders is ignored.
+    #[serde(default)]
+    pub libraries: Vec<String>,
+    /// True when served from the on-disk cache (the UI then refreshes in the background).
+    #[serde(default)]
+    pub cached: bool,
 }
 
 /// Scan libraries, optionally reuse a recent on-disk cache, and warm cover art cache.
@@ -173,20 +179,17 @@ pub fn index_cached(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if max_age_secs > 0 && cache_file.is_file() {
-        if let Ok(bytes) = fs::read(&cache_file) {
-            if let Ok(idx) = serde_json::from_slice::<LibraryIndex>(&bytes) {
-                if now.saturating_sub(idx.scanned_at) <= max_age_secs {
-                    return Ok(LibraryIndex {
-                        stale: false,
-                        ..idx
-                    });
-                }
-                let games = scan(libraries);
+    let keys: Vec<String> = libraries.iter().map(|p| p.display().to_string()).collect();
+    if max_age_secs > 0 {
+        if let Some(idx) = fs::read(&cache_file)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<LibraryIndex>(&b).ok())
+        {
+            if idx.libraries == keys && now.saturating_sub(idx.scanned_at) <= max_age_secs {
                 return Ok(LibraryIndex {
-                    scanned_at: idx.scanned_at,
-                    stale: true,
-                    games,
+                    stale: false,
+                    cached: true,
+                    ..idx
                 });
             }
         }
@@ -202,6 +205,8 @@ pub fn index_cached(
         scanned_at: now,
         stale: false,
         games,
+        libraries: keys,
+        cached: false,
     };
     fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
     let _ = fs::write(&cache_file, serde_json::to_vec(&idx).unwrap_or_default());
@@ -452,6 +457,28 @@ mod tests {
     use crate::dlc::tests::make_stfs;
     fn tmp(n: &str) -> crate::testutil::TmpDir {
         crate::testutil::TmpDir::new(&format!("lib-{n}"))
+    }
+    #[test]
+    fn index_cache_is_keyed_on_library_folders() {
+        let t = tmp("idxkey");
+        let (a, b, cache) = (t.join("a"), t.join("b"), t.join("cache"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let first = index_cached(std::slice::from_ref(&a), &cache, false, 3600).unwrap();
+        assert!(!first.cached);
+        assert!(
+            index_cached(std::slice::from_ref(&a), &cache, false, 3600)
+                .unwrap()
+                .cached
+        );
+        // A different folder list must not reuse the cache.
+        assert!(
+            !index_cached(std::slice::from_ref(&b), &cache, false, 3600)
+                .unwrap()
+                .cached
+        );
+        // max_age 0 always rescans.
+        assert!(!index_cached(&[b], &cache, false, 0).unwrap().cached);
     }
     #[test]
     fn scans_games_with_counts_and_names() {

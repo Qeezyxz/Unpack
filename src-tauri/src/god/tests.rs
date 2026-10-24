@@ -1153,3 +1153,144 @@ fn every_csv_title_id_resolves_to_a_name() {
     }
     assert!(seen > 5000, "only {seen} CSV rows were checked");
 }
+
+/// Justin: a console Content profile folder gets only the real GOD layout. Auto (batch) and
+/// manual converts write <profile>\<TitleID> with no "(GOD)" wrapper, disc 2 joins disc 1, the
+/// same MediaID is skipped (never replaced), and a lowercase "content" path counts too.
+#[test]
+fn content_profile_gets_title_id_at_the_top_level() {
+    let d = tmp("god-content");
+    let isos = d.join("isos");
+    fs::create_dir_all(&isos).unwrap();
+    let d1 = disc(&isos, "Halo (Disc 1).iso", 0xAA01, 1);
+    let d2 = disc(&isos, "Halo (Disc 2).iso", 0xAA02, 2);
+    // Auto (batch) path into Content\0000000000000000.
+    let prof = d.join("usb").join("Content").join("0000000000000000");
+    fs::create_dir_all(&prof).unwrap();
+    let a = convert_named(&d1, &prof, None, &Jobs::default(), "c1", &mut |_, _| {}).unwrap();
+    assert_eq!(names_in(&prof), vec!["4D5307E6"], "no wrapper folder");
+    assert_eq!(Path::new(&a.output), prof.join("4D5307E6"));
+    assert!(!a.merged);
+    // Manual path: disc 2 joins the existing TitleID folder.
+    let b = convert_to_dest(&d2, &prof, None, &Jobs::default(), "c2", &mut |_, _| {}).unwrap();
+    assert!(b.merged && b.output == a.output);
+    let base = prof.join("4D5307E6/00007000");
+    for m in ["0000AA01", "0000AA02"] {
+        assert!(base.join(m).is_file() && base.join(format!("{m}.data")).is_dir());
+    }
+    // Same MediaID again: skipped with a clear message, the package is untouched.
+    let before = fs::metadata(base.join("0000AA01"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    for (i, e) in [
+        convert_to_dest(&d1, &prof, None, &Jobs::default(), "c3", &mut |_, _| {}).unwrap_err(),
+        convert_named(&d1, &prof, None, &Jobs::default(), "c4", &mut |_, _| {}).unwrap_err(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(
+            e.starts_with("Skipped:") && e.contains("0000AA01"),
+            "{i}: {e}"
+        );
+    }
+    assert_eq!(
+        fs::metadata(base.join("0000AA01"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before
+    );
+    assert_eq!(names_in(&prof), vec!["4D5307E6"]);
+    // (On Windows the type folder also holds the signed `.unpack-replace.lock`.)
+    let pkgs: Vec<String> = names_in(&base).into_iter().filter(|n| n != ".unpack-replace.lock").collect();
+    assert_eq!(pkgs.len(), 4, "{pkgs:?}");
+    // Lowercase content path, and picking the drive root / the Content folder itself.
+    for (tag, pick) in [
+        (
+            "lower",
+            d.join("u2").join("content").join("0000000000000000"),
+        ),
+        ("root", d.join("u3")),
+        ("contentdir", d.join("u4").join("CONTENT")),
+    ] {
+        let prof2 = match tag {
+            "lower" => pick.clone(),
+            "root" => pick.join("Content").join("0000000000000000"),
+            _ => pick.join("0000000000000000"),
+        };
+        fs::create_dir_all(if tag == "contentdir" { &pick } else { &prof2 }).unwrap();
+        let r = convert_to_dest(&d1, &pick, None, &Jobs::default(), tag, &mut |_, _| {}).unwrap();
+        assert_eq!(Path::new(&r.output), prof2.join("4D5307E6"), "{tag}");
+        assert_eq!(names_in(&prof2), vec!["4D5307E6"], "{tag}");
+    }
+    // A normal folder is unchanged: auto mode keeps "<Game> (GOD)".
+    let plain = d.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    let r = convert_named(&d1, &plain, None, &Jobs::default(), "c5", &mut |_, _| {}).unwrap();
+    assert!(r.output.contains("(GOD)"), "{}", r.output);
+}
+
+/// R22 L(c): hostile disc numbers in the executable header are treated as a single disc.
+#[test]
+fn r22_lc_hostile_disc_numbers_mean_single_disc() {
+    let d = tmp("disc-r22lc");
+    for (i, (n, c)) in [(200u8, 255u8), (5, 3), (10, 10), (0, 12)].into_iter().enumerate() {
+        let p = d.join(format!("H{i}.iso"));
+        make_iso_files(&p, 0x4D53_07E6, 0xD0 + i as u32, (n, c), &[("default.xex", b"")]);
+        let info = iso_info(&p).unwrap();
+        assert_eq!((info.disc_number, info.disc_count), (1, 1), "{n} of {c}");
+        let st = crate::discs::disc_status(&p, &[], &[], None);
+        assert_eq!((st.disc, st.count), (1, 1), "{n} of {c}");
+        assert!(st.line.len() < 200, "{}", st.line);
+    }
+    let ok = d.join("OK.iso");
+    make_iso_files(&ok, 0x4D53_07E6, 0xE1, (9, 9), &[("default.xex", b"")]);
+    let i = iso_info(&ok).unwrap();
+    assert_eq!((i.disc_number, i.disc_count), (9, 9));
+}
+
+#[test]
+fn content_unknown_title_warning_names_the_title_id_folder() {
+    let w = unknown_title_warning_content("FFFE0001");
+    assert!(w.contains("FFFE0001 folder"), "{w}");
+    assert!(!w.contains("named after the file"), "{w}");
+}
+
+#[test]
+fn remove_empty_tree_keeps_folders_with_files() {
+    let d = std::env::temp_dir().join(format!("unpack-ret-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(d.join("a/b/c")).unwrap();
+    fs::create_dir_all(d.join("keep/x")).unwrap();
+    fs::write(d.join("keep/x/f.txt"), b"1").unwrap();
+    assert!(!remove_empty_tree(&d));
+    assert!(!d.join("a").exists() && d.join("keep/x/f.txt").is_file());
+    fs::remove_file(d.join("keep/x/f.txt")).unwrap();
+    assert!(remove_empty_tree(&d) && !d.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn r23_l4_content_refuses_linked_title_id_folder() {
+    let d = tmp("god-r23l4");
+    let isos = d.join("isos");
+    fs::create_dir_all(&isos).unwrap();
+    let d1 = disc(&isos, "Halo (Disc 1).iso", 0xAA01, 1);
+    let prof = d.join("usb").join("Content").join("0000000000000000");
+    let outside = d.join("outside");
+    fs::create_dir_all(&prof).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, prof.join("4D5307E6")).unwrap();
+    let e = convert_named(&d1, &prof, None, &Jobs::default(), "l4", &mut |_, _| {}).unwrap_err();
+    assert!(e.contains("is a link"), "{e}");
+    assert!(names_in(&outside).is_empty(), "nothing written outside");
+    // the content-type folder as a link is refused too
+    fs::remove_file(prof.join("4D5307E6")).unwrap();
+    fs::create_dir_all(prof.join("4D5307E6")).unwrap();
+    std::os::unix::fs::symlink(&outside, prof.join("4D5307E6/00007000")).unwrap();
+    let e = convert_to_dest(&d1, &prof, None, &Jobs::default(), "l4b", &mut |_, _| {}).unwrap_err();
+    assert!(e.contains("is a link"), "{e}");
+    assert!(names_in(&outside).is_empty());
+}

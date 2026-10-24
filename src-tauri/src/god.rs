@@ -37,6 +37,11 @@ pub fn unknown_title_warning(title_id: &str) -> String {
     format!("Title ID {title_id} is not in Unpack's game list. It is converted anyway; the folder is named after the file (or the title you type).")
 }
 
+/// The same for a console Content folder, where the folder is always the TitleID itself.
+pub fn unknown_title_warning_content(title_id: &str) -> String {
+    format!("Title ID {title_id} is not in Unpack's game list. It is converted anyway into the {title_id} folder (in a Content folder the game folder is always its TitleID).")
+}
+
 /// Why a disc could not be read. A disc 2 that carries no default.xex gets a plain explanation.
 pub fn missing_executable_message(path: &Path, detail: &str) -> String {
     let name = path
@@ -50,8 +55,12 @@ pub fn missing_executable_message(path: &Path, detail: &str) -> String {
 }
 
 /// (disc number, disc count) with the file-name hint applied when the executable says "1 of 1".
+/// R22 L(c): numbers outside 1..=9, or a disc past the count, mean a single disc.
 pub fn disc_numbers(path: &Path, exe: &iso2god::executable::TitleExecutionInfo) -> (u8, u8) {
     let (mut n, mut c) = (exe.disc_number.max(1), exe.disc_count.max(1));
+    if n > 9 || c > 9 || n > c {
+        (n, c) = (1, 1);
+    }
     if let Some(h) = crate::discs::disc_hint_from_name(path) {
         if c <= 1 && n <= 1 {
             n = h;
@@ -277,6 +286,61 @@ pub fn convert(
     job_id: &str,
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<GodResult, String> {
+    convert_opts(
+        iso_path,
+        dest_dir,
+        title_override,
+        false,
+        jobs,
+        job_id,
+        progress,
+    )
+}
+
+/// "Skipped" message when this disc's package (same MediaID) is already in the Content folder.
+fn already_there(title_dir: &Path, media: &str) -> String {
+    format!(
+        "Skipped: this disc (MediaID {media}) is already in {}. Nothing was changed; delete that package first to convert it again.",
+        title_dir.display()
+    )
+}
+
+/// GOD panel / manual convert. When `dest` is a console Content profile folder (or the Content
+/// folder / a drive root holding one), the game goes straight to `<profile>\<TitleID>`: another
+/// disc of the game joins the existing TitleID folder, and a package with the same MediaID that
+/// is already there is never replaced (skipped with a message). Other folders: unchanged.
+pub fn convert_to_dest(
+    iso_path: &Path,
+    dest: &Path,
+    title_override: Option<&str>,
+    jobs: &Jobs,
+    job_id: &str,
+    progress: &mut dyn FnMut(u32, &str),
+) -> Result<GodResult, String> {
+    match crate::contentdir::resolve(dest) {
+        Some(profile) => convert_opts(
+            iso_path,
+            &profile,
+            title_override,
+            true,
+            jobs,
+            job_id,
+            progress,
+        ),
+        None => convert(iso_path, dest, title_override, jobs, job_id, progress),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_opts(
+    iso_path: &Path,
+    dest_dir: &Path,
+    title_override: Option<&str>,
+    keep_existing: bool,
+    jobs: &Jobs,
+    job_id: &str,
+    progress: &mut dyn FnMut(u32, &str),
+) -> Result<GodResult, String> {
     let ioerr = |what: &str| {
         let w = what.to_string();
         move |e: std::io::Error| format!("{w}: {e}")
@@ -308,6 +372,32 @@ pub fn convert(
         || progress(0, crate::destlock::WAIT_MESSAGE),
         &|| jobs.is_cancelled(job_id),
     )?;
+    let final_layout = god::FileLayout::new(dest_dir, &exe_info, content_type);
+    let title_dir = dest_dir.join(format!("{:08X}", exe_info.title_id));
+    let same_media_there = || {
+        fs::symlink_metadata(final_layout.con_header_file_path()).is_ok()
+            || fs::symlink_metadata(final_layout.data_dir_path()).is_ok()
+    };
+    // R23 L4: in a Content folder never write through a linked <TitleID> or content-type
+    // folder (the archive path refuses the same).
+    if keep_existing {
+        let type_dir = final_layout.con_header_file_path();
+        let type_dir = type_dir.parent().unwrap_or(&title_dir);
+        for p in [title_dir.as_path(), type_dir] {
+            if crate::archive::is_link(p) {
+                return Err(format!(
+                    "{} is a link (shortcut to another folder); nothing was written through it.",
+                    p.display()
+                ));
+            }
+        }
+    }
+    if keep_existing && same_media_there() {
+        return Err(already_there(
+            &title_dir,
+            &format!("{:08X}", exe_info.media_id),
+        ));
+    }
     let need = estimated_output(iso_len, root_offset, part_count);
     if let Some(free) = free_space(dest_dir) {
         if free < need + 64 * 1024 * 1024 {
@@ -335,9 +425,7 @@ pub fn convert(
     }
     let _tmp_guard = TmpGuard(tmp_base.clone());
     let layout = god::FileLayout::new(&tmp_base, &exe_info, content_type);
-    let final_layout = god::FileLayout::new(dest_dir, &exe_info, content_type);
     let data_dir = layout.data_dir_path();
-    let title_dir = dest_dir.join(format!("{:08X}", exe_info.title_id));
     fs::create_dir_all(&data_dir).map_err(ioerr("Cannot create output folder"))?;
     let cleanup = || {}; // the temp guard removes everything
     let total_steps = part_count + 1; // parts + hashing/header
@@ -450,6 +538,20 @@ pub fn convert(
                 })
             })
     };
+    // R29: in a Content folder, GOD placement shares the type folder's lock with archive
+    // placement and Replace recovery, across processes.
+    let _type_lock = match (keep_existing, final_layout.con_header_file_path().parent()) {
+        (true, Some(ct)) => Some(crate::archive::lock_type_folder(ct, &|| jobs.is_cancelled(job_id), &mut || {
+            progress(100, crate::destlock::WAIT_MESSAGE)
+        })?),
+        _ => None,
+    };
+    if keep_existing && same_media_there() {
+        return Err(already_there(
+            &title_dir,
+            &format!("{:08X}", exe_info.media_id),
+        ));
+    }
     install(&layout, &final_layout, job_id)
         .map_err(|e| format!("Could not move the GOD package into place: {e}"))?;
     verify_package(&final_layout, part_count, iso_len, root_offset)?;
@@ -461,9 +563,15 @@ pub fn convert(
     progress(100, "Done");
     let catalog = game_list::find_title_by_id(exe_info.title_id).filter(|n| !n.trim().is_empty());
     let title_hex = format!("{:08X}", exe_info.title_id);
-    let warning = (catalog.is_none()
-        && title_override.map(|t| t.trim().is_empty()).unwrap_or(true))
-    .then(|| unknown_title_warning(&title_hex));
+    let warning = if keep_existing {
+        // Content folder: the name never matters, only whether the title is known.
+        catalog
+            .is_none()
+            .then(|| unknown_title_warning_content(&title_hex))
+    } else {
+        (catalog.is_none() && title_override.map(|t| t.trim().is_empty()).unwrap_or(true))
+            .then(|| unknown_title_warning(&title_hex))
+    };
     Ok(GodResult {
         output: title_dir.display().to_string(),
         title_id: title_hex,
@@ -495,6 +603,19 @@ pub fn convert_named(
     job_id: &str,
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<GodResult, String> {
+    if let Some(profile) = crate::contentdir::resolve(parent) {
+        // Console Content folder: straight into <profile>\<TitleID>, no "<Game> (GOD)" wrapper.
+        // Discs of one game share the TitleID folder by construction (one MediaID each).
+        return convert_opts(
+            iso_path,
+            &profile,
+            title_override,
+            true,
+            jobs,
+            job_id,
+            progress,
+        );
+    }
     let (info, exe) = read_info(iso_path)?;
     let stem = iso_path
         .file_stem()
@@ -888,6 +1009,10 @@ pub fn convert_registered(
     match fs::remove_file(&path) {
         Ok(()) => {
             out.iso_deleted = true;
+            if crate::contentdir::resolve(&out_parent).is_some() {
+                // Content target: the extraction folder has done its job; drop it if empty.
+                remove_empty_tree(&root);
+            }
             Ok(out)
         }
         Err(e) => keep(&format!("ISO kept: couldn't delete it ({e})."), out),
@@ -1051,6 +1176,8 @@ fn install(tmp: &god::FileLayout, fin: &god::FileLayout, job_id: &str) -> std::i
     if let Some(p) = hdr.parent() {
         fs::create_dir_all(p)?;
     }
+    // R29: every move here is no-overwrite.
+    let mv = crate::archive::rename_noreplace;
     let job = crate::archive::safe_segment(job_id);
     let data_bak = data.with_file_name(format!(".unpack-god-old-{job}"));
     let hdr_bak = hdr.with_file_name(format!(".unpack-god-oldhdr-{job}"));
@@ -1059,30 +1186,30 @@ fn install(tmp: &god::FileLayout, fin: &god::FileLayout, job_id: &str) -> std::i
     let had_old = data.exists();
     let had_hdr = fs::symlink_metadata(&hdr).is_ok();
     if had_old {
-        fs::rename(&data, &data_bak)?;
+        mv(&data, &data_bak)?;
     }
-    if let Err(e) = fs::rename(&new_data, &data) {
+    if let Err(e) = mv(&new_data, &data) {
         if had_old {
-            let _ = fs::rename(&data_bak, &data);
+            let _ = mv(&data_bak, &data);
         }
         return Err(e);
     }
     let rollback = |e: std::io::Error| {
-        let _ = fs::rename(&data, &new_data);
+        let _ = mv(&data, &new_data);
         if had_old {
-            let _ = fs::rename(&data_bak, &data);
+            let _ = mv(&data_bak, &data);
         }
         if had_hdr {
-            let _ = fs::rename(&hdr_bak, &hdr);
+            let _ = mv(&hdr_bak, &hdr);
         }
         Err(e)
     };
     if had_hdr {
-        if let Err(e) = fs::rename(&hdr, &hdr_bak) {
+        if let Err(e) = mv(&hdr, &hdr_bak) {
             return rollback(e);
         }
     }
-    if let Err(e) = fs::rename(&new_hdr, &hdr) {
+    if let Err(e) = mv(&new_hdr, &hdr) {
         return rollback(e);
     }
     if had_old {
@@ -1096,3 +1223,25 @@ fn install(tmp: &god::FileLayout, fin: &god::FileLayout, job_id: &str) -> std::i
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// Remove `root` and the empty folders under it, bottom up; anything holding a file stays.
+/// Links are never followed or removed.
+pub fn remove_empty_tree(root: &Path) -> bool {
+    let Ok(md) = fs::symlink_metadata(root) else { return false };
+    if !md.is_dir() {
+        return false;
+    }
+    let mut empty = true;
+    if let Ok(rd) = fs::read_dir(root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            let dir = fs::symlink_metadata(&p).map(|m| m.is_dir()).unwrap_or(false);
+            if !(dir && remove_empty_tree(&p)) {
+                empty = false;
+            }
+        }
+    } else {
+        return false;
+    }
+    empty && fs::remove_dir(root).is_ok()
+}

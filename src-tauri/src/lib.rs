@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod catalog;
+pub mod contentdir;
 pub mod covers;
 pub mod destlock;
 pub mod discord;
@@ -525,7 +526,7 @@ pub(crate) fn ftp_lock(subsystem: &str, detail: &str) -> Result<FtpLockGuard, St
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
-                .map(|(s, d)| format!("Unpack is already using the console FTP for {s} ({d}). Wait for it to finish."))
+                .map(|(s, d)| format!("Unpack is already talking to the console for {s} ({d}). Wait for that to finish (Xbox FTP allows one connection)."))
                 .unwrap_or_else(|| "Unpack is already talking to the console. Wait for that to finish (Xbox FTP allows one connection).".into());
             Err(msg)
         }
@@ -698,11 +699,14 @@ async fn ftp_send(
 #[tauri::command]
 async fn mod_identify(
     builtin: State<'_, mods::BuiltinSet>,
+    grants: State<'_, safecopy::Grants>,
     paths: Vec<String>,
     hints: Option<Vec<String>>,
     learned: Option<Vec<modnames::Learned>>,
 ) -> Result<Vec<Result<mods::ModInfo, String>>, String> {
     let hints = hints.unwrap_or_default();
+    let checked: Vec<Result<PathBuf, String>> =
+        paths.iter().map(|p| mods::check_mod_path(&grants, p)).collect();
     let learned: Vec<modnames::Learned> = mods::merge_learned(
         mods::merge_learned(
             learned.unwrap_or_default().into_iter().take(1000).collect(),
@@ -711,12 +715,12 @@ async fn mod_identify(
         &catalog::learned(),
     );
     tauri::async_runtime::spawn_blocking(move || {
-        paths
-            .iter()
+        checked
+            .into_iter()
             .enumerate()
             .map(|(i, p)| {
                 mods::identify_learned(
-                    &PathBuf::from(p),
+                    &p?,
                     hints.get(i).map(|s| s.as_str()).filter(|s| !s.is_empty()),
                     &learned,
                 )
@@ -1040,6 +1044,38 @@ async fn iso_companions(
     .map_err(|e| e.to_string())?
 }
 
+/// Missing-disc check: where every disc of this ISO's game is (queued, next to it, in the extract
+/// queue, already converted, or missing). Read-only; paths outside granted folders are ignored.
+#[tauri::command]
+async fn iso_disc_status(
+    grants: State<'_, safecopy::Grants>,
+    path: String,
+    queued: Vec<String>,
+    extracting: Vec<String>,
+    dest: Option<String>,
+) -> Result<discs::DiscStatus, String> {
+    let p = grants.check(&path)?;
+    let dest = dest.and_then(|d| grants.check(&d).ok());
+    let q: Vec<PathBuf> = queued
+        .iter()
+        .filter_map(|x| grants.check(x).ok())
+        .take(256)
+        .collect();
+    let ex: Vec<String> = extracting
+        .into_iter()
+        .take(256)
+        .map(|n| archive_display_name(&n))
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || discs::disc_status(&p, &q, &ex, dest.as_deref()))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Just the file name of an archive path (never opened; used for name matching only).
+fn archive_display_name(n: &str) -> String {
+    n.rsplit(['/', '\\']).next().unwrap_or(n).to_string()
+}
+
 #[tauri::command]
 async fn iso_to_god(
     app: AppHandle,
@@ -1066,7 +1102,7 @@ async fn iso_to_god(
                 },
             );
         };
-        god::convert(
+        god::convert_to_dest(
             &PathBuf::from(path),
             &dest,
             title.as_deref(),
@@ -1185,22 +1221,43 @@ fn preflight_local(
 }
 
 #[tauri::command]
-fn lan_discover(host: Option<String>, port: Option<u16>) -> Vec<lan::DiscoveredConsole> {
+async fn lan_discover(
+    host: Option<String>,
+    port: Option<u16>,
+) -> Result<Vec<lan::DiscoveredConsole>, String> {
+    // One scan at a time; runs off the main thread so the window stays responsive.
+    static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SCANNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("A network scan is already running.".into());
+    }
     let port = port.unwrap_or(21);
-    let base = host
-        .and_then(|h| h.parse().ok())
-        .or_else(|| {
-            lan::local_ipv4()
-                .map(|ip| Ipv4Addr::new(ip.octets()[0], ip.octets()[1], ip.octets()[2], 0))
-        })
-        .unwrap_or(Ipv4Addr::new(192, 168, 1, 0));
-    let skip = lan::local_ipv4();
-    lan::discover(base, skip, port)
+    let r = tauri::async_runtime::spawn_blocking(move || {
+        let base = host
+            .and_then(|h| h.trim().parse().ok())
+            .or_else(|| {
+                lan::local_ipv4()
+                    .map(|ip| Ipv4Addr::new(ip.octets()[0], ip.octets()[1], ip.octets()[2], 0))
+            })
+            .unwrap_or(Ipv4Addr::new(192, 168, 1, 0));
+        let skip = lan::local_ipv4();
+        lan::discover(base, skip, port)
+    })
+    .await
+    .map_err(|e| e.to_string());
+    SCANNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    r
 }
 
 #[tauri::command]
-fn usb_prepare(root: String) -> Result<usbprep::UsbPrepReport, String> {
-    usbprep::prepare_usb(Path::new(&root))
+async fn usb_prepare(
+    grants: State<'_, safecopy::Grants>,
+    root: String,
+) -> Result<usbprep::UsbPrepReport, String> {
+    // Only a folder picked in Unpack; the scan for >4 GB files runs off the main thread.
+    let root = grants.check(&root)?;
+    tauri::async_runtime::spawn_blocking(move || usbprep::prepare_usb(&root))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1287,6 +1344,11 @@ async fn ftp_rename(
             return Err("Can't rename a drive root.".into());
         }
         for s in [&a, &b] {
+            if let Some(m) = ftp::protected_remote(s) {
+                return Err(m);
+            }
+        }
+        for s in [&a, &b] {
             if s.iter().any(|x| x.eq_ignore_ascii_case("launch.ini")) {
                 return Err("launch.ini can't be renamed from here.".into());
             }
@@ -1315,6 +1377,9 @@ async fn ftp_delete(
         if segs.len() < 2 {
             return Err("Can't delete a drive root.".into());
         }
+        if let Some(m) = ftp::protected_remote(&segs) {
+            return Err(m);
+        }
         if segs.iter().any(|x| x.eq_ignore_ascii_case("launch.ini")) {
             return Err("launch.ini can't be deleted from Unpack.".into());
         }
@@ -1342,7 +1407,10 @@ struct SavesBackupArgs {
 }
 
 #[tauri::command]
-async fn saves_backup(grants: State<'_, safecopy::Grants>, args: SavesBackupArgs) -> Result<saves::SaveBackupResult, String> {
+async fn saves_backup(
+    grants: State<'_, safecopy::Grants>,
+    args: SavesBackupArgs,
+) -> Result<saves::SaveBackupResult, String> {
     let dest = grants.check(&args.dest)?;
     let con = ftp_console(&args.host, args.port, &args.user, &args.pass)?;
     let remote = saves::profile_save_remote(&args.drive, &args.profile, &args.title_id)?;
@@ -1369,7 +1437,10 @@ struct SavesRestoreArgs {
 }
 
 #[tauri::command]
-async fn saves_restore(grants: State<'_, safecopy::Grants>, args: SavesRestoreArgs) -> Result<saves::SaveRestoreResult, String> {
+async fn saves_restore(
+    grants: State<'_, safecopy::Grants>,
+    args: SavesRestoreArgs,
+) -> Result<saves::SaveRestoreResult, String> {
     let src = grants.check(&args.src)?;
     let con = ftp_console(&args.host, args.port, &args.user, &args.pass)?;
     let remote = saves::profile_save_remote(&args.drive, &args.profile, &args.title_id)?;
@@ -1381,6 +1452,35 @@ async fn saves_restore(grants: State<'_, safecopy::Grants>, args: SavesRestoreAr
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Deserialize)]
+struct SavesRecoverConsole {
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+}
+
+/// R22 L(a): at startup, repair any save restore that was interrupted on a saved console.
+#[tauri::command]
+async fn saves_recover(consoles: Vec<SavesRecoverConsole>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = vec![];
+        for k in consoles.iter().take(10) {
+            let Ok(con) = ftp_console(&k.host, k.port, &k.user, &k.pass) else { continue };
+            if !saves::has_pending(&con) {
+                continue;
+            }
+            let Ok(_g) = ftp_lock("Send to Xbox", "save restore repair") else { continue };
+            if let Ok(m) = saves::recover_pending(&con) {
+                out.extend(m);
+            }
+        }
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Deserialize)]
@@ -1430,6 +1530,15 @@ async fn screenshots_pull(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn save_text_file(
+    grants: State<'_, safecopy::Grants>,
+    path: String,
+    text: String,
+) -> Result<String, String> {
+    safecopy::write_export_text(&grants, &path, &text)
 }
 
 #[tauri::command]
@@ -1543,6 +1652,7 @@ pub fn run() {
             create_archive,
             iso_info,
             iso_companions,
+            iso_disc_status,
             iso_to_god,
             iso_to_xex,
             god_extracted,
@@ -1574,6 +1684,7 @@ pub fn run() {
             ftp_lock_status,
             saves_backup,
             saves_restore,
+            saves_recover,
             screenshots_list,
             screenshots_pull,
             builtin_menus,
@@ -1584,6 +1695,7 @@ pub fn run() {
             error_help,
             preflight_local,
             lan_discover,
+            save_text_file,
             usb_prepare,
             check_release
         ])
