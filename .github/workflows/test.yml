@@ -4,24 +4,85 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  rust-and-theme:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90.0
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-      - name: Install Tauri Linux libraries
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Install Tauri Linux libraries and 7-Zip
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             libwebkit2gtk-4.1-dev librsvg2-dev libssl-dev \
             libayatana-appindicator3-dev libxdo-dev p7zip-full
+      - name: Install npm dependencies
+        run: npm ci
       - name: Theme tests
         run: npm test
-      - name: UI tests (real app.js against a mock Tauri bridge)
-        run: bash tests/ui/run.sh
+      - name: TitleID lists and merge script
+        run: python3 tests/gamelists.py
+      - name: Build archive fixtures
+        run: python3 tests/make_testdata.py "$RUNNER_TEMP/testdata"
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --lib --manifest-path src-tauri/Cargo.toml
+        env:
+          UNPACK_TESTDATA: ${{ runner.temp }}/testdata
+
+  ui:
+    runs-on: ubuntu-latest
+    needs: rust-and-theme
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Install Tauri Linux libraries, 7-Zip and the FTP test server
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            libwebkit2gtk-4.1-dev librsvg2-dev libssl-dev \
+            libayatana-appindicator3-dev libxdo-dev p7zip-full python3-pip
+          pip install pyftpdlib==2.2.0
+      - name: Puppeteer for the UI suites (the suites import it from /workspace/testenv)
+        run: |
+          sudo mkdir -p /workspace/testenv /workspace/testdata
+          sudo chown -R "$USER" /workspace
+          cd /workspace/testenv
+          npm init -y
+          npm install --save-exact puppeteer-core@23.11.1
+      - name: Build the test bridge and the catalog signer
+        run: |
+          cargo build --manifest-path src-tauri/Cargo.toml --example bridge --features download-test-loopback
+          cargo build --manifest-path src-tauri/Cargo.toml --bin unpack-catalog-sign
+      - name: Build archive fixtures
+        run: python3 tests/make_testdata.py /workspace/testdata
+      - name: Start the bridge
+        working-directory: src-tauri
+        run: |
+          mkdir -p /tmp/unpack-dlc-e2e/usb
+          UNPACK_TEST_NOTICE_DIR=/tmp/unpack-v160-notice UNPACK_TEST_ALLOW_LOOPBACK=1 UNPACK_TEST_DRIVES=/tmp/unpack-dlc-e2e/usb \
+            nohup ./target/debug/examples/bridge ../src > /tmp/bridge.log 2>&1 &
+          sleep 3
+      - name: UI suites
+        run: |
+          set -e
+          for t in e2e autogod dlc download mods builtin catalog xbox v160; do
+            echo "::group::tests/$t.mjs"
+            node tests/$t.mjs
+            echo "::endgroup::"
+          done

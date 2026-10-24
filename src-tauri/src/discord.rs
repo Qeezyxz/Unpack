@@ -26,9 +26,9 @@ impl PresenceHandle {
         let _ = std::thread::Builder::new()
             .name("unpack-discord".into())
             .spawn(move || worker(rx));
-        let handle = PresenceHandle { tx: worker_tx };
-        handle.update("Xbox 360 toolkit", "Idle");
-        handle
+        // Starts disabled (R15 L1): nothing touches the Discord pipe until the page has loaded the
+        // saved setting and sent `discord_set_enabled(true)`.
+        PresenceHandle { tx: worker_tx }
     }
 
     pub fn update(&self, details: &str, state: &str) {
@@ -89,8 +89,6 @@ fn worker(rx: Receiver<Cmd>) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    // Stay silent until the saved setting says presence is wanted, so someone
-    // who turned it off never flashes on Discord at launch.
     let mut enabled = false;
     let mut client: Option<DiscordIpcClient> = None;
     let mut last = ActivityText {
@@ -192,5 +190,54 @@ mod tests {
     fn application_id_is_the_unpack_app() {
         assert_eq!(APP_ID, "1562281261504929922");
         assert_eq!(APP_ID.len(), 19);
+    }
+
+    /// R16 L3: with a fake Discord IPC socket, nothing connects while disabled; once enabled the
+    /// worker connects, hand-shakes with the Unpack app id, and sends SET_ACTIVITY with the text.
+    #[cfg(unix)]
+    #[test]
+    fn r16_l3_connects_to_mock_ipc_once_enabled() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        let d = crate::testutil::TmpDir::new("discord-ipc");
+        std::env::set_var("XDG_RUNTIME_DIR", d.join(""));
+        let l = UnixListener::bind(d.join("discord-ipc-0")).unwrap();
+        l.set_nonblocking(true).unwrap();
+        let p = PresenceHandle::start();
+        p.update("Settings", "Idle");
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(l.accept().is_err(), "no connection while disabled");
+        p.set_enabled(true);
+        let t0 = std::time::Instant::now();
+        let (mut s, _) = loop {
+            match l.accept() {
+                Ok(c) => break c,
+                Err(_) if t0.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
+                Err(e) => panic!("never connected: {e}"),
+            }
+        };
+        s.set_nonblocking(false).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let frame = |s: &mut std::os::unix::net::UnixStream| -> (u32, serde_json::Value) {
+            let mut h = [0u8; 8];
+            s.read_exact(&mut h).unwrap();
+            let op = u32::from_le_bytes(h[..4].try_into().unwrap());
+            let mut b = vec![0u8; u32::from_le_bytes(h[4..].try_into().unwrap()) as usize];
+            s.read_exact(&mut b).unwrap();
+            let reply = br#"{"cmd":"DISPATCH","evt":"READY","data":{}}"#;
+            let mut out = 1u32.to_le_bytes().to_vec();
+            out.extend((reply.len() as u32).to_le_bytes());
+            out.extend(reply);
+            s.write_all(&out).unwrap();
+            (op, serde_json::from_slice(&b).unwrap())
+        };
+        let (op, hs) = frame(&mut s);
+        assert_eq!((op, hs["client_id"].as_str()), (0, Some(APP_ID)), "{hs}");
+        let (op, act) = frame(&mut s);
+        assert_eq!(op, 1);
+        assert_eq!(act["cmd"], "SET_ACTIVITY", "{act}");
+        assert_eq!(act["args"]["activity"]["details"], "Settings", "{act}");
+        assert_eq!(act["args"]["activity"]["state"], "Idle", "{act}");
+        drop(p);
     }
 }

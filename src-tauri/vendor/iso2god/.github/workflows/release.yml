@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*
+    branches:
+      - ci-*
+      - master
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish-to-github:
+    name: Build
+    runs-on: ${{matrix.runner}}
+
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            rust: 1.85.1
+            target: x86_64-unknown-linux-gnu
+            build_filename: iso2god
+            release_filename: iso2god-x86_64-linux
+
+          - runner: ubuntu-24.04-arm
+            rust: 1.85.1
+            target: aarch64-unknown-linux-gnu
+            build_filename: iso2god
+            release_filename: iso2god-aarch64-linux
+
+          - runner: macos-13
+            rust: 1.85.1
+            target: x86_64-apple-darwin
+            build_filename: iso2god
+            release_filename: iso2god-x86_64-macos
+
+          - runner: macos-latest
+            rust: 1.85.1
+            target: aarch64-apple-darwin
+            build_filename: iso2god
+            release_filename: iso2god-aarch64-macos
+
+          - runner: windows-latest
+            rust: 1.85.1
+            target: x86_64-pc-windows-gnu
+            build_filename: iso2god.exe
+            release_filename: iso2god-x86_64-windows.exe
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.rustup
+            target
+          key: ${{ matrix.rust }}-${{ matrix.target }}
+
+      - name: Install Rust
+        run: |
+          rustup default ${{ matrix.rust }}
+          rustup target add ${{ matrix.target }}
+          rustup show
+
+      - name: Build
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin iso2god
+          mkdir -p ./out
+          mv ./target/${{ matrix.target }}/release/${{ matrix.build_filename }} out/${{ matrix.release_filename }}
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: ${{ github.ref_type != 'tag' || !startsWith(github.ref_name, 'v') }}
+          files: out/*
+          fail_on_unmatched_files: false

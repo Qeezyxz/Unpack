@@ -1,14 +1,13 @@
 name: release
 
+# Builds the Windows installer and the portable zip from this source and keeps them as workflow
+# artifacts. It only runs when someone starts it by hand, and it never creates a tag or a GitHub
+# Release: download the artifacts and publish them yourself if you want to.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/release.yml"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: unpack-release-${{ github.ref }}
@@ -19,36 +18,43 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri -> target
 
+      - name: Bundled 7-Zip sidecar for the MSVC target
+        shell: pwsh
+        run: |
+          Copy-Item src-tauri/binaries/7za-x86_64-pc-windows-gnu.exe src-tauri/binaries/7za-x86_64-pc-windows-msvc.exe -Force
+
       - name: Install npm dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build NSIS installer
         run: npx tauri build --bundles nsis
 
-      - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: unpack-nsis
-          if-no-files-found: error
-          path: src-tauri/target/release/bundle/nsis/*.exe
+      - name: Build the cleanup tool and the catalog signer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path extras | Out-Null
+          gcc -O2 -mwindows -municode -o extras/Unpack-Cleanup.exe cleanup/cleanup.c -lshlwapi -lole32 -luuid -ladvapi32 -lshell32
+          if ($LASTEXITCODE -ne 0) { Write-Warning "Unpack-Cleanup.exe was not built (MinGW gcc failed); the portable zip will not include it." ; Remove-Item extras/Unpack-Cleanup.exe -ErrorAction SilentlyContinue ; $global:LASTEXITCODE = 0 }
+          cargo build --release --bin unpack-catalog-sign --manifest-path src-tauri/Cargo.toml
+          Copy-Item src-tauri/target/release/unpack-catalog-sign.exe extras/ -Force
 
       - name: Pack portable zip
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $ProgressPreference = "SilentlyContinue"
           $releaseDir = Join-Path (Get-Location) "src-tauri\target\release"
           Get-ChildItem (Join-Path $releaseDir "bundle\nsis") | Format-Table Name, Length
           $exe = @(
@@ -63,69 +69,27 @@ jobs:
           New-Item -ItemType Directory -Force -Path $portable | Out-Null
           Copy-Item $exe (Join-Path $portable "Unpack.exe") -Force
           Copy-Item $dll.FullName (Join-Path $portable "WebView2Loader.dll") -Force
-
-          $fetch = Join-Path (Get-Location) "7zip-fetch"
-          New-Item -ItemType Directory -Force -Path $fetch | Out-Null
-          $extraUrls = @(
-            "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-extra.7z",
-            "https://github.com/ip7z/7zip/releases/download/25.01/7z2501-extra.7z",
-            "https://www.7-zip.org/a/7z2501-extra.7z"
-          )
-          $zrUrls = @(
-            "https://github.com/ip7z/7zip/releases/download/26.05/7zr.exe",
-            "https://www.7-zip.org/a/7zr.exe"
-          )
-          $zr = Join-Path $fetch "7zr.exe"
-          $gotZr = $false
-          foreach ($url in $zrUrls) {
-            try {
-              Write-Host "Downloading $url"
-              curl.exe -fsSL -L -o $zr $url
-              $gotZr = $true
-              break
-            } catch {
-              Write-Host "missed $url : $_"
-            }
-          }
-          if (-not $gotZr) { throw "could not download 7zr.exe" }
-          $extra = Join-Path $fetch "extra.7z"
-          $got = $false
-          foreach ($url in $extraUrls) {
-            try {
-              Write-Host "Downloading $url"
-              curl.exe -fsSL -L -o $extra $url
-              $got = $true
-              break
-            } catch {
-              Write-Host "missed $url : $_"
-            }
-          }
-          if (-not $got) { throw "could not download 7-Zip Extra" }
-          $out = Join-Path $fetch "out"
-          & $zr x $extra "-o$out" -y
-          $seven = Get-ChildItem -Path $out -Filter "7za.exe" -Recurse | Select-Object -First 1
-          if (-not $seven) { throw "7za.exe missing from Extra package" }
-          Copy-Item $seven.FullName (Join-Path $portable "7za.exe") -Force
-          $license = Get-ChildItem -Path $out -Filter "license.txt" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($license) {
-            Copy-Item $license.FullName (Join-Path $portable "7-Zip-license.txt") -Force
-          }
+          Copy-Item src-tauri/binaries/7za-x86_64-pc-windows-gnu.exe (Join-Path $portable "7za.exe") -Force
+          Copy-Item src-tauri/resources/menus (Join-Path $portable "menus") -Recurse -Force
+          Copy-Item licenses (Join-Path $portable "licenses") -Recurse -Force
+          if (Test-Path extras/Unpack-Cleanup.exe) { Copy-Item extras/Unpack-Cleanup.exe $portable -Force }
 
           if (Test-Path "Unpack-portable.zip") { Remove-Item "Unpack-portable.zip" -Force }
           Compress-Archive -Path (Join-Path $portable "*") -DestinationPath "Unpack-portable.zip"
           Get-Item "Unpack-portable.zip" | Format-List Name, Length
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Upload installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          tag_name: v1.5.0
-          name: Unpack 1.5.0
-          target_commitish: ${{ github.sha }}
-          body_path: .github/release-notes-1.5.0.md
-          draft: false
-          prerelease: false
-          make_latest: true
-          fail_on_unmatched_files: true
-          files: |
-            src-tauri/target/release/bundle/nsis/*.exe
+          name: unpack-nsis
+          if-no-files-found: error
+          path: src-tauri/target/release/bundle/nsis/*.exe
+
+      - name: Upload portable zip and tools
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unpack-portable
+          if-no-files-found: error
+          path: |
             Unpack-portable.zip
+            extras/*.exe
