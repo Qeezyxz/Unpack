@@ -199,6 +199,35 @@ fn extra(
         }
         "iso_info" => unpack_lib::god::iso_info(&PathBuf::from(a["path"].as_str().unwrap()))
             .map(|v| serde_json::to_value(v).unwrap()),
+        "iso_disc_status" => {
+            let p = GRANTS.check(a["path"].as_str().unwrap_or(""))?;
+            let list = |k: &str| {
+                a[k].as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            };
+            let q: Vec<PathBuf> = list("queued")
+                .iter()
+                .filter_map(|x| GRANTS.check(x).ok())
+                .collect();
+            let ex: Vec<String> = list("extracting")
+                .iter()
+                .map(|n| n.rsplit(['/', '\\']).next().unwrap_or(n).to_string())
+                .collect();
+            Ok(serde_json::to_value(unpack_lib::discs::disc_status(
+                &p,
+                &q,
+                &ex,
+                a["dest"]
+                    .as_str()
+                    .and_then(|d| GRANTS.check(d).ok())
+                    .as_deref(),
+            ))
+            .unwrap())
+        }
         "iso_companions" => {
             let p = GRANTS.check(a["path"].as_str().unwrap_or(""))?;
             unpack_lib::discs::companions(&p).map(|v| {
@@ -261,7 +290,14 @@ fn extra(
                     return Err(e);
                 }
             };
-            let r = unpack_lib::god::convert(&path, &dest, a["title"].as_str(), jobs, &id, &mut cb);
+            let r = unpack_lib::god::convert_to_dest(
+                &path,
+                &dest,
+                a["title"].as_str(),
+                jobs,
+                &id,
+                &mut cb,
+            );
             jobs.finish(&id);
             r.map(|v| serde_json::to_value(v).unwrap())
         }
@@ -422,14 +458,14 @@ fn extra(
                 .filter_map(|x| x.as_str())
                 .enumerate()
                 .map(|(i, p)| {
-                    match unpack_lib::mods::identify_learned(
-                        &PathBuf::from(p),
+                    match unpack_lib::mods::check_mod_path(&GRANTS, p).and_then(|p| unpack_lib::mods::identify_learned(
+                        &p,
                         a["hints"]
                             .get(i)
                             .and_then(|h| h.as_str())
                             .filter(|h| !h.is_empty()),
                         &learned,
-                    ) {
+                    )) {
                         Ok(m) => json!({"Ok": m}),
                         Err(e) => json!({"Err": e}),
                     }
@@ -493,7 +529,8 @@ fn extra(
                 a["profile"].as_str().unwrap_or(""),
                 a["title_id"].as_str().unwrap_or(""),
             )?;
-            unpack_lib::saves::backup_folder(&con, &remote, &dest, &mut |_, _| {}).map(|v| serde_json::to_value(v).unwrap())
+            unpack_lib::saves::backup_folder(&con, &remote, &dest, &mut |_, _| {})
+                .map(|v| serde_json::to_value(v).unwrap())
         }
         "saves_restore" => {
             let src = GRANTS.check(a["src"].as_str().unwrap_or(""))?;
@@ -510,6 +547,23 @@ fn extra(
             )?;
             unpack_lib::saves::restore_folder(&con, &remote, &src, &mut |_, _| {})
                 .map(|v| serde_json::to_value(v).unwrap())
+        }
+        "saves_recover" => {
+            let mut out = vec![];
+            for k in a["consoles"].as_array().cloned().unwrap_or_default() {
+                let Ok(con) = unpack_lib::ftp_console(
+                    k["host"].as_str().unwrap_or(""),
+                    k["port"].as_u64().unwrap_or(21) as u16,
+                    k["user"].as_str().unwrap_or(""),
+                    k["pass"].as_str().unwrap_or(""),
+                ) else {
+                    continue;
+                };
+                if unpack_lib::saves::has_pending(&con) {
+                    out.extend(unpack_lib::saves::recover_pending(&con).unwrap_or_default());
+                }
+            }
+            Ok(json!(out))
         }
         "screenshots_list" => {
             let con = unpack_lib::ftp_console(
@@ -649,6 +703,12 @@ fn extra(
             }
             Ok(json!(v))
         }
+        "save_text_file" => unpack_lib::safecopy::write_export_text(
+            &GRANTS,
+            a["path"].as_str().unwrap_or(""),
+            a["text"].as_str().unwrap_or(""),
+        )
+        .map(|v| json!(v)),
         "error_help" => Ok(serde_json::to_value(unpack_lib::hints::help_for(
             a["message"].as_str().unwrap_or(""),
         ))
@@ -704,10 +764,9 @@ fn extra(
                 })
                 .unwrap_or_default();
             let dir = std::env::temp_dir().join("unpack-bridge-lib-cache");
-            Ok(
-                serde_json::to_value(unpack_lib::library::index_cached(&libs, &dir, false, 0))
-                    .unwrap(),
-            )
+            let max_age = a["maxAgeSecs"].as_u64().unwrap_or(0);
+            unpack_lib::library::index_cached(&libs, &dir, false, max_age)
+                .map(|v| serde_json::to_value(v).unwrap())
         }
         "god_verify_only" => unpack_lib::god::verify_readonly_folder(&PathBuf::from(
             a["path"].as_str().unwrap_or(""),
@@ -720,10 +779,10 @@ fn extra(
         })
         .unwrap()),
         "lan_discover" => Ok(json!([])),
-        "usb_prepare" => {
-            unpack_lib::usbprep::prepare_usb(&PathBuf::from(a["root"].as_str().unwrap_or("")))
-                .map(|v| serde_json::to_value(v).unwrap())
-        }
+        "usb_prepare" => GRANTS
+            .check(a["root"].as_str().unwrap_or(""))
+            .and_then(|r| unpack_lib::usbprep::prepare_usb(&r))
+            .map(|v| serde_json::to_value(v).unwrap()),
         "notify_done" | "set_taskbar_progress" => Ok(json!(null)),
 
         "dlc_scan_drives" => {
