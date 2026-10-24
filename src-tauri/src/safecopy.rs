@@ -412,6 +412,47 @@ pub fn plain(s: &str) -> String {
     simplify(PathBuf::from(s)).display().to_string()
 }
 
+/// Write a small text export (settings, mod names, links) to a path the user picked in a
+/// Save dialog. Refuses folders, oversized bodies and paths outside the granted folder.
+pub fn write_export_text(grants: &Grants, path: &str, text: &str) -> Result<String, String> {
+    if text.len() > 16 << 20 {
+        return Err("Export is too large (over 16 MB).".into());
+    }
+    let p = grants.check_or_parent(path)?;
+    if p.is_dir() {
+        return Err(format!("{} is a folder. Pick a file name.", plain(path)));
+    }
+    // R21 M1: a fresh random temp name opened with create_new (O_CREAT|O_EXCL: never follows
+    // or reuses an existing file or symlink), then an atomic rename onto the picked name.
+    let dir = p.parent().ok_or_else(|| format!("Couldn't save {}.", plain(path)))?;
+    let base = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let (tmp, mut f) = {
+        let mut tries = 0;
+        loop {
+            let mut r = [0u8; 8];
+            getrandom::getrandom(&mut r).map_err(|e| format!("Couldn't save {}: {e}", plain(path)))?;
+            let hex: String = r.iter().map(|b| format!("{b:02x}")).collect();
+            let t = dir.join(format!(".{base}.unpack-tmp-{hex}"));
+            match fs::OpenOptions::new().write(true).create_new(true).open(&t) {
+                Ok(f) => break (t, f),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && tries < 8 => tries += 1,
+                Err(e) => return Err(format!("Couldn't save {}: {e}", plain(path))),
+            }
+        }
+    };
+    let w = f.write_all(text.as_bytes()).and_then(|_| f.sync_all());
+    drop(f);
+    if let Err(e) = w {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("Couldn't save {}: {e}", plain(path)));
+    }
+    fs::rename(&tmp, &p).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("Couldn't save {}: {e}", plain(path))
+    })?;
+    Ok(p.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,5 +645,31 @@ mod tests {
             "under picked parent"
         );
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r21_m1_export_temp_never_follows_symlink_or_clobbers() {
+        let d = tmp("m1");
+        let g = Grants::default();
+        g.grant(d.path());
+        let victim = d.path().join("victim");
+        fs::write(&victim, b"VICTIM").unwrap();
+        let gd = d.path().join("g");
+        fs::create_dir(&gd).unwrap();
+        g.grant(&gd);
+        std::os::unix::fs::symlink(&victim, gd.join("out.unpack-tmp")).unwrap();
+        let out = gd.join("out.json");
+        write_export_text(&g, &out.display().to_string(), "EXPORT").unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"VICTIM");
+        assert!(!fs::symlink_metadata(&out).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&out).unwrap(), b"EXPORT");
+        // a user file with the old temp name is left alone too
+        let user = gd.join("b.unpack-tmp");
+        fs::write(&user, b"MINE").unwrap();
+        write_export_text(&g, &gd.join("b.json").display().to_string(), "X").unwrap();
+        assert_eq!(fs::read(&user).unwrap(), b"MINE");
+        // no temp files left behind
+        assert!(fs::read_dir(&gd).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains(".unpack-tmp-")));
     }
 }

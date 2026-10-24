@@ -1,4 +1,5 @@
 import * as N from "./native.js";
+import { planImport } from "./importcheck.js";
 import { zipSync, unzipSync, strToU8, strFromU8, Unzip, UnzipInflate } from "./vendor/fflate/browser.js";
 
 const app = document.getElementById("app");
@@ -621,10 +622,18 @@ function schedulePaint() {
   });
 }
 
+// R25 L3: a GOD sub-row shows "status — error/warning"; the per-frame repaint must produce the
+// same text as render(), or the warning vanishes until the next full render.
+function godStatusText(g) {
+  return g.error ? g.status + " — " + g.error : g.warning ? g.status + " — " + g.warning : g.status || "";
+}
+
 function paintJob(job) {
   const sel = (attr) => document.querySelectorAll(`[${attr}="${CSS.escape(job.id)}"]`);
   sel("data-job-bar").forEach((el) => { el.style.width = (job.progress || 0) + "%"; });
-  sel("data-job-status").forEach((el) => { el.textContent = job.status || ""; });
+  sel("data-job-status").forEach((el) => {
+    el.textContent = el.dataset.statusKind === "god" ? godStatusText(job) : job.status || "";
+  });
 }
 
 async function addPaths(paths, action = "open") {
@@ -920,6 +929,11 @@ function nestedNote(res) {
 // .iso inside it is converted (one at a time, app-wide) into "<Game> (GOD)" next to that folder,
 // i.e. in the chosen output folder. Non-Xbox ISOs are skipped and kept.
 let godChain = Promise.resolve();
+/** Archive names still waiting or extracting (for the missing-disc check). */
+const extractingNames = () => jobs.filter((j) => ["ready", "queued", "opening", "saving"].includes(j.phase)).map((j) => j.name || N.baseName(j.path || ""));
+/** Where every disc of this ISO's game is; null on error (never blocks converting). */
+const discStatus = (path, queued, dest) => N.invoke("iso_disc_status", { path, queued, extracting: extractingNames(), dest: dest || null }).catch(() => null);
+const missingText = (st) => `Disc ${st.missing.join(", ")} of ${st.count} of this game is missing. You can still convert; add the missing disc later and it joins the same game folder.`;
 async function queueExtractedIsos(job, layout, res) {
   const mode = N.settings.autoIsoMode; // off | god | xex
   if (mode === "off") return;
@@ -933,11 +947,51 @@ async function queueExtractedIsos(job, layout, res) {
   if (!isos.length) return;
   const wantDelete = N.settings.deleteIsoAfterGod;
   const tokens = res.iso_tokens || [];
-  job.gods = isos.map((p, i) => ({ id: uid(), token: tokens[i] || "", path: p, name: N.baseName(p), phase: tokens[i] ? "queued" : "skipped", status: tokens[i] ? `Waiting to convert to ${label}…` : "Skipped: couldn't read this ISO after extracting · ISO kept", progress: 0, error: "", mode }));
+  const gods = isos.map((p, i) => ({ id: uid(), token: tokens[i] || "", path: p, name: N.baseName(p), phase: tokens[i] ? "queued" : "skipped", status: tokens[i] ? `Waiting to convert to ${label}…` : "Skipped: couldn't read this ISO after extracting · ISO kept", progress: 0, error: "", mode, disc: 1 }));
+  // Multi-disc: real disc numbers (header, then name), disc 1 before disc 2 of the same game.
+  const others = () => jobs.flatMap((j) => j.gods || []).filter((x) => x.phase === "queued").map((x) => x.path);
+  for (const g of gods) {
+    if (g.phase !== "queued") continue;
+    const st = await discStatus(g.path, [...others(), ...gods.map((x) => x.path)]);
+    if (!st) continue;
+    g.disc = st.disc || 1;
+    g.titleId = st.title_id || "";
+    g.discLine = st.line;
+    if (st.missing.length) {
+      g.discWarn = missingText(st);
+      (job.warnings ||= []).push(`${g.name}: ${g.discWarn}`);
+      batchStats.discWarn.push(`${g.name}: ${st.line}`);
+    }
+    // Discs of this game next to it but not in this batch: offer / add per the companion setting.
+    const extra = st.slots.filter((x) => x.state === "next_to_it" && x.path && !isos.includes(x.path)).map((x) => x.path);
+    if (extra.length && N.settings.companionDiscMode !== "never") {
+      const infos = [];
+      for (const p of extra) { const fi = await N.invoke("file_info", { path: p }).catch(() => null); if (fi) infos.push(fi); }
+      if (infos.length) {
+        if (N.settings.companionDiscMode === "always") openGod(infos);
+        else { openGod([]); godPanel.offer = [...new Set([...(godPanel.offer || []), ...extra])]; }
+      }
+    }
+  }
+  gods.sort((a, b) => (a.titleId || a.path).localeCompare(b.titleId || b.path) || a.disc - b.disc);
+  job.gods = gods;
   render();
   for (const g of job.gods) {
-    godChain = godChain.then(async () => {
+    const run = async () => {
       if (g.phase !== "queued") return;
+      // A lower disc of the same game is still queued or extracting: let it go first (once it
+      // is done or fails, this disc runs), so disc 1 owns the game folder and default.xex.
+      if (g.disc > 1 && !g.waited) {
+        const st = await discStatus(g.path, jobs.flatMap((j) => j.gods || []).filter((x) => x !== g && x.phase === "queued").map((x) => x.path));
+        if (st && st.slots.some((x) => x.disc < g.disc && (x.state === "queued" || x.state === "extract_queue"))) {
+          g.status = `Waiting for disc ${st.slots.find((x) => x.disc < g.disc && x.state !== "missing" && x.state !== "converted").disc} of this game…`;
+          render();
+          await new Promise((r) => setTimeout(r, 400));
+          if (!st.slots.some((x) => x.disc < g.disc && x.state === "extract_queue") || (g.tries = (g.tries || 0) + 1) > 1500) g.waited = true;
+          godChain = godChain.then(run);
+          return;
+        }
+      }
       g.phase = "saving";
       g.status = `Converting to ${label}…`;
       if (wantDelete) g.size = (await N.invoke("file_info", { path: g.path }).catch(() => ({}))).size || 0;
@@ -957,7 +1011,9 @@ async function queueExtractedIsos(job, layout, res) {
         const code = N.errCode(err);
         g.progress = 0;
         batchStats[/Not an Xbox|executable|CANCELLED/i.test(code) ? "godSkip" : "godFail"]++;
+        const raw = String(err?.message || err || "");
         if (code === "CANCELLED") { g.phase = "skipped"; g.status = `${label} cancelled · ISO kept`; }
+        else if (/^Skipped: this disc/.test(raw)) { g.phase = "skipped"; g.status = `${raw} · ISO kept`; }
         else if (/truncated/i.test(code)) { g.phase = "failed"; g.status = "Skipped: ISO is incomplete/truncated · ISO kept"; g.error = friendlyError(err); }
         else if (/Not an Xbox ISO|executable/i.test(code)) { g.phase = "skipped"; g.status = "Skipped: not an Xbox 360 / Xbox ISO · ISO kept"; }
         else { g.phase = "failed"; g.status = `${label} failed · ISO kept`; g.error = friendlyError(err); showError(`${g.name}: ${g.error}`); }
@@ -966,11 +1022,12 @@ async function queueExtractedIsos(job, layout, res) {
         off();
         render();
       }
-    });
+    };
+    godChain = godChain.then(run);
   }
 }
 // ---- Batch summary (shown when everything in the batch, incl. GOD + DLC, is finished) ----
-const newStats = () => ({ extracted: 0, skipped: 0, failed: 0, godOk: 0, godSkip: 0, godFail: 0, dlcOk: 0, dlcMissing: 0, dlcOther: 0, dlcFail: 0, freed: 0, lastOutput: "", failedJobs: [], skippedJobs: [] });
+const newStats = () => ({ extracted: 0, skipped: 0, failed: 0, godOk: 0, godSkip: 0, godFail: 0, dlcOk: 0, dlcMissing: 0, dlcOther: 0, dlcFail: 0, freed: 0, lastOutput: "", failedJobs: [], skippedJobs: [], discWarn: [] });
 let batchStats = newStats();
 let summary = null;
 let summaryTimer = null;
@@ -987,7 +1044,7 @@ function scheduleSummary() {
     if (st.dlcOk) parts.push(`${st.dlcOk} DLC/TU`);
     if (st.failed) parts.push(`${st.failed} failed`);
     notifyDone("Unpack — batch finished", parts.join(" · ") || "Done");
-    if (st.extracted + st.failed + st.skipped > 1 || st.godOk + st.godFail + st.dlcOk > 0) { summary = { ...st, failedJobs: [...(st.failedJobs || [])], skippedJobs: [...(st.skippedJobs || [])] }; render(); }
+    if (st.extracted + st.failed + st.skipped > 1 || st.godOk + st.godFail + st.dlcOk > 0) { summary = { ...st, failedJobs: [...(st.failedJobs || [])], skippedJobs: [...(st.skippedJobs || [])], discWarn: [...(st.discWarn || [])] }; render(); }
     batchStats = newStats();
   }, 600);
 }
@@ -1002,7 +1059,8 @@ function renderSummary() {
       <div class="sum-grid">${cell(s.extracted, "extracted", "ok")}${s.failed ? cell(s.failed, "failed", "bad") : ""}${s.skipped ? cell(s.skipped, "skipped") : ""}
       ${s.godOk + s.godSkip + s.godFail ? cell(s.godOk, "GOD converted", "ok") + (s.godSkip ? cell(s.godSkip, "ISOs skipped") : "") + (s.godFail ? cell(s.godFail, "GOD failed", "bad") : "") : ""}
       ${s.dlcOk + s.dlcMissing + s.dlcFail ? cell(s.dlcOk, "DLC / TU installed", "ok") + (s.dlcMissing ? cell(s.dlcMissing, "game not found") : "") + (s.dlcFail ? cell(s.dlcFail, "DLC failed", "bad") : "") : ""}
-      ${s.freed ? cell(formatBytes(s.freed), "space freed", "ok") : ""}</div></div>
+      ${s.freed ? cell(formatBytes(s.freed), "space freed", "ok") : ""}</div>
+      ${(s.discWarn || []).length ? `<div class="warn-text" data-sum-discs>⚠ Missing discs: ${s.discWarn.map((w) => escapeHtml(w)).join("<br>")}</div>` : ""}</div>
     <div class="actions">${retry}${s.lastOutput ? `<button class="btn btn-secondary btn-sm" data-sum-open type="button" title="Show the output in Explorer">Open folder</button>` : ""}<button class="btn btn-quiet" data-sum-close type="button" aria-label="Dismiss summary">${SV(14, 14, ICONS.x)}</button></div>
   </section>`;
 }
@@ -1090,6 +1148,13 @@ async function openLibrary() {
     libraryView.allGames = idx.games || [];
     libraryView.stale = !!idx.stale;
     libraryView.scannedAt = idx.scanned_at || 0;
+    if (idx.cached) {
+      // Cached index shown instantly; refresh in the background so new or removed games appear.
+      const view = libraryView;
+      N.invoke("library_index", { libraries: dlcLibraries(), allowCoverNetwork: N.settings.coverArtNetwork, maxAgeSecs: 0 })
+        .then((fresh) => { if (libraryView === view && fresh?.games) { view.allGames = fresh.games; view.games = filterLibraryGames(view.allGames); view.scannedAt = fresh.scanned_at || 0; render(); } })
+        .catch(() => {});
+    }
     for (const g of libraryView.allGames.slice(0, 80)) {
       const src = await localCoverSrc(g.path);
       if (src) libraryView.covers[g.path] = src;
@@ -1172,7 +1237,7 @@ function bindLibrary() {
   const close = () => { libraryView = null; render(); };
   root.querySelector("[data-lib-close]")?.addEventListener("click", close);
   root.querySelector("[data-lib-refresh]")?.addEventListener("click", () => openLibrary());
-  root.querySelector("[data-lib-q]")?.addEventListener("input", (e) => { libraryView.q = e.target.value; N.settings.libQuery = e.target.value; libraryView.games = filterLibraryGames(libraryView.allGames); render(); });
+  root.querySelector("[data-lib-q]")?.addEventListener("input", (e) => { libraryView.q = e.target.value; N.settings.libQuery = e.target.value; libraryView.games = filterLibraryGames(libraryView.allGames); const pos = e.target.selectionStart; render(); const n = app.querySelector("[data-lib-q]"); n?.focus(); n?.setSelectionRange(pos, pos); });
   root.querySelector("[data-lib-sort]")?.addEventListener("change", (e) => { libraryView.sort = e.target.value; N.settings.libSort = e.target.value; libraryView.games = filterLibraryGames(libraryView.allGames); render(); });
   root.querySelector("[data-lib-filter]")?.addEventListener("change", (e) => { libraryView.filterKind = e.target.value; N.settings.libFilterKind = e.target.value; libraryView.games = filterLibraryGames(libraryView.allGames); render(); });
   app.querySelector("[data-lib-overlay]")?.addEventListener("click", (e) => { if (e.target === e.currentTarget) close(); });
@@ -1394,6 +1459,7 @@ async function xboxRestoreSave() {
   X.status = "Restoring save to console…"; render();
   try {
     const r = await N.invoke("saves_restore", { ...xboxCon(), ...meta, src });
+    for (const msg of r.recovered || []) showMigrationNotice(msg);
     const extra = r.backed_up ? ` ${r.backed_up} existing file${r.backed_up === 1 ? "" : "s"} backed up on console (${r.backup_remote}).` : "";
     toast(`Restored ${r.uploaded} file${r.uploaded === 1 ? "" : "s"} (${formatBytes(r.bytes)}) → ${r.remote}.${extra}`);
     X.status = "";
@@ -1421,17 +1487,10 @@ async function xboxPullScreenshots() {
   try {
     const r = await N.invoke("screenshots_pull", { ...xboxCon(), shots: X.shots.list, dest });
     toast(`Saved ${r.files} screenshot${r.files === 1 ? "" : "s"} (${formatBytes(r.bytes)}) → ${r.dest}`);
-    for (const s of X.shots.list) {
-      const local = `${r.dest}/${s.name}`;
-      try {
-        const buf = await N.invoke("read_file", { path: local });
-        const bytes = new Uint8Array(buf);
-        let bin = "";
-        for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
-        const mime = /\.jpe?g$/i.test(s.name) ? "image/jpeg" : "image/png";
-        X.shots.thumbs[s.name] = `data:${mime};base64,${btoa(bin)}`;
-      } catch { /* thumb optional */ }
-    }
+    // Thumbnails come from the exact bytes Rust saved (a taken name is saved as name-2.png),
+    // so a renamed copy never shows the old file (R21 L3).
+    X.shots.thumbs = {};
+    X.shots.list.forEach((s, i) => { const u = r.thumbs?.[i]; if (typeof u === "string" && /^data:image\/(png|jpeg|bmp);base64,[A-Za-z0-9+/=]+$/.test(u)) X.shots.thumbs[s.name] = u; });
   } catch (err) { showError(xboxError(err)); }
   finally { X.shotsBusy = false; render(); }
 }
@@ -1847,12 +1906,7 @@ async function exportModNames(list) {
   const out = await N.pickSave(`unpack-mod-names${ext}`, [{ name: csv ? "CSV" : "JSON", extensions: [csv ? "csv" : "json"] }], "Export mod names");
   if (!out) return;
   window.__exportPickSaveCalled = true;
-  const blob = new Blob([body], { type: csv ? "text/csv" : "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = N.baseName(out) || (csv ? "unpack-mod-names.csv" : "unpack-mod-names.json");
-  a.click();
-  URL.revokeObjectURL(a.href);
+  try { await N.saveText(out, body); } catch (e) { toast("Couldn't save: " + (e?.message || e)); return; }
   toast("Exported " + rows.length + " names to " + N.baseName(out));
 }
 function parseCsvLine(line) {
@@ -1942,12 +1996,7 @@ async function exportSavedLinks(links) {
   const out = await N.pickSave(name, [{ name: /^csv$/i.test(fmt.trim()) ? "CSV" : "JSON", extensions: [/^csv$/i.test(fmt.trim()) ? "csv" : "json"] }], "Export saved links");
   if (!out) return;
   window.__exportPickSaveCalled = true;
-  const blob = new Blob([body], { type: mime });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = N.baseName(out) || name;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  try { await N.saveText(out, body); } catch (e) { toast("Couldn't save: " + (e?.message || e)); return; }
   toast("Exported " + rows.length + " links.");
 }
 async function importSavedLinks(M) {
@@ -2761,7 +2810,7 @@ async function openGod(infos = []) {
         if (!item.title) item.title = r.name || item.name.replace(/\.iso$/i, "");
         item.phase = "ready";
         item.status = `${r.kind} · Title ID ${r.title_id}${item.discs > 1 || item.disc > 1 ? ` · Disc ${item.disc}${item.discs > 1 ? ` of ${item.discs}` : ""}` : ""} · ${formatBytes(r.data_size)} · ${r.parts} part${r.parts === 1 ? "" : "s"}`;
-        offerCompanions(item);
+        offerCompanions(item).then(() => { for (const o of godPanel?.items || []) if (o !== item && o.phase === "ready" && o.discs > 1) offerCompanions(o); });
       })
       .catch((err) => {
         item.phase = "failed";
@@ -2773,7 +2822,7 @@ async function openGod(infos = []) {
   render();
 }
 
-const unknownTitleText = (tid) => `Title ID ${tid} is not in Unpack's game list. It is converted anyway; the folder is named after the file (or the title you type).`;
+const unknownTitleText = (tid) => `Title ID ${tid} is not in Unpack's game list. It is converted anyway; the folder is named after the file (or the title you type), or, in a Content folder, after its TitleID.`;
 
 /** " · Disc 2 of 2, added to the folder of disc 1" for a finished convert. */
 function discNote(r) {
@@ -2783,16 +2832,26 @@ function discNote(r) {
   return ` · Disc ${r.disc_number || 1}${r.disc_count > 1 ? ` of ${r.disc_count}` : ""}${r.merged ? ", merged into the same game folder" : ""}`;
 }
 
-/** Other discs of the same game next to a picked ISO: offer them, never add them silently. */
+/** Other discs of the same game next to a picked ISO: offer them, never add them silently.
+ *  Also fills the per-game "Disc 1 of 2: …" line and the missing-disc warning. */
 async function offerCompanions(item) {
   const g = godPanel;
-  if (!g || item.auto) return;
+  if (!g) return;
+  const st = await discStatus(item.path, g.items.filter((x) => x !== item && x.phase !== "failed" && x.phase !== "done").map((x) => x.path), localStorage.getItem(GOD_DEST_KEY));
+  if (godPanel !== g) return;
+  if (st) {
+    item.disc = st.disc || item.disc || 1;
+    item.discs = Math.max(item.discs || 1, st.count || 1);
+    item.discLine = st.line;
+    item.discWarn = st.missing.length ? missingText(st) : "";
+  }
+  render();
   const mode = N.settings.companionDiscMode;
-  if (mode === "never") return;
-  const found = await N.invoke("iso_companions", { path: item.path }).catch(() => []);
-  const fresh = found.filter((p) => !g.items.some((x) => x.path === p) && !(g.declined || []).includes(p));
-  if (!fresh.length || godPanel !== g) return;
-  const soloDisc2 = (item.disc || 1) > 1 && !fresh.some((p) => /disc\s*1/i.test(N.baseName(p)));
+  if (mode === "never" || !st) return;
+  const fresh = st.slots.filter((x) => x.state === "next_to_it" && x.path).map((x) => x.path).filter((p) => !g.items.some((x) => x.path === p) && !(g.declined || []).includes(p));
+  if (!fresh.length) return;
+  // Disc 2+ picked alone with no disc 1 anywhere: ask instead of adding silently.
+  const soloDisc2 = item.disc > 1 && !st.slots.some((x) => x.disc === 1 && x.state !== "missing");
   if (mode === "always" && !soloDisc2) {
     const infos = [];
     for (const p of fresh) infos.push(await N.invoke("file_info", { path: p }));
@@ -2801,6 +2860,11 @@ async function offerCompanions(item) {
   }
   g.offer = [...new Set([...(g.offer || []), ...fresh])].filter((p) => !g.items.some((x) => x.path === p));
   render();
+}
+/** Re-run the disc check for every ready ISO (after one is added or removed). */
+function refreshDiscs() {
+  if (!godPanel) return;
+  for (const i of godPanel.items) if (i.phase === "ready" && i.discLine !== undefined) offerCompanions(i);
 }
 
 function renderGod() {
@@ -2817,6 +2881,8 @@ function renderGod() {
       <label class="god-title">Game title <input data-god-title="${escapeHtml(i.id)}" value="${escapeHtml(i.title)}" ${i.phase === "ready" || i.phase === "failed" ? "" : "disabled"} placeholder="Shown on the Xbox dashboard" maxlength="63" /></label>
       <div class="qbar"><div data-job-bar="${escapeHtml(i.id)}" style="width:${i.progress}%"></div></div>
       <div class="qstatus" data-job-status="${escapeHtml(i.id)}">${escapeHtml(i.status)}</div>
+      ${i.discLine ? `<div class="meta" data-god-discs>${escapeHtml(i.discLine)}</div>` : ""}
+      ${i.discWarn && i.phase !== "done" ? `<div class="warn-text" data-god-missing>⚠ ${escapeHtml(i.discWarn)}</div>` : ""}
       ${i.warning && i.phase !== "failed" ? `<div class="error-box" data-god-warning>${escapeHtml(i.warning)}</div>` : ""}
       ${i.merged ? `<div class="meta">This disc was added to the same game folder as the other disc, so the console shows one game.</div>` : ""}
       ${i.error ? `<div class="error-box danger">${escapeHtml(i.error)}</div>` : ""}
@@ -2828,7 +2894,7 @@ function renderGod() {
   const verify = g.verifyPath ? `<div class="meta" data-god-verify-out>${escapeHtml(g.verifyMsg || "")}</div>` : "";
   return `<div class="overlay"><div class="dialog dialog-wide" data-god>
     <h3>Xbox 360 ISO → GOD / extracted folder</h3>
-    <p>Turns Xbox 360 (and original Xbox) disc images into either Games on Demand (GOD) for HDD launch, or an extracted folder with <code>default.xex</code> and all game files (needed by many mods). Copy GOD Title-ID folders to <code>Content/0000000000000000/</code>, or extracted games to <code>Games\&lt;Name&gt;</code>. Only convert games you own.</p>
+    <p>Turns Xbox 360 (and original Xbox) disc images into either Games on Demand (GOD) for HDD launch, or an extracted folder with <code>default.xex</code> and all game files (needed by many mods). Copy GOD Title-ID folders to <code>Content/0000000000000000/</code> (pick that folder, the <code>Content</code> folder or the drive itself as output and the game goes straight into <code>&lt;TitleID&gt;\\00007000</code>, with no "(GOD)" folder around it; another disc joins the same TitleID folder, and a disc that's already there is skipped), or extracted games to <code>Games\&lt;Name&gt;</code>. Only convert games you own.</p>
     <div class="cmp-list">${rows || `<div class="preview-empty">Add ISO files, or drop them onto the window.</div>`}</div>
     ${offer}
     <div class="actions" style="margin:0.6rem 0 0.8rem">
@@ -2850,13 +2916,13 @@ function bindGod() {
   const g = godPanel;
   const find = (id) => g.items.find((i) => i.id === id);
   root.querySelectorAll("[data-god-title]").forEach((el) => el.addEventListener("input", () => { const i = find(el.dataset.godTitle); if (i) i.title = el.value; }));
-  root.querySelectorAll("[data-god-remove]").forEach((el) => el.addEventListener("click", () => { g.items = g.items.filter((i) => i.id !== el.dataset.godRemove); render(); }));
+  root.querySelectorAll("[data-god-remove]").forEach((el) => el.addEventListener("click", () => { g.items = g.items.filter((i) => i.id !== el.dataset.godRemove); render(); refreshDiscs(); }));
   root.querySelectorAll("[data-god-cancel]").forEach((el) => el.addEventListener("click", () => cancelGod(find(el.dataset.godCancel))));
   root.querySelector("[data-god-cancel-all]")?.addEventListener("click", () => g.items.forEach((i) => cancelGod(i)));
   root.querySelector("[data-god-close]")?.addEventListener("click", () => { godPanel = null; render(); });
   root.querySelector("[data-god-dest]")?.addEventListener("click", async () => {
     const p = await N.pickFolder("Where should the GOD folders go?");
-    if (p) { localStorage.setItem(GOD_DEST_KEY, p); render(); }
+    if (p) { localStorage.setItem(GOD_DEST_KEY, p); render(); refreshDiscs(); }
   });
   root.querySelector("[data-god-add]")?.addEventListener("click", async () => {
     const res = await window.__TAURI__.dialog.open({ multiple: true, title: "Pick Xbox ISOs", filters: [{ name: "Disc images", extensions: ["iso"] }] });
@@ -2942,6 +3008,15 @@ async function runGod(manual = true, mode = "god") {
       if (item.auto) toast(`${item.title || item.name} → ${outMode === "xex" ? "extracted folder" : "GOD"}.`);
     } catch (err) {
       const code = N.errCode(err);
+      const raw = String(err?.message || err || "");
+      if (/^Skipped: this disc/.test(raw)) {
+        // Content folder: this MediaID is already there, nothing was changed.
+        item.phase = "done";
+        item.progress = 0;
+        item.status = raw;
+        addHistory({ name: item.title || item.name, source: item.path, output: "", result: "skipped", label: "ISO skipped (already there)" });
+        continue;
+      }
       item.phase = code === "CANCELLED" ? "ready" : "failed";
       item.status = code === "CANCELLED" ? "Cancelled" : "Failed";
       item.error = code === "CANCELLED" ? "" : friendlyError(err);
@@ -3110,7 +3185,7 @@ const DROP_ART = `<svg viewBox="0 0 168 112" aria-hidden="true"><defs><linearGra
 
 // ---- Settings panel ----
 const SETTINGS_EXPORT_KEYS = ["destMode", "destPath", "autoIso", "delIso", "autoDlc", "autoTu", "moveDlc", "libraries", "mods", "modNames", "theme", "notify", "links", "consoles", "xboxLastDest", "xboxDrives", "maxJobs", "nested", "discord", "dlMaxGb", "companionDisc", "releaseCheck", "coverNet", "destPresets", "libSort", "libFilterKind", "libQuery"];
-function exportSettings() {
+async function exportSettings() {
   const includePw = confirm("Include saved Xbox FTP passwords in the export file?\n\nAnyone with this file can log into your console. Leave them out unless you need a full backup.");
   const data = { version: 1, exportedAt: new Date().toISOString(), settings: {} };
   for (const k of SETTINGS_EXPORT_KEYS) {
@@ -3123,13 +3198,11 @@ function exportSettings() {
       data.settings.consoles = JSON.stringify(list.map((c) => ({ ...c, pass: "" })));
     } catch {}
   }
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "unpack-settings.json";
-  a.click();
-  URL.revokeObjectURL(a.href);
-  toast("Settings exported.");
+  const out = await N.pickSave("unpack-settings.json", [{ name: "JSON", extensions: ["json"] }], "Export settings");
+  if (!out) return;
+  window.__exportPickSaveCalled = true;
+  try { await N.saveText(out, JSON.stringify(data, null, 2)); } catch (e) { toast("Couldn't save: " + (e?.message || e)); return; }
+  toast("Settings exported to " + N.baseName(out));
 }
 function importSettings() {
   const input = document.createElement("input");
@@ -3141,16 +3214,25 @@ function importSettings() {
     try {
       const data = JSON.parse(await f.text());
       const o = data.settings || data;
-      for (const [k, v] of Object.entries(o)) {
-        if (SETTINGS_EXPORT_KEYS.includes(k) || k.startsWith("unpack.")) localStorage.setItem(k.startsWith("unpack.") ? k : "unpack." + k, typeof v === "string" ? v : JSON.stringify(v));
+      // R21 L1/L2: checked values only; saved passwords kept; network opt-ins need a yes;
+      // folders on this PC are picked again rather than taken from the file.
+      const plan = planImport(o, (k) => localStorage.getItem("unpack." + k));
+      for (const [k, v] of Object.entries(plan.apply)) if (SETTINGS_EXPORT_KEYS.includes(k)) localStorage.setItem("unpack." + k, v);
+      if (plan.optIns.length) {
+        const names = { releaseCheck: "check for new Unpack versions", coverNet: "download cover art", discord: "Discord Rich Presence" };
+        if (confirm("This settings file turns on features that use the internet:\n\n- " + plan.optIns.map((k) => names[k] || k).join("\n- ") + "\n\nTurn them on?")) {
+          for (const k of plan.optIns) localStorage.setItem("unpack." + k, "1");
+        }
       }
-      toast("Settings imported. Re-open dialogs to refresh.");
+      const skipped = plan.dropped.length ? ` Skipped: ${plan.dropped.join(", ")} (invalid, or folders on this PC that you pick again).` : "";
+      toast("Settings imported." + skipped + " Re-open dialogs to refresh.");
       render();
     } catch (e) { toast("Could not import: " + e.message); }
   };
   input.click();
 }
 let settingsOpen = false;
+let usbWizardWarn = ""; // last USB wizard warnings, shown amber in Settings
 let releaseInfo = null; // { available, latest, url }
 let confirmDelIso = false;
 let foundRoots = null; // results of "Scan drives", shown for the user to approve one by one
@@ -3167,7 +3249,7 @@ function renderSettings() {
         <label class="switch"><input type="checkbox" data-setting="notify" aria-label="Notifications" ${N.settings.notify ? "checked" : ""}/><span></span></label></div>
     </div>
     ${N.IS_DESKTOP ? `<div class="set-group"><h4>Xbox</h4>
-      <div class="set-row" style="display:block"><div class="txt"><strong>Auto-convert extracted ISOs</strong><small>After a batch extracts into its own folder, Xbox 360 / original Xbox .isos inside become either GOD or an extracted <code>default.xex</code> folder next to that archive. Existing folders are never overwritten. Non-Xbox ISOs are skipped and kept.</small></div>
+      <div class="set-row" style="display:block"><div class="txt"><strong>Auto-convert extracted ISOs</strong><small>After a batch extracts into its own folder, Xbox 360 / original Xbox .isos inside become either GOD or an extracted <code>default.xex</code> folder next to that archive. Existing folders are never overwritten. When the output is a console <code>Content\\0000000000000000</code> folder (or the drive / <code>Content</code> folder holding it), GOD games go in only as <code>&lt;TitleID&gt;\\00007000\\…</code>: no "(GOD)" or archive-name folders, and archives that already hold a GOD game have just its TitleID folder moved in. Non-Xbox ISOs are skipped and kept.</small></div>
         <div class="seg" role="group" aria-label="Auto-convert ISOs" style="margin-top:.5rem">
           <button type="button" data-auto-iso="off" aria-pressed="${N.settings.autoIsoMode === "off"}">Off</button>
           <button type="button" data-auto-iso="god" aria-pressed="${N.settings.autoIsoMode === "god"}">GOD</button>
@@ -3194,6 +3276,7 @@ function renderSettings() {
         <label class="switch"><input type="checkbox" data-set-covernet aria-label="Download cover art" ${N.settings.coverArtNetwork ? "checked" : ""}/><span></span></label></div>
       <div class="set-row"><div class="txt"><strong>USB wizard</strong><small>Create the standard <code>Content</code> folder layout on a USB drive.</small></div>
         <button class="btn btn-secondary btn-sm" data-usb-wizard type="button">Prepare USB…</button></div>
+      ${usbWizardWarn ? `<div class="warn-text" data-usb-warn role="status" style="white-space:pre-line;margin:.2rem 0 .6rem">⚠ ${escapeHtml(usbWizardWarn)}</div>` : ""}
     </div>` : ""}
     <div class="set-group"><h4>Downloads</h4>
       <div class="set-row"><div class="txt"><strong>Max download size (GB)</strong><small>Refuses a transfer larger than this (default 20). Applies to Download from link.</small></div>
@@ -3246,7 +3329,12 @@ function bindSettings() {
     if (!rootPath) return;
     try {
       const r = await N.invoke("usb_prepare", { root: rootPath });
-      toast(r?.message || "USB folders created.");
+      const made = r.created?.length ? `Created ${r.created.length} folder${r.created.length === 1 ? "" : "s"}.` : "Folders already there.";
+      const msg = `${r.fat ? "FAT32 ✓" : `File system: ${r.fs_type}`} · ${made}`;
+      // Warnings are advice, not failures: amber note in Settings, not the red error banner.
+      usbWizardWarn = r.warnings?.length ? [msg, ...r.warnings, ...(r.big_files || []).slice(0, 5)].join("\n") : "";
+      if (!usbWizardWarn) toast(msg);
+      render();
     } catch (err) { toast(String(err?.message || err)); }
   });
   root.querySelector("[data-set-release]")?.addEventListener("change", (e) => { N.settings.releaseCheck = e.target.checked; });
@@ -3424,7 +3512,7 @@ async function stream7zMember(job, entryPath, writable, onStatus) {
 function safeSegment(name) {
   let s = String(name || "file").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/g, "").trim();
   if (!s || s === "." || s === "..") s = "file";
-  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(s)) s = "_" + s;
+  if (/^(con|prn|aux|nul|com[0-9]|lpt[0-9]|clock\$|conin\$|conout\$)$/i.test(s)) s = "_" + s;
   if (s.length > 72) s = s.slice(0, 64) + "-" + s.slice(-6);
   return s;
 }
@@ -3900,7 +3988,7 @@ function renderQueueJobs() {
       </div>${(j.gods || []).map((g) => `<div class="qrow sub">
         <span class="qname" title="${escapeHtml(g.error || g.path)}"><span class="dot ${escapeHtml(g.phase)}"></span>${fileIcon(g.phase === "saved" ? "god" : g.name)}<span class="name">${escapeHtml(g.name)}</span></span>
         <div class="qbar"><div data-job-bar="${escapeHtml(g.id)}" style="width:${g.progress || 0}%"></div></div>
-        <span class="qstatus${g.phase === "failed" ? " danger" : ""}" data-job-status="${escapeHtml(g.id)}" title="${escapeHtml(g.error || g.warning || g.status)}">${escapeHtml(g.error ? g.status + " — " + g.error : g.warning ? g.status + " — " + g.warning : g.status)}</span>
+        <span class="qstatus${g.phase === "failed" ? " danger" : ""}" data-job-status="${escapeHtml(g.id)}" data-status-kind="god" title="${escapeHtml(g.error || g.warning || g.status)}">${escapeHtml(godStatusText(g))}</span>
         ${g.phase === "saving" || g.phase === "queued" ? `<button class="btn btn-quiet" data-cancel-gods="${escapeHtml(j.id)}" type="button">Cancel</button>` : `<span></span>`}
       </div>`).join("")}${renderDlcRows(j.dlcRows)}`
       )
@@ -4333,6 +4421,11 @@ async function initDesktop() {
   await N.invoke("discord_set_enabled", { enabled: N.settings.discordPresence }).catch(() => {});
   // One-time notice when the update had to set the older settings profile aside (R19 L5).
   for (const msg of await N.invoke("migration_notices").catch(() => [])) showMigrationNotice(msg);
+  // R22 L(a): repair a save restore that was cut off (crash / power loss) last time. Only
+  // consoles with a local restore record are contacted; an unreachable one is retried later.
+  N.invoke("saves_recover", { consoles: (N.settings.consoles || []).map((k) => ({ host: k.host, port: +k.port || 21, user: k.user || "", pass: k.pass || "" })) })
+    .then((msgs) => { for (const msg of msgs || []) showMigrationNotice(msg); })
+    .catch(() => {});
   // Archives passed on the command line, by double-click, or from the Explorer menu.
   // A second launch while we're open forwards its request here (single-instance).
   let draining = Promise.resolve();
@@ -4352,7 +4445,9 @@ async function initDesktop() {
   drainLaunch();
   if (N.settings.releaseCheck) {
     try {
-      const info = await N.invoke("check_release", { current: "1.7.0" });
+      const current = await N.appVersion();
+      if (!current) throw new Error("no app version");
+      const info = await N.invoke("check_release", { current, optIn: true });
       releaseInfo = info;
       if (info?.available) toast(`Update available: ${info.latest}`);
     } catch {}
@@ -4361,10 +4456,12 @@ async function initDesktop() {
 
 restoreDesk().then(initDesktop);
 
-// Test bridge (127.0.0.1:18790): expose queue state for UI tests.
-if (typeof window !== "undefined" && location.hostname === "127.0.0.1" && location.port === "18790") {
+// Test bridge (examples/bridge.rs on 127.0.0.1, any UNPACK_BRIDGE_PORT, with tests/test-shim.js
+// loaded): expose queue state for UI tests. The real app is never served over http://127.0.0.1.
+if (typeof window !== "undefined" && location.protocol === "http:" && location.hostname === "127.0.0.1" && window.__TEST) {
   window.__unpackQueue = () => ({ waiting: waiting.length, phases: jobs.map((j) => j.phase), paused: N.settings.queuePaused });
   window.showError = showError;
+  window.__unpackRepaint = () => { for (const j of jobs) { paintJob(j); for (const g of j.gods || []) paintJob(g); } };
   window.__unpackTestPause = () => {
     const job = { id: uid(), native: true, path: "/tmp/fake.7z", name: "fake.7z", size: 1, files: [{ path: "a", size: 1 }], warnings: [], format: "7z", phase: "queued", status: "Waiting in queue…", progress: 0, error: "", password: "", cancelled: false };
     jobs.push(job);

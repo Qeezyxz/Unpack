@@ -386,8 +386,54 @@ fn same(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// R22 M2: a mod path the page asks to identify must be a folder/file picked in Unpack (saved
+/// mod folders are persisted grants, built-in menus session grants) and never a network share
+/// or device path.
+pub fn check_mod_path(grants: &crate::safecopy::Grants, p: &str) -> Result<PathBuf, String> {
+    let t = p.trim_start();
+    let lower = t.to_ascii_lowercase().replace('/', "\\");
+    if lower.starts_with("\\\\.\\") || (lower.starts_with("\\\\?\\") && !lower.starts_with("\\\\?\\unc\\")
+        && lower.as_bytes().get(5).is_none_or(|c| *c != b':'))
+    {
+        return Err(format!("{} is a device path; pick a normal folder.", crate::safecopy::plain(p)));
+    }
+    if lower.starts_with("\\\\") {
+        return Err(format!(
+            "{} is on a network share; Unpack only reads mods from this PC's drives.",
+            crate::safecopy::plain(p)
+        ));
+    }
+    let c = grants.check(p)?;
+    if c.display().to_string().starts_with("\\\\") {
+        return Err(format!(
+            "{} is on a network share; Unpack only reads mods from this PC's drives.",
+            crate::safecopy::plain(p)
+        ));
+    }
+    Ok(c)
+}
+
 #[cfg(test)]
 mod tests {
+    /// R22 M2: mod_identify only reads folders picked in Unpack (or saved mod folders, which
+    /// are persisted grants) and never a network share.
+    #[test]
+    fn r22_m2_identify_needs_a_grant_and_no_unc() {
+        let td = crate::testutil::TmpDir::new("mods-r22");
+        let picked = td.path().join("picked");
+        let other = td.path().join("other");
+        std::fs::create_dir_all(&picked).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let g = crate::safecopy::Grants::default();
+        g.grant_session(&picked);
+        assert!(check_mod_path(&g, &picked.display().to_string()).is_ok());
+        assert!(check_mod_path(&g, &other.display().to_string()).is_err());
+        for unc in ["\\\\server\\share\\mod", "//server/share/mod", "\\\\?\\UNC\\server\\share", "\\\\.\\C:\\x"] {
+            let e = check_mod_path(&g, unc).unwrap_err();
+            assert!(e.contains("network") || e.contains("device"), "{unc}: {e}");
+        }
+    }
+
     use super::*;
     use crate::dlc::tests::make_stfs;
     fn tmp(n: &str) -> crate::testutil::TmpDir {
