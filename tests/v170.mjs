@@ -127,7 +127,57 @@ await wait(800);
   await click("[data-fmt-json]");
   await wait(400);
   check("export: pick_save was used", await p.evaluate(() => window.__exportPickSaveCalled === true));
+  check("export: file written to the picked path", fs.existsSync("/tmp/unpack-v170/export.json") && Array.isArray(JSON.parse(fs.readFileSync("/tmp/unpack-v170/export.json", "utf8"))));
   await click("[data-mods-close]");
+}
+
+// R21 L1/L2: import keeps saved passwords, never turns on network opt-ins without a yes, drops PC folders
+{
+  await p.evaluate(() => {
+    localStorage.setItem("unpack.consoles", JSON.stringify([{ name: "X", host: "192.168.1.5", port: 21, user: "xboxftp", pass: "MySecret" }]));
+    localStorage.setItem("unpack.destPath", "D:\\Mine");
+  });
+  fs.writeFileSync(OUT + "/import.json", JSON.stringify({ version: 1, settings: {
+    consoles: JSON.stringify([{ name: "X", host: "192.168.1.5", port: 21, user: "xboxftp", pass: "" }]),
+    releaseCheck: "1", coverNet: "1", destPath: "C:\\Windows\\System32", maxJobs: "99" } }));
+  await click("[data-action=settings]");
+  await wait(300);
+  const [fc] = await Promise.all([p.waitForFileChooser({ timeout: 5000 }), click("[data-set-import]")]);
+  await fc.accept([OUT + "/import.json"]);
+  await wait(800);
+  const cons = JSON.parse((await ls("unpack.consoles")) || "[]");
+  check("import: saved password kept when the file has none", cons[0]?.pass === "MySecret", JSON.stringify(cons));
+  check("import: declined opt-ins stay off", (await ls("unpack.releaseCheck")) !== "1" && (await ls("unpack.coverNet")) !== "1");
+  check("import: asked about the opt-ins", errors.some((e) => /use the internet/.test(e)), errors.join(" | "));
+  check("import: destPath not taken from the file", (await ls("unpack.destPath")) === "D:\\Mine");
+  check("import: bad maxJobs ignored", (await ls("unpack.maxJobs")) !== "99");
+  for (let i = errors.length - 1; i >= 0; i--) if (/^DIALOG This settings file/.test(errors[i])) errors.splice(i, 1);
+  await click("[data-settings-close]");
+}
+
+// R21 nit: USB wizard warnings are an amber note in Settings, not the red error banner
+{
+  fs.mkdirSync(OUT + "/usb", { recursive: true });
+  await p.evaluate((f) => { window.__TEST.folder = f; }, OUT + "/usb");
+  await click("[data-action=settings]");
+  await wait(300);
+  await click("[data-usb-wizard]");
+  await wait(800);
+  const st = await p.evaluate(() => ({ warn: document.querySelector("[data-usb-warn]")?.textContent || "", banner: !document.getElementById("job-error")?.classList.contains("hidden") }));
+  check("usb wizard: warning shown amber in Settings", /not FAT32/.test(st.warn), st.warn);
+  check("usb wizard: red error banner not used", !st.banner);
+  await click("[data-settings-close]");
+}
+
+// R21 nit: update check sends the Tauri app version, not a hard-coded one
+{
+  await p.evaluate(() => localStorage.setItem("unpack.releaseCheck", "1"));
+  await p.evaluateOnNewDocument(() => { if (window.__TEST) window.__TEST.version = "9.8.7"; });
+  await p.reload({ waitUntil: "load" });
+  await wait(1200);
+  const calls = await p.evaluate(() => window.__TEST.calls.filter((c) => c[0] === "check_release").map((c) => c[1].current));
+  check("update check uses the app version", calls.length > 0 && calls.every((v) => v === "9.8.7"), JSON.stringify(calls));
+  await p.evaluate(() => localStorage.setItem("unpack.releaseCheck", "0"));
 }
 
 check("no page errors", errors.length === 0, errors.join(" | "));

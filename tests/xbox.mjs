@@ -131,7 +131,8 @@ check("one connection at a time", /already talking/.test(busy), busy);
 await click("[data-xb-cancel='7']"); await until(async () => /Cancelled/.test((await sends())[7]));
 const partSize = fs.existsSync(R("Usb0/big.bin.part")) ? fs.statSync(R("Usb0/big.bin.part")).size : 0;
 check("cancel keeps .part", /Cancelled/.test((await sends())[7]) && partSize > 0 && partSize < 400 << 20 && !fs.existsSync(R("Usb0/big.bin")), String(partSize));
-await click("[data-xb-go='7']"); await until(async () => /Send again|danger/.test(await p.evaluate(() => document.querySelectorAll(".xb-send")[7].innerHTML)), 120000);
+await click("[data-xb-go='7']"); await until(async () => !/Cancelled/.test((await sends())[7]));
+await until(async () => /Send again|danger/.test(await p.evaluate(() => document.querySelectorAll(".xb-send")[7].innerHTML)), 120000);
 check("resume completes + verified", /1 resumed.*sizes verified/.test((await sends())[7]) && fs.statSync(R("Usb0/big.bin")).size === 400 << 20, (await sends())[7]);
 
 // Editable destinations: validation, Browse, Reset, last folder per type, Send all to this folder
