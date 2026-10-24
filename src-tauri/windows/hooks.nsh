@@ -47,6 +47,22 @@ Var UnpackBakRar
   DeleteRegKey /ifempty HKCU "Software\Classes\.${EXT}"
 !macroend
 
+!macro UNPACK_ADD_ISO_VERBS
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.iso\shell\Unpack.OpenIso" "" "Open with Unpack"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.iso\shell\Unpack.OpenIso" "Icon" '"$INSTDIR\unpack.exe",0'
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.iso\shell\Unpack.OpenIso\command" "" '"$INSTDIR\unpack.exe" -- "%1"'
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.iso\shell\Unpack.ConvertGod" "" "Convert to GOD (Unpack)"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.iso\shell\Unpack.ConvertGod" "Icon" '"$INSTDIR\unpack.exe",0'
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.iso\shell\Unpack.ConvertGod\command" "" '"$INSTDIR\unpack.exe" --convert-god -- "%1"'
+!macroend
+
+!macro UNPACK_DEL_ISO_VERBS
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.iso\shell\Unpack.OpenIso"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.iso\shell\Unpack.ConvertGod"
+  DeleteRegKey /ifempty HKCU "Software\Classes\SystemFileAssociations\.iso\shell"
+  DeleteRegKey /ifempty HKCU "Software\Classes\SystemFileAssociations\.iso"
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   ReadRegStr $UnpackBak7z HKCU "Software\Classes\.7z" "7-Zip archive_backup"
   ReadRegStr $UnpackBakRar HKCU "Software\Classes\.rar" "RAR archive_backup"
@@ -69,6 +85,7 @@ Var UnpackBakRar
   !insertmacro UNPACK_ADD_VERBS ".tgz"
   !insertmacro UNPACK_ADD_VERBS ".bz2"
   !insertmacro UNPACK_ADD_VERBS ".xz"
+  !insertmacro UNPACK_ADD_ISO_VERBS
   ; Tell Explorer the menus changed (SHCNE_ASSOCCHANGED).
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 !macroend
@@ -82,5 +99,6 @@ Var UnpackBakRar
   !insertmacro UNPACK_DEL_VERBS ".tgz"
   !insertmacro UNPACK_DEL_VERBS ".bz2"
   !insertmacro UNPACK_DEL_VERBS ".xz"
+  !insertmacro UNPACK_DEL_ISO_VERBS
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 !macroend

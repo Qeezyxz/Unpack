@@ -1,4 +1,4 @@
-Unpack **1.6.0** merges the owner's later additions into the independently reviewed source (the 14-round review base), so the extra features keep every safety check of that base.
+In Unpack **1.6.0** I merged my later additions into the independently reviewed source (the 14-round review base), so the extra features keep every safety check of that base.
 
 ## Downloads
 

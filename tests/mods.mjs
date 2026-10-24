@@ -138,10 +138,11 @@ check("JSON import: existing skipped, junk dropped", impj.added === 0, JSON.stri
 await p.evaluate(() => localStorage.setItem("unpack.modNames", JSON.stringify([{ key: "=cmd", tid: "415608C3", gname: "@x" }])));
 await p.click("[data-mods-close]"); await wait(300); await p.click("[data-action=mods]"); await wait(800);
 await p.click("[data-mods-tab=names]"); await wait(300);
-const exp = await p.evaluate(async () => {
-  let body = ""; const orig = URL.createObjectURL; URL.createObjectURL = (b) => { b.text().then((t) => (body = t)); return "blob:x"; };
-  window.prompt = () => "csv"; document.querySelector("[data-mn-export]").click(); await new Promise((r) => setTimeout(r, 300)); URL.createObjectURL = orig; return body;
-});
+fs.mkdirSync("/tmp/unpack-mods-export", { recursive: true });
+await p.evaluate(() => { window.__TEST.save = "/tmp/unpack-mods-export/names.csv"; });
+await p.click("[data-mn-export]"); await p.waitForSelector("[data-fmt-csv]"); await p.click("[data-fmt-csv]"); await wait(500);
+const exp = fs.existsSync("/tmp/unpack-mods-export/names.csv") ? fs.readFileSync("/tmp/unpack-mods-export/names.csv", "utf8") : "";
+fs.rmSync("/tmp/unpack-mods-export", { recursive: true, force: true });
 check("CSV export escapes formulas", /"'=cmd"/.test(exp) && /"'@x"/.test(exp), exp);
 await p.click("[data-mn-del='0']"); await wait(200);
 check("delete entry", await p.evaluate(() => JSON.parse(localStorage.getItem("unpack.modNames")).length === 0));

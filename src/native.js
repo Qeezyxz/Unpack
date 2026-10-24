@@ -4,6 +4,10 @@
 const T = window.__TAURI__;
 export const IS_DESKTOP = !!(T && T.core);
 export const invoke = (cmd, args) => T.core.invoke(cmd, args);
+/** The app's own version from Tauri (tauri.conf.json), or null when it can't be read. */
+export async function appVersion() {
+  try { return T?.app?.getVersion ? String(await T.app.getVersion()) : null; } catch { return null; }
+}
 
 const LS = "unpack.";
 export const settings = {
@@ -31,6 +35,8 @@ export const settings = {
   // DLC: auto-install after extract (copy, non-destructive) is on by default; move is off.
   get autoDlc() { return localStorage.getItem(LS + "autoDlc") !== "0"; },
   set autoDlc(v) { localStorage.setItem(LS + "autoDlc", v ? "1" : "0"); },
+  get autoTu() { return localStorage.getItem(LS + "autoTu") !== "0"; },
+  set autoTu(v) { localStorage.setItem(LS + "autoTu", v ? "1" : "0"); },
   get moveDlc() { return localStorage.getItem(LS + "moveDlc") === "1"; },
   set moveDlc(v) { localStorage.setItem(LS + "moveDlc", v ? "1" : "0"); },
   get libraries() { try { const v = JSON.parse(localStorage.getItem(LS + "libraries") || "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; } },
@@ -63,11 +69,40 @@ export const settings = {
   // "Open zips inside zips" (extract archives found inside an archive too). On by default.
   get nested() { return localStorage.getItem(LS + "nested") !== "0"; },
   set nested(v) { localStorage.setItem(LS + "nested", v ? "1" : "0"); },
-  // Discord Rich Presence (local IPC to the Discord app). On by default; off clears it.
+  // Discord Rich Presence (local IPC to the Discord app). Off by default; turning it off clears it.
   get discordPresence() { return localStorage.getItem(LS + "discord") === "1"; }, // off unless turned on
   set discordPresence(v) { localStorage.setItem(LS + "discord", v ? "1" : "0"); },
   get dlMaxGb() { const n = Number(localStorage.getItem(LS + "dlMaxGb")); return Number.isFinite(n) && n > 0 ? n : 20; },
   set dlMaxGb(v) { localStorage.setItem(LS + "dlMaxGb", String(Math.max(1, Math.min(500, Number(v) || 20)))); },
+  /** ask | always | never — auto-queue other discs of the same game when converting ISOs. */
+  get companionDiscMode() {
+    const v = localStorage.getItem(LS + "companionDisc") || "ask";
+    return v === "always" || v === "never" ? v : "ask";
+  },
+  set companionDiscMode(v) { localStorage.setItem(LS + "companionDisc", v === "always" || v === "never" ? v : "ask"); },
+  get releaseCheck() { return localStorage.getItem(LS + "releaseCheck") === "1"; },
+  set releaseCheck(v) { localStorage.setItem(LS + "releaseCheck", v ? "1" : "0"); },
+  get coverArtNetwork() { return localStorage.getItem(LS + "coverNet") === "1"; },
+  set coverArtNetwork(v) { localStorage.setItem(LS + "coverNet", v ? "1" : "0"); },
+  get destPresets() {
+    try {
+      const v = JSON.parse(localStorage.getItem(LS + "destPresets") || "[]");
+      return Array.isArray(v)
+        ? v.filter((x) => x && typeof x.name === "string" && typeof x.path === "string" && /^\/[A-Za-z][A-Za-z0-9]{0,15}(\/[^\/]{1,42})*$/.test(x.path) && x.path.length < 600)
+            .map((x) => ({ name: String(x.name).slice(0, 40), path: x.path }))
+            .slice(0, 20)
+        : [];
+    } catch { return []; }
+  },
+  set destPresets(v) { localStorage.setItem(LS + "destPresets", JSON.stringify(v)); },
+  get queuePaused() { return localStorage.getItem(LS + "queuePaused") === "1"; },
+  set queuePaused(v) { localStorage.setItem(LS + "queuePaused", v ? "1" : "0"); },
+  get libSort() { return localStorage.getItem(LS + "libSort") || "name"; },
+  set libSort(v) { localStorage.setItem(LS + "libSort", v || "name"); },
+  get libFilterKind() { return localStorage.getItem(LS + "libFilterKind") || "all"; },
+  set libFilterKind(v) { localStorage.setItem(LS + "libFilterKind", v || "all"); },
+  get libQuery() { return localStorage.getItem(LS + "libQuery") || ""; },
+  set libQuery(v) { localStorage.setItem(LS + "libQuery", String(v || "").slice(0, 120)); },
 };
 
 export const ARCHIVE_RE = /\.(zip|rar|7z|tar|tgz|gz|bz2|xz|tar\.gz|tar\.bz2|tar\.xz|cab|arj|lzh|z|lzma|wim|zipx)$/i;
@@ -94,9 +129,14 @@ export async function pickFiles(title) {
   return await invoke("pick_path", { kind: "files", title });
 }
 
-export async function pickSave(defaultPath, _filters) {
+export async function pickSave(defaultPath, filters, title = "Save file") {
   // Rust picker so the parent folder is granted for create_archive.
-  return await invoke("pick_save", { title: "Save archive", defaultPath: defaultPath || null });
+  return await invoke("pick_save", { title, defaultPath: defaultPath || null, filters: filters || null });
+}
+
+/** Write a text export to a path returned by pickSave (the Rust side re-checks the grant). */
+export async function saveText(path, text) {
+  return await invoke("save_text_file", { path, text });
 }
 
 /** Subscribe to native drag & drop; calls onDrop(paths) and onHover(bool). */

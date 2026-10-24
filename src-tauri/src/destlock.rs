@@ -35,14 +35,28 @@ fn key(dest: &Path) -> PathBuf {
         if let Ok(c) = std::fs::canonicalize(&cur) {
             break c;
         }
-        match (cur.file_name().map(|n| n.to_os_string()), cur.parent().map(Path::to_path_buf)) {
-            (Some(n), Some(p)) if !p.as_os_str().is_empty() => { rest.push(n); cur = p; }
-            _ => { rest.clear(); break dest.to_path_buf(); }
+        match (
+            cur.file_name().map(|n| n.to_os_string()),
+            cur.parent().map(Path::to_path_buf),
+        ) {
+            (Some(n), Some(p)) if !p.as_os_str().is_empty() => {
+                rest.push(n);
+                cur = p;
+            }
+            _ => {
+                rest.clear();
+                break dest.to_path_buf();
+            }
         }
     };
     let mut full = base;
-    for n in rest.iter().rev() { full.push(n); }
-    let text = full.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+    for n in rest.iter().rev() {
+        full.push(n);
+    }
+    let text = full
+        .to_string_lossy()
+        .trim_end_matches(['/', '\\'])
+        .to_string();
     #[cfg(windows)]
     let text = text.to_lowercase();
     PathBuf::from(text)
@@ -73,24 +87,39 @@ impl Drop for DestGuard {
 
 /// Block until `dest` is free, checking `cancelled` while queued (returns `ERR_CANCELLED`).
 /// `on_wait` runs once if this job has to queue.
-pub fn acquire(dest: &Path, on_wait: impl FnOnce(), cancelled: &dyn Fn() -> bool) -> Result<DestGuard, String> {
+pub fn acquire(
+    dest: &Path,
+    on_wait: impl FnOnce(),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<DestGuard, String> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let key = key(dest);
     let me = std::thread::current().id();
     let b = busy();
     let mut folders = b.folders.lock().unwrap_or_else(|e| e.into_inner());
     let mut on_wait = Some(on_wait);
-    while folders.iter().any(|h| h.thread != me && overlaps(&h.key, &key)) {
+    while folders
+        .iter()
+        .any(|h| h.thread != me && overlaps(&h.key, &key))
+    {
         if cancelled() {
             return Err(crate::archive::ERR_CANCELLED.into());
         }
         if let Some(notify) = on_wait.take() {
             notify();
         }
-        folders = b.freed.wait_timeout(folders, Duration::from_millis(200)).unwrap_or_else(|e| e.into_inner()).0;
+        folders = b
+            .freed
+            .wait_timeout(folders, Duration::from_millis(200))
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
     }
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    folders.push(Held { id, key, thread: me });
+    folders.push(Held {
+        id,
+        key,
+        thread: me,
+    });
     Ok(DestGuard { id })
 }
 
@@ -126,8 +155,14 @@ mod tests {
             g.store(true, Ordering::SeqCst);
         });
         std::thread::sleep(Duration::from_millis(150));
-        assert!(waited.load(Ordering::SeqCst), "second job should report it is queued");
-        assert!(!got_it.load(Ordering::SeqCst), "second job must not start yet");
+        assert!(
+            waited.load(Ordering::SeqCst),
+            "second job should report it is queued"
+        );
+        assert!(
+            !got_it.load(Ordering::SeqCst),
+            "second job must not start yet"
+        );
         drop(first);
         t.join().unwrap();
         assert!(got_it.load(Ordering::SeqCst));
@@ -158,10 +193,15 @@ mod tests {
         let _first = acquire(&dest, || {}, &|| false).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let (s, d) = (stop.clone(), dest.clone());
-        let t = std::thread::spawn(move || acquire(&d, || {}, &|| s.load(Ordering::SeqCst)).map(|_| ()));
+        let t = std::thread::spawn(move || {
+            acquire(&d, || {}, &|| s.load(Ordering::SeqCst)).map(|_| ())
+        });
         std::thread::sleep(Duration::from_millis(100));
         stop.store(true, Ordering::SeqCst);
-        assert_eq!(t.join().unwrap().unwrap_err(), crate::archive::ERR_CANCELLED);
+        assert_eq!(
+            t.join().unwrap().unwrap_err(),
+            crate::archive::ERR_CANCELLED
+        );
         let _ = std::fs::remove_dir_all(&dest);
     }
 
@@ -171,17 +211,34 @@ mod tests {
         let _parent = acquire(&dest, || {}, &|| false).unwrap();
         let waited = Arc::new(AtomicBool::new(false));
         let (w, d) = (waited.clone(), dest.join("Game"));
-        let t = std::thread::spawn(move || { let stop = std::time::Instant::now(); acquire(&d, || w.store(true, Ordering::SeqCst), &move || stop.elapsed() > Duration::from_millis(300)).is_err() });
+        let t = std::thread::spawn(move || {
+            let stop = std::time::Instant::now();
+            acquire(&d, || w.store(true, Ordering::SeqCst), &move || {
+                stop.elapsed() > Duration::from_millis(300)
+            })
+            .is_err()
+        });
         assert!(t.join().unwrap(), "child folder must wait for the parent");
         assert!(waited.load(Ordering::SeqCst));
         // and the other way round
         let other = fresh("tree2");
         let _child = acquire(&other.join("x/y"), || {}, &|| false).unwrap();
         let o = other.clone();
-        let t = std::thread::spawn(move || { let stop = std::time::Instant::now(); acquire(&o, || {}, &move || stop.elapsed() > Duration::from_millis(300)).is_err() });
+        let t = std::thread::spawn(move || {
+            let stop = std::time::Instant::now();
+            acquire(&o, || {}, &move || {
+                stop.elapsed() > Duration::from_millis(300)
+            })
+            .is_err()
+        });
         assert!(t.join().unwrap(), "parent must wait for a child");
         // the same thread may nest
-        let _nested = acquire(&dest.join("Game"), || panic!("own thread must not wait"), &|| false).unwrap();
+        let _nested = acquire(
+            &dest.join("Game"),
+            || panic!("own thread must not wait"),
+            &|| false,
+        )
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dest);
         let _ = std::fs::remove_dir_all(&other);
     }
@@ -190,10 +247,16 @@ mod tests {
     #[test]
     fn r15_l3_missing_folder_resolves_through_a_symlinked_parent() {
         let real = fresh("real");
-        let link = real.with_file_name(format!("{}-link", real.file_name().unwrap().to_string_lossy()));
+        let link = real.with_file_name(format!(
+            "{}-link",
+            real.file_name().unwrap().to_string_lossy()
+        ));
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert_eq!(key(&link.join("new/deeper")), key(&real.join("new/deeper")));
-        assert_eq!(key(&link.join("new/deeper")), std::fs::canonicalize(&real).unwrap().join("new/deeper"));
+        assert_eq!(
+            key(&link.join("new/deeper")),
+            std::fs::canonicalize(&real).unwrap().join("new/deeper")
+        );
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_dir_all(&real);
     }

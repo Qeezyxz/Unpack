@@ -70,10 +70,7 @@ pub fn activity_for(view: &str, job: Option<&str>) -> ActivityText {
         "settings" => "Settings",
         _ => "Xbox 360 toolkit",
     };
-    let state = match job.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(job) => job,
-        None => "Idle",
-    };
+    let state = job.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Idle");
     ActivityText {
         details: details.into(),
         state: state.into(),
@@ -212,7 +209,9 @@ mod tests {
         let (mut s, _) = loop {
             match l.accept() {
                 Ok(c) => break c,
-                Err(_) if t0.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) if t0.elapsed() < Duration::from_secs(5) => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
                 Err(e) => panic!("never connected: {e}"),
             }
         };

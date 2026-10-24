@@ -147,20 +147,28 @@ fn hex_lower(b: &[u8]) -> String {
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !s.len().is_multiple_of(2) || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 pub fn parse_pubkey(hex: &str) -> Result<VerifyingKey, String> {
-    let b = unhex(hex).filter(|b| b.len() == 32).ok_or("The catalog public key must be 64 hex characters (Ed25519).")?;
-    VerifyingKey::from_bytes(&b.try_into().unwrap()).map_err(|_| "That isn't a valid Ed25519 public key.".to_string())
+    let b = unhex(hex)
+        .filter(|b| b.len() == 32)
+        .ok_or("The catalog public key must be 64 hex characters (Ed25519).")?;
+    VerifyingKey::from_bytes(&b.try_into().unwrap())
+        .map_err(|_| "That isn't a valid Ed25519 public key.".to_string())
 }
 
 pub fn parse_signature(text: &[u8]) -> Result<Signature, String> {
     let t = std::str::from_utf8(text).map_err(|_| "The signature file isn't text.".to_string())?;
-    let b = unhex(t).filter(|b| b.len() == 64).ok_or("The signature must be 128 hex characters (Ed25519).")?;
+    let b = unhex(t)
+        .filter(|b| b.len() == 64)
+        .ok_or("The signature must be 128 hex characters (Ed25519).")?;
     Ok(Signature::from_bytes(&b.try_into().unwrap()))
 }
 
@@ -168,8 +176,10 @@ pub fn parse_signature(text: &[u8]) -> Result<Signature, String> {
 pub fn verify(bytes: &[u8], sig: &[u8], pubkey_hex: &str) -> Result<(), String> {
     let key = parse_pubkey(pubkey_hex)?;
     let sig = parse_signature(sig)?;
-    key.verify_strict(bytes, &sig)
-        .map_err(|_| "The catalog's signature doesn't match the pinned public key. Nothing was loaded.".to_string())
+    key.verify_strict(bytes, &sig).map_err(|_| {
+        "The catalog's signature doesn't match the pinned public key. Nothing was loaded."
+            .to_string()
+    })
 }
 
 /// For the signing tool: a new keypair (secret seed hex, public key hex).
@@ -181,12 +191,16 @@ pub fn keygen() -> Result<(String, String), String> {
 }
 
 pub fn signing_key(secret_hex: &str) -> Result<SigningKey, String> {
-    let b = unhex(secret_hex).filter(|b| b.len() == 32).ok_or("The secret key must be 64 hex characters.")?;
+    let b = unhex(secret_hex)
+        .filter(|b| b.len() == 32)
+        .ok_or("The secret key must be 64 hex characters.")?;
     Ok(SigningKey::from_bytes(&b.try_into().unwrap()))
 }
 
 pub fn public_of(secret_hex: &str) -> Result<String, String> {
-    Ok(hex_lower(signing_key(secret_hex)?.verifying_key().as_bytes()))
+    Ok(hex_lower(
+        signing_key(secret_hex)?.verifying_key().as_bytes(),
+    ))
 }
 
 pub fn sign(bytes: &[u8], secret_hex: &str) -> Result<String, String> {
@@ -196,19 +210,33 @@ pub fn sign(bytes: &[u8], secret_hex: &str) -> Result<String, String> {
 // ---- validation ----
 
 fn clean(s: &str, max: usize) -> String {
-    s.trim().chars().filter(|c| !c.is_control()).take(max).collect()
+    s.trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(max)
+        .collect()
 }
 
 fn valid_id(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 64 && s.chars().next().unwrap().is_ascii_alphanumeric() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().next().unwrap().is_ascii_alphanumeric()
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
 }
 
 /// https only (plain http only for the loopback test servers).
 pub fn url_ok(u: &str) -> Result<(), String> {
     let p = url::Url::parse(u).map_err(|_| format!("\"{}\" isn't a valid URL", clean(u, 80)))?;
     if p.scheme() == "https" || (p.scheme() == "http" && crate::download::allow_test_loopback()) {
-        if p.host_str().map_or(true, |h| h.is_empty()) || !p.username().is_empty() || p.password().is_some() {
-            return Err(format!("\"{}\" must be a plain https link without a login", clean(u, 80)));
+        if p.host_str().is_none_or(|h| h.is_empty())
+            || !p.username().is_empty()
+            || p.password().is_some()
+        {
+            return Err(format!(
+                "\"{}\" must be a plain https link without a login",
+                clean(u, 80)
+            ));
         }
         return Ok(());
     }
@@ -221,8 +249,20 @@ pub fn sha_ok(s: &str) -> bool {
 
 /// Folder segments for a handler's dest_path, checked against FATX rules and the folders that
 /// handler may write into. Never the drive root (launch.ini lives there).
-pub fn dest_segments(handler: &str, dest_path: Option<&str>, tid: &str, mod_name: &str) -> Result<Vec<String>, String> {
-    let content = |kind: &str| vec!["Content".to_string(), "0000000000000000".into(), tid.to_string(), kind.into()];
+pub fn dest_segments(
+    handler: &str,
+    dest_path: Option<&str>,
+    tid: &str,
+    mod_name: &str,
+) -> Result<Vec<String>, String> {
+    let content = |kind: &str| {
+        vec![
+            "Content".to_string(),
+            "0000000000000000".into(),
+            tid.to_string(),
+            kind.into(),
+        ]
+    };
     let default: Vec<String> = match handler {
         "xex" => vec!["Games".into(), crate::ftp::fatx_name(mod_name)],
         "plugin" => vec!["Plugins".into()],
@@ -230,7 +270,12 @@ pub fn dest_segments(handler: &str, dest_path: Option<&str>, tid: &str, mod_name
         "dlc" => content("00000002"),
         "trainer" => vec!["Trainers".into(), tid.into()],
         "patch" => vec!["Patches".into(), tid.into()],
-        _ => return Err(format!("unknown install handler \"{}\"", clean(handler, 20))),
+        _ => {
+            return Err(format!(
+                "unknown install handler \"{}\"",
+                clean(handler, 20)
+            ))
+        }
     };
     let segs = match dest_path.map(str::trim).filter(|s| !s.is_empty()) {
         None => default.clone(),
@@ -247,12 +292,24 @@ pub fn dest_segments(handler: &str, dest_path: Option<&str>, tid: &str, mod_name
         _ => &[],
     };
     let ok = if allowed.is_empty() {
-        segs.iter().map(|s| s.to_ascii_uppercase()).eq(default.iter().map(|s| s.to_ascii_uppercase()))
+        segs.iter()
+            .map(|s| s.to_ascii_uppercase())
+            .eq(default.iter().map(|s| s.to_ascii_uppercase()))
     } else {
-        segs.first().map_or(false, |f| allowed.iter().any(|a| a.eq_ignore_ascii_case(f))) && (segs.len() >= 2 || handler == "plugin")
+        segs.first()
+            .is_some_and(|f| allowed.iter().any(|a| a.eq_ignore_ascii_case(f)))
+            && (segs.len() >= 2 || handler == "plugin")
     };
     if !ok || segs.len() > 12 {
-        return Err(format!("dest_path \"{}\" isn't allowed for {handler} (allowed: {})", crate::ftp::join_remote(&segs), if allowed.is_empty() { crate::ftp::join_remote(&default) } else { allowed.join(", ") }));
+        return Err(format!(
+            "dest_path \"{}\" isn't allowed for {handler} (allowed: {})",
+            crate::ftp::join_remote(&segs),
+            if allowed.is_empty() {
+                crate::ftp::join_remote(&default)
+            } else {
+                allowed.join(", ")
+            }
+        ));
     }
     Ok(segs)
 }
@@ -260,21 +317,34 @@ pub fn dest_segments(handler: &str, dest_path: Option<&str>, tid: &str, mod_name
 pub fn check_entry(e: &Entry) -> Result<Entry, String> {
     let mut e = e.clone();
     if !valid_id(&e.id) {
-        return Err(format!("id \"{}\" must be lowercase letters, digits, . _ - (max 64)", clean(&e.id, 70)));
+        return Err(format!(
+            "id \"{}\" must be lowercase letters, digits, . _ - (max 64)",
+            clean(&e.id, 70)
+        ));
     }
     let tid = e.game.title_id.trim().to_ascii_uppercase();
     if crate::modnames::parse_tid(&tid).is_none() {
-        return Err(format!("game.title_id \"{}\" isn't a valid TitleID", clean(&e.game.title_id, 20)));
+        return Err(format!(
+            "game.title_id \"{}\" isn't a valid TitleID",
+            clean(&e.game.title_id, 20)
+        ));
     }
     e.game.title_id = tid.clone();
     e.game.name = clean(&e.game.name, 120);
     if e.game.name.is_empty() {
-        e.game.name = crate::gamedb::name(u32::from_str_radix(&tid, 16).unwrap()).unwrap_or_default();
+        e.game.name =
+            crate::gamedb::name(u32::from_str_radix(&tid, 16).unwrap()).unwrap_or_default();
     }
     if e.game.aliases.len() > 20 {
         return Err("more than 20 game aliases".into());
     }
-    e.game.aliases = e.game.aliases.iter().map(|a| clean(a, 60)).filter(|a| a.chars().filter(|c| c.is_alphanumeric()).count() >= 2).collect();
+    e.game.aliases = e
+        .game
+        .aliases
+        .iter()
+        .map(|a| clean(a, 60))
+        .filter(|a| a.chars().filter(|c| c.is_alphanumeric()).count() >= 2)
+        .collect();
     e.mod_.name = clean(&e.mod_.name, 120);
     e.mod_.author = clean(&e.mod_.author, 80);
     e.mod_.version = clean(&e.mod_.version, 40);
@@ -290,7 +360,10 @@ pub fn check_entry(e: &Entry) -> Result<Entry, String> {
     }
     for r in e.requires.iter().chain(&e.conflicts) {
         if !valid_id(r) || r == &e.id {
-            return Err(format!("requires/conflicts id \"{}\" is invalid", clean(r, 70)));
+            return Err(format!(
+                "requires/conflicts id \"{}\" is invalid",
+                clean(r, 70)
+            ));
         }
     }
     if e.requires.len() > 20 || e.conflicts.len() > 50 {
@@ -298,7 +371,9 @@ pub fn check_entry(e: &Entry) -> Result<Entry, String> {
     }
     match &e.source_page {
         Some(p) => url_ok(p).map_err(|m| format!("source_page: {m}"))?,
-        None if e.paid || !e.redistribute => return Err("paid or non-redistributable entries need a source_page".into()),
+        None if e.paid || !e.redistribute => {
+            return Err("paid or non-redistributable entries need a source_page".into())
+        }
         None => {}
     }
     if e.files.len() > FILES_MAX {
@@ -322,20 +397,38 @@ pub fn check_entry(e: &Entry) -> Result<Entry, String> {
         }
         f.sha256 = sha;
         if !HANDLERS.contains(&f.install.handler.as_str()) {
-            return Err(format!("file {k}: unknown handler \"{}\"", clean(&f.install.handler, 20)));
+            return Err(format!(
+                "file {k}: unknown handler \"{}\"",
+                clean(&f.install.handler, 20)
+            ));
         }
         match f.install.dest.as_deref() {
             None | Some("any") | Some("hdd") | Some("usb") => {}
-            Some(d) => return Err(format!("file {k}: dest \"{}\" must be hdd, usb or any", clean(d, 20))),
+            Some(d) => {
+                return Err(format!(
+                    "file {k}: dest \"{}\" must be hdd, usb or any",
+                    clean(d, 20)
+                ))
+            }
         }
-        dest_segments(&f.install.handler, f.install.dest_path.as_deref(), &tid, &e.mod_.name).map_err(|m| format!("file {k}: {m}"))?;
+        dest_segments(
+            &f.install.handler,
+            f.install.dest_path.as_deref(),
+            &tid,
+            &e.mod_.name,
+        )
+        .map_err(|m| format!("file {k}: {m}"))?;
         if let Some(d) = &f.install.dashlaunch {
             if f.install.handler != "plugin" {
-                return Err(format!("file {k}: dashlaunch is only for the plugin handler"));
+                return Err(format!(
+                    "file {k}: dashlaunch is only for the plugin handler"
+                ));
             }
             if let Some(s) = d.slot {
                 if !(ini::FIRST_SLOT..=ini::LAST_SLOT).contains(&s) {
-                    return Err(format!("file {k}: dashlaunch.slot must be 2–5 (plugin1 is reserved)"));
+                    return Err(format!(
+                        "file {k}: dashlaunch.slot must be 2–5 (plugin1 is reserved)"
+                    ));
                 }
             }
             if let Some(p) = &d.file {
@@ -344,7 +437,14 @@ pub fn check_entry(e: &Entry) -> Result<Entry, String> {
                 }
             }
         }
-        if !dests.insert((f.install.dest_path.clone().unwrap_or_default().to_lowercase(), file_name_of(&f.url)?.to_lowercase())) {
+        if !dests.insert((
+            f.install
+                .dest_path
+                .clone()
+                .unwrap_or_default()
+                .to_lowercase(),
+            file_name_of(&f.url)?.to_lowercase(),
+        )) {
             return Err(format!("file {k}: two files would land on the same name"));
         }
     }
@@ -358,14 +458,28 @@ pub fn check_entry(e: &Entry) -> Result<Entry, String> {
 /// The name a downloaded (non-archive) file gets: the URL's last path segment, FATX-checked.
 pub fn file_name_of(u: &str) -> Result<String, String> {
     let p = url::Url::parse(u).map_err(|e| e.to_string())?;
-    let last = p.path_segments().and_then(|s| s.last()).unwrap_or("").to_string();
+    let last = p
+        .path_segments()
+        .and_then(|mut s| s.next_back())
+        .unwrap_or("")
+        .to_string();
     let name = crate::download::sanitize_name(&percent(&last));
-    crate::ftp::check_segment(&name).map_err(|m| format!("file name from {}: {m}", clean(u, 80)))?;
+    crate::ftp::check_segment(&name)
+        .map_err(|m| format!("file name from {}: {m}", clean(u, 80)))?;
     Ok(name)
 }
 
 fn percent(s: &str) -> String {
-    url::form_urlencoded::parse(s.replace('+', "%2B").as_bytes()).map(|(k, v)| if v.is_empty() { k.into_owned() } else { format!("{k}={v}") }).collect::<Vec<_>>().join("&")
+    url::form_urlencoded::parse(s.replace('+', "%2B").as_bytes())
+        .map(|(k, v)| {
+            if v.is_empty() {
+                k.into_owned()
+            } else {
+                format!("{k}={v}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 pub fn is_archive_name(n: &str) -> bool {
@@ -374,36 +488,71 @@ pub fn is_archive_name(n: &str) -> bool {
 }
 
 /// Verify, then parse and validate. Invalid entries are skipped and listed in `problems`.
-pub fn load_bytes(bytes: &[u8], sig: &[u8], pubkey_hex: &str, source: &str) -> Result<Loaded, String> {
+pub fn load_bytes(
+    bytes: &[u8],
+    sig: &[u8],
+    pubkey_hex: &str,
+    source: &str,
+) -> Result<Loaded, String> {
     if bytes.len() as u64 > MANIFEST_MAX {
-        return Err(format!("The catalog is larger than the {} limit.", crate::download::human_size(MANIFEST_MAX)));
+        return Err(format!(
+            "The catalog is larger than the {} limit.",
+            crate::download::human_size(MANIFEST_MAX)
+        ));
     }
     if sig.len() as u64 > SIG_MAX {
-        return Err(format!("The signature file is larger than the {} limit.", crate::download::human_size(SIG_MAX)));
+        return Err(format!(
+            "The signature file is larger than the {} limit.",
+            crate::download::human_size(SIG_MAX)
+        ));
     }
     verify(bytes, sig, pubkey_hex)?;
-    let text = std::str::from_utf8(bytes).map_err(|_| "The catalog isn't UTF-8 JSON.".to_string())?;
-    let m: Manifest = serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text)).map_err(|e| format!("The catalog isn't valid: {e}"))?;
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| "The catalog isn't UTF-8 JSON.".to_string())?;
+    let m: Manifest = serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text))
+        .map_err(|e| format!("The catalog isn't valid: {e}"))?;
     if m.schema != SCHEMA {
-        return Err(format!("Catalog schema {} isn't supported (this Unpack reads schema {SCHEMA}).", m.schema));
+        return Err(format!(
+            "Catalog schema {} isn't supported (this Unpack reads schema {SCHEMA}).",
+            m.schema
+        ));
     }
     if m.catalog_version >= MAX_CATALOG_VERSION {
-        return Err(format!("catalog_version {} is too large (the limit is {}).", m.catalog_version, MAX_CATALOG_VERSION - 1));
+        return Err(format!(
+            "catalog_version {} is too large (the limit is {}).",
+            m.catalog_version,
+            MAX_CATALOG_VERSION - 1
+        ));
     }
-    let mut out = Loaded { catalog_version: m.catalog_version, source: source.into(), ..Default::default() };
+    let mut out = Loaded {
+        catalog_version: m.catalog_version,
+        source: source.into(),
+        ..Default::default()
+    };
     let mut ids = std::collections::HashSet::new();
     for (i, v) in m.entries.into_iter().enumerate() {
         if out.entries.len() >= ENTRIES_MAX {
-            out.problems.push(format!("more than {ENTRIES_MAX} entries; the rest are ignored"));
+            out.problems.push(format!(
+                "more than {ENTRIES_MAX} entries; the rest are ignored"
+            ));
             break;
         }
-        let label = v.get("id").and_then(|x| x.as_str()).map(|s| clean(s, 64)).unwrap_or_else(|| format!("#{i}"));
+        let label = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .map(|s| clean(s, 64))
+            .unwrap_or_else(|| format!("#{i}"));
         let e: Entry = match serde_json::from_value(v) {
             Ok(e) => e,
-            Err(err) => { out.problems.push(format!("entry {label}: {err}")); continue }
+            Err(err) => {
+                out.problems.push(format!("entry {label}: {err}"));
+                continue;
+            }
         };
         match check_entry(&e) {
-            Ok(e) if !ids.insert(e.id.clone()) => out.problems.push(format!("entry {label}: duplicate id")),
+            Ok(e) if !ids.insert(e.id.clone()) => {
+                out.problems.push(format!("entry {label}: duplicate id"))
+            }
             Ok(e) => out.entries.push(e),
             Err(err) => out.problems.push(format!("entry {label}: {err}")),
         }
@@ -425,11 +574,24 @@ pub fn learned_from(l: &Loaded) -> Vec<crate::modnames::Learned> {
 }
 
 pub fn aliases_from(l: &Loaded) -> Vec<(u32, String, Vec<String>)> {
-    l.entries.iter().filter(|e| !e.game.aliases.is_empty()).map(|e| (u32::from_str_radix(&e.game.title_id, 16).unwrap(), e.game.name.clone(), e.game.aliases.clone())).collect()
+    l.entries
+        .iter()
+        .filter(|e| !e.game.aliases.is_empty())
+        .map(|e| {
+            (
+                u32::from_str_radix(&e.game.title_id, 16).unwrap(),
+                e.game.name.clone(),
+                e.game.aliases.clone(),
+            )
+        })
+        .collect()
 }
 
-static LEARNED: std::sync::RwLock<Vec<crate::modnames::Learned>> = std::sync::RwLock::new(Vec::new());
-pub fn learned() -> Vec<crate::modnames::Learned> { LEARNED.read().unwrap_or_else(|p| p.into_inner()).clone() }
+static LEARNED: std::sync::RwLock<Vec<crate::modnames::Learned>> =
+    std::sync::RwLock::new(Vec::new());
+pub fn learned() -> Vec<crate::modnames::Learned> {
+    LEARNED.read().unwrap_or_else(|p| p.into_inner()).clone()
+}
 
 /// Make a freshly verified catalog active for detection.
 pub fn activate(l: &Loaded) {
@@ -454,17 +616,35 @@ pub struct Config {
 
 impl Config {
     pub fn validated(mut self) -> Result<Config, String> {
-        self.source = match self.source.as_str() { "remote" | "local" | "" => self.source, _ => return Err("source must be remote or local".into()) };
+        self.source = match self.source.as_str() {
+            "remote" | "local" | "" => self.source,
+            _ => return Err("source must be remote or local".into()),
+        };
         self.url = self.url.trim().to_string();
         self.sig_url = self.sig_url.trim().to_string();
         self.local_file = self.local_file.trim().to_string();
         self.pubkey = self.pubkey.trim().to_ascii_lowercase();
-        if !self.url.is_empty() { url_ok(&self.url)?; }
-        if !self.sig_url.is_empty() { url_ok(&self.sig_url)?; }
-        if !self.pubkey.is_empty() { parse_pubkey(&self.pubkey)?; }
-        if self.source == "remote" && self.url.is_empty() { return Err("Enter the catalog URL.".into()); }
-        if self.source == "local" && self.local_file.is_empty() { return Err("Pick the catalog file.".into()); }
-        if !self.source.is_empty() && self.pubkey.is_empty() { return Err("Enter the catalog owner's public key. Unpack never loads an unsigned catalog.".into()); }
+        if !self.url.is_empty() {
+            url_ok(&self.url)?;
+        }
+        if !self.sig_url.is_empty() {
+            url_ok(&self.sig_url)?;
+        }
+        if !self.pubkey.is_empty() {
+            parse_pubkey(&self.pubkey)?;
+        }
+        if self.source == "remote" && self.url.is_empty() {
+            return Err("Enter the catalog URL.".into());
+        }
+        if self.source == "local" && self.local_file.is_empty() {
+            return Err("Pick the catalog file.".into());
+        }
+        if !self.source.is_empty() && self.pubkey.is_empty() {
+            return Err(
+                "Enter the catalog owner's public key. Unpack never loads an unsigned catalog."
+                    .into(),
+            );
+        }
         Ok(self)
     }
 }
@@ -476,15 +656,25 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn new(dir: PathBuf) -> Store { Store { dir } }
+    pub fn new(dir: PathBuf) -> Store {
+        Store { dir }
+    }
     fn read_json<T: for<'a> Deserialize<'a> + Default>(&self, name: &str) -> T {
-        std::fs::read(self.dir.join(name)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        std::fs::read(self.dir.join(name))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
     }
     /// Like read_json, but a file that exists and doesn't parse is an error (R12 LOW-2): a damaged
     /// journal or rollback record must never be treated as empty. A copy is kept aside as
     /// `<name>.bad-<stamp>` (once per distinct content) and the original is left in place, so every
     /// later catalog action keeps refusing until the user removes or fixes it.
-    fn read_json_strict<T: for<'a> Deserialize<'a> + Default>(&self, name: &str, what: &str, removing: &str) -> Result<T, String> {
+    fn read_json_strict<T: for<'a> Deserialize<'a> + Default>(
+        &self,
+        name: &str,
+        what: &str,
+        removing: &str,
+    ) -> Result<T, String> {
         let p = self.dir.join(name);
         let b = match std::fs::read(&p) {
             Ok(b) => b,
@@ -495,14 +685,23 @@ impl Store {
             Ok(v) => Ok(v),
             Err(_) => {
                 let sha = target::sha256_bytes(&b);
-                let exists = std::fs::read_dir(&self.dir).ok().map_or(false, |rd| rd.flatten().any(|d| {
-                    let n = d.file_name().to_string_lossy().to_string();
-                    n.starts_with(&format!("{name}.bad-")) && std::fs::read(d.path()).map(|x| target::sha256_bytes(&x) == sha).unwrap_or(false)
-                }));
+                let exists = std::fs::read_dir(&self.dir).ok().is_some_and(|rd| {
+                    rd.flatten().any(|d| {
+                        let n = d.file_name().to_string_lossy().to_string();
+                        n.starts_with(&format!("{name}.bad-"))
+                            && std::fs::read(d.path())
+                                .map(|x| target::sha256_bytes(&x) == sha)
+                                .unwrap_or(false)
+                    })
+                });
                 let mut kept = String::new();
                 if !exists {
-                    let bad = self.dir.join(format!("{name}.bad-{}", install::unique_stamp()));
-                    if std::fs::write(&bad, &b).is_ok() { kept = format!(" A copy was saved as {}.", bad.display()); }
+                    let bad = self
+                        .dir
+                        .join(format!("{name}.bad-{}", install::unique_stamp()));
+                    if std::fs::write(&bad, &b).is_ok() {
+                        kept = format!(" A copy was saved as {}.", bad.display());
+                    }
                 }
                 Err(format!("The catalog {what} ({}) is damaged.{kept} Catalog actions are off until you fix or remove that file ({removing}).", p.display()))
             }
@@ -512,29 +711,50 @@ impl Store {
     pub fn write_new_file(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
         use std::io::Write;
         let p = self.dir.join(name);
-        if let Some(d) = p.parent() { std::fs::create_dir_all(d).map_err(|e| e.to_string())?; }
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&p).map_err(|e| format!("Cannot save {name}: {e}"))?;
-        f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| format!("Cannot save {name}: {e}"))
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&p)
+            .map_err(|e| format!("Cannot save {name}: {e}"))?;
+        f.write_all(bytes)
+            .and_then(|_| f.sync_all())
+            .map_err(|e| format!("Cannot save {name}: {e}"))
     }
     pub fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
         let p = self.dir.join(name);
-        if let Some(d) = p.parent() { std::fs::create_dir_all(d).map_err(|e| e.to_string())?; }
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
         let tmp = p.with_extension("tmp");
         std::fs::write(&tmp, bytes).map_err(|e| format!("Cannot save {name}: {e}"))?;
         std::fs::rename(&tmp, &p).map_err(|e| format!("Cannot save {name}: {e}"))
     }
-    pub fn config(&self) -> Config { self.read_json("config.json") }
+    pub fn config(&self) -> Config {
+        self.read_json("config.json")
+    }
     pub fn set_config(&self, c: Config) -> Result<Config, String> {
         let c = c.validated()?;
         self.write_atomic("config.json", &serde_json::to_vec_pretty(&c).unwrap())?;
         Ok(c)
     }
     /// Highest catalog_version accepted per public key (rollback protection).
-    fn seen(&self) -> Result<std::collections::BTreeMap<String, u64>, String> { self.read_json_strict("seen.json", "rollback record", "removing it resets rollback protection, so an older catalog could load once") }
+    fn seen(&self) -> Result<std::collections::BTreeMap<String, u64>, String> {
+        self.read_json_strict(
+            "seen.json",
+            "rollback record",
+            "removing it resets rollback protection, so an older catalog could load once",
+        )
+    }
     pub fn check_rollback(&self, pubkey: &str, version: u64) -> Result<(), String> {
         let s = self.seen()?;
         if version >= MAX_CATALOG_VERSION {
-            return Err(format!("catalog_version {version} is too large (the limit is {}).", MAX_CATALOG_VERSION - 1));
+            return Err(format!(
+                "catalog_version {version} is too large (the limit is {}).",
+                MAX_CATALOG_VERSION - 1
+            ));
         }
         match s.get(pubkey) {
             Some(&v) if version < v => Err(format!("This catalog (version {version}) is older than one already loaded (version {v}). Not loading it (rollback protection).")),
@@ -545,27 +765,70 @@ impl Store {
             }
         }
     }
-    pub fn journal(&self) -> Result<install::Journal, String> { self.read_json_strict("journal.json", "install journal", "removing it forgets what Unpack installed") }
+    pub fn journal(&self) -> Result<install::Journal, String> {
+        self.read_json_strict(
+            "journal.json",
+            "install journal",
+            "removing it forgets what Unpack installed",
+        )
+    }
     pub fn save_journal(&self, j: &install::Journal) -> Result<(), String> {
         self.write_atomic("journal.json", &serde_json::to_vec_pretty(j).unwrap())
     }
     pub fn stage_dir(&self, label: &str) -> Result<PathBuf, String> {
-        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let d = self.dir.join("stage").join(format!("{}-{n}", label.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect::<String>()));
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let k = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = self.dir.join("stage").join(format!(
+            "{}-{n}-{k}",
+            label
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .take(40)
+                .collect::<String>()
+        ));
         std::fs::create_dir_all(&d).map_err(|e| format!("Cannot create a staging folder: {e}"))?;
         Ok(d)
     }
 }
 
 /// Fetch a small file (catalog / signature) through the downloader (SSRF rules apply).
-pub fn fetch_small(store: &Store, url: &str, max: u64, cancelled: &dyn Fn() -> bool) -> Result<Vec<u8>, String> {
+pub fn fetch_small(
+    store: &Store,
+    url: &str,
+    max: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, String> {
     url_ok(url)?;
     let d = store.stage_dir("fetch")?;
-    let r = crate::download::download_with(url, &d, &crate::download::DownloadOpts { max_bytes: max, expected_sha256: None }, &mut |_, _| {}, cancelled);
+    let r = crate::download::download_with(
+        url,
+        &d,
+        &crate::download::DownloadOpts {
+            max_bytes: max,
+            expected_sha256: None,
+        },
+        &mut |_, _| {},
+        cancelled,
+    );
     let out = r.and_then(|r| std::fs::read(&r.path).map_err(|e| e.to_string()));
     let _ = std::fs::remove_dir_all(&d);
-    let too_big = || format!("{url} is larger than the {} limit for catalog files. Nothing was loaded.", crate::download::human_size(max));
-    let b = out.map_err(|e| if e.contains("size limit") { too_big() } else { e })?;
+    let too_big = || {
+        format!(
+            "{url} is larger than the {} limit for catalog files. Nothing was loaded.",
+            crate::download::human_size(max)
+        )
+    };
+    let b = out.map_err(|e| {
+        if e.contains("size limit") {
+            too_big()
+        } else {
+            e
+        }
+    })?;
     if b.len() as u64 > max {
         return Err(too_big());
     }
@@ -573,27 +836,53 @@ pub fn fetch_small(store: &Store, url: &str, max: u64, cancelled: &dyn Fn() -> b
 }
 
 /// Load the configured catalog. `check_local` grant-checks the local file path.
-pub fn refresh(store: &Store, check_local: &dyn Fn(&str) -> Result<PathBuf, String>, cancelled: &dyn Fn() -> bool) -> Result<Loaded, String> {
+pub fn refresh(
+    store: &Store,
+    check_local: &dyn Fn(&str) -> Result<PathBuf, String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Loaded, String> {
     let c = store.config();
     if c.pubkey.is_empty() {
         return Err("No catalog is set up. Enter the catalog URL (or file) and the owner's public key first.".into());
     }
     let (bytes, sig) = match c.source.as_str() {
         "remote" => {
-            let sig_url = if c.sig_url.is_empty() { format!("{}.sig", c.url) } else { c.sig_url.clone() };
-            (fetch_small(store, &c.url, MANIFEST_MAX, cancelled)?, fetch_small(store, &sig_url, SIG_MAX, cancelled)?)
+            let sig_url = if c.sig_url.is_empty() {
+                format!("{}.sig", c.url)
+            } else {
+                c.sig_url.clone()
+            };
+            (
+                fetch_small(store, &c.url, MANIFEST_MAX, cancelled)?,
+                fetch_small(store, &sig_url, SIG_MAX, cancelled)?,
+            )
         }
         "local" => {
             let p = check_local(&c.local_file)?;
             let read = |p: &Path, max: u64| -> Result<Vec<u8>, String> {
-                let m = std::fs::symlink_metadata(p).map_err(|e| format!("Cannot open {}: {e}", p.display()))?;
-                if crate::safecopy::is_link(&m) || !m.is_file() { return Err(format!("{} isn't a regular file.", p.display())); }
-                if m.len() > max { return Err(format!("{} is larger than the {} limit for catalog files.", p.display(), crate::download::human_size(max))); }
+                let m = std::fs::symlink_metadata(p)
+                    .map_err(|e| format!("Cannot open {}: {e}", p.display()))?;
+                if crate::safecopy::is_link(&m) || !m.is_file() {
+                    return Err(format!("{} isn't a regular file.", p.display()));
+                }
+                if m.len() > max {
+                    return Err(format!(
+                        "{} is larger than the {} limit for catalog files.",
+                        p.display(),
+                        crate::download::human_size(max)
+                    ));
+                }
                 std::fs::read(p).map_err(|e| e.to_string())
             };
             let mut sp = p.clone().into_os_string();
             sp.push(".sig");
-            (read(&p, MANIFEST_MAX)?, read(Path::new(&sp), SIG_MAX).map_err(|_| "The catalog file needs its signature next to it (same name + .sig).".to_string())?)
+            (
+                read(&p, MANIFEST_MAX)?,
+                read(Path::new(&sp), SIG_MAX).map_err(|_| {
+                    "The catalog file needs its signature next to it (same name + .sig)."
+                        .to_string()
+                })?,
+            )
         }
         _ => return Err("No catalog is set up.".into()),
     };
@@ -609,7 +898,9 @@ mod tests;
 
 static LOADED: std::sync::Mutex<Option<Loaded>> = std::sync::Mutex::new(None);
 
-pub fn current() -> Option<Loaded> { LOADED.lock().unwrap_or_else(|p| p.into_inner()).clone() }
+pub fn current() -> Option<Loaded> {
+    LOADED.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -629,33 +920,53 @@ struct TargetArgs {
     drive: String,
 }
 
-fn target_from(v: &serde_json::Value, check_grant: &dyn Fn(&str) -> Result<PathBuf, String>) -> Result<target::Target, String> {
-    let a: TargetArgs = serde_json::from_value(v.clone()).map_err(|e| format!("bad target: {e}"))?;
+fn target_from(
+    v: &serde_json::Value,
+    check_grant: &dyn Fn(&str) -> Result<PathBuf, String>,
+) -> Result<target::Target, String> {
+    let a: TargetArgs =
+        serde_json::from_value(v.clone()).map_err(|e| format!("bad target: {e}"))?;
     match a.kind.as_str() {
         "local" => {
             let root = check_grant(&a.path)?;
-            if !root.is_dir() { return Err("Pick a drive or folder as the target.".into()); }
+            if !root.is_dir() {
+                return Err("Pick a drive or folder as the target.".into());
+            }
             Ok(target::Target::Local { root })
         }
         "console" => {
-            if !crate::ftp::is_drive(&a.drive) { return Err("Pick a console drive (like Hdd1 or Usb0).".into()); }
-            Ok(target::Target::Console { con: crate::ftp_console(&a.host, a.port.unwrap_or(21), &a.user, &a.pass)?, drive: a.drive })
+            if !crate::ftp::is_drive(&a.drive) {
+                return Err("Pick a console drive (like Hdd1 or Usb0).".into());
+            }
+            Ok(target::Target::Console {
+                con: crate::ftp_console(&a.host, a.port.unwrap_or(21), &a.user, &a.pass)?,
+                drive: a.drive,
+            })
         }
         _ => Err("Pick where to install (a drive on this PC or the console).".into()),
     }
 }
 
 fn entry_of<'a>(l: &'a Loaded, id: &str) -> Result<&'a Entry, String> {
-    l.entries.iter().find(|e| e.id == id).ok_or_else(|| "That entry isn't in the loaded catalog. Refresh the catalog.".to_string())
+    l.entries
+        .iter()
+        .find(|e| e.id == id)
+        .ok_or_else(|| "That entry isn't in the loaded catalog. Refresh the catalog.".to_string())
 }
 
 static CATALOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-pub(crate) fn catalog_lock() -> std::sync::MutexGuard<'static, ()> { CATALOG_LOCK.lock().unwrap_or_else(|p| p.into_inner()) }
+#[allow(dead_code)] // held in catalog tests to exercise catalog_lock_wait while blocked
+pub(crate) fn catalog_lock() -> std::sync::MutexGuard<'static, ()> {
+    CATALOG_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
 pub const CATALOG_WAIT_MESSAGE: &str = "Waiting for another catalog install to finish…";
 
 /// The catalog lock, waited for visibly and cancellably (R16 L2): while another job holds it the
 /// job shows `CATALOG_WAIT_MESSAGE` and a Cancel ends the wait with `ERR_CANCELLED`.
-pub(crate) fn catalog_lock_wait(progress: &mut dyn FnMut(u32, &str), cancelled: &dyn Fn() -> bool) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+pub(crate) fn catalog_lock_wait(
+    progress: &mut dyn FnMut(u32, &str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<std::sync::MutexGuard<'static, ()>, String> {
     let mut told = false;
     loop {
         match CATALOG_LOCK.try_lock() {
@@ -663,30 +974,57 @@ pub(crate) fn catalog_lock_wait(progress: &mut dyn FnMut(u32, &str), cancelled: 
             Err(std::sync::TryLockError::Poisoned(p)) => return Ok(p.into_inner()),
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
-        if cancelled() { return Err(crate::archive::ERR_CANCELLED.into()); }
-        if !told { progress(0, CATALOG_WAIT_MESSAGE); told = true; }
+        if cancelled() {
+            return Err(crate::archive::ERR_CANCELLED.into());
+        }
+        if !told {
+            progress(0, CATALOG_WAIT_MESSAGE);
+            told = true;
+        }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
 /// `cmd`: config_get | config_set | refresh | current | states | preflight | install | uninstall | journal
-pub fn call(ctx: &install::Ctx, cmd: &str, a: serde_json::Value, check_grant: &dyn Fn(&str) -> Result<PathBuf, String>, progress: &mut dyn FnMut(u32, &str), cancelled: &dyn Fn() -> bool) -> Result<serde_json::Value, String> {
+pub fn call(
+    ctx: &install::Ctx,
+    cmd: &str,
+    a: serde_json::Value,
+    check_grant: &dyn Fn(&str) -> Result<PathBuf, String>,
+    progress: &mut dyn FnMut(u32, &str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<serde_json::Value, String> {
     use serde_json::{json, to_value};
     let s = |k: &str| a[k].as_str().unwrap_or("").to_string();
     let loaded = || current().ok_or_else(|| "Load the catalog first (Refresh).".to_string());
     // One catalog-wide lock for every target (R15 M1): install/uninstall/preflight do a
     // read-modify-write of launch.ini and journal.json, so local targets need it too.
     // Order: CATALOG_LOCK first, then the FTP lock for console targets.
-    let console_lock = |t: &target::Target, progress: &mut dyn FnMut(u32, &str)| -> Result<(std::sync::MutexGuard<'static, ()>, Option<std::sync::MutexGuard<'static, ()>>), String> {
+    let console_lock = |t: &target::Target,
+                        progress: &mut dyn FnMut(u32, &str)|
+     -> Result<
+        (
+            std::sync::MutexGuard<'static, ()>,
+            Option<crate::FtpLockGuard>,
+        ),
+        String,
+    > {
         let g = catalog_lock_wait(progress, cancelled)?;
-        let f = if t.is_console() { Some(crate::ftp_lock()?) } else { None };
+        let f = if t.is_console() {
+            Some(crate::ftp_lock("Mod catalog", cmd)?)
+        } else {
+            None
+        };
         Ok((g, f))
     };
     match cmd {
         "config_get" => Ok(to_value(ctx.store.config()).unwrap()),
         "config_set" => {
-            let c: Config = serde_json::from_value(a["config"].clone()).map_err(|e| format!("bad config: {e}"))?;
-            if c.source == "local" { check_grant(c.local_file.trim())?; }
+            let c: Config = serde_json::from_value(a["config"].clone())
+                .map_err(|e| format!("bad config: {e}"))?;
+            if c.source == "local" {
+                check_grant(c.local_file.trim())?;
+            }
             let c = ctx.store.set_config(c)?;
             Ok(to_value(c).unwrap())
         }
@@ -696,7 +1034,9 @@ pub fn call(ctx: &install::Ctx, cmd: &str, a: serde_json::Value, check_grant: &d
             *LOADED.lock().unwrap_or_else(|p| p.into_inner()) = Some(l.clone());
             Ok(to_value(l).unwrap())
         }
-        "current" => Ok(current().map(|l| to_value(l).unwrap()).unwrap_or(json!(null))),
+        "current" => Ok(current()
+            .map(|l| to_value(l).unwrap())
+            .unwrap_or(json!(null))),
         "states" => {
             let l = loaded()?;
             let t = target_from(&a["target"], check_grant)?;
@@ -706,14 +1046,30 @@ pub fn call(ctx: &install::Ctx, cmd: &str, a: serde_json::Value, check_grant: &d
             let l = loaded()?;
             let t = target_from(&a["target"], check_grant)?;
             let _g = console_lock(&t, &mut *progress)?;
-            Ok(to_value(install::preflight(&ctx.store, &l, entry_of(&l, &s("id"))?, &t)).unwrap())
+            Ok(to_value(install::preflight(
+                &ctx.store,
+                &l,
+                entry_of(&l, &s("id"))?,
+                &t,
+            ))
+            .unwrap())
         }
         "install" => {
             let l = loaded()?;
             let t = target_from(&a["target"], check_grant)?;
-            let opts: install::InstallOpts = serde_json::from_value(a["opts"].clone()).unwrap_or_default();
+            let opts: install::InstallOpts =
+                serde_json::from_value(a["opts"].clone()).unwrap_or_default();
             let _g = console_lock(&t, &mut *progress)?;
-            Ok(to_value(install::install(ctx, &l, &s("id"), &t, &opts, progress, cancelled)?).unwrap())
+            Ok(to_value(install::install(
+                ctx,
+                &l,
+                &s("id"),
+                &t,
+                &opts,
+                progress,
+                cancelled,
+            )?)
+            .unwrap())
         }
         "uninstall" => {
             let l = current();
