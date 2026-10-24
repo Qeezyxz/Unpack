@@ -4,6 +4,10 @@
 const T = window.__TAURI__;
 export const IS_DESKTOP = !!(T && T.core);
 export const invoke = (cmd, args) => T.core.invoke(cmd, args);
+/** The app's own version from Tauri (tauri.conf.json), or null when it can't be read. */
+export async function appVersion() {
+  try { return T?.app?.getVersion ? String(await T.app.getVersion()) : null; } catch { return null; }
+}
 
 const LS = "unpack.";
 export const settings = {
@@ -65,7 +69,7 @@ export const settings = {
   // "Open zips inside zips" (extract archives found inside an archive too). On by default.
   get nested() { return localStorage.getItem(LS + "nested") !== "0"; },
   set nested(v) { localStorage.setItem(LS + "nested", v ? "1" : "0"); },
-  // Discord Rich Presence (local IPC to the Discord app). On by default; off clears it.
+  // Discord Rich Presence (local IPC to the Discord app). Off by default; turning it off clears it.
   get discordPresence() { return localStorage.getItem(LS + "discord") === "1"; }, // off unless turned on
   set discordPresence(v) { localStorage.setItem(LS + "discord", v ? "1" : "0"); },
   get dlMaxGb() { const n = Number(localStorage.getItem(LS + "dlMaxGb")); return Number.isFinite(n) && n > 0 ? n : 20; },
@@ -128,6 +132,11 @@ export async function pickFiles(title) {
 export async function pickSave(defaultPath, filters, title = "Save file") {
   // Rust picker so the parent folder is granted for create_archive.
   return await invoke("pick_save", { title, defaultPath: defaultPath || null, filters: filters || null });
+}
+
+/** Write a text export to a path returned by pickSave (the Rust side re-checks the grant). */
+export async function saveText(path, text) {
+  return await invoke("save_text_file", { path, text });
 }
 
 /** Subscribe to native drag & drop; calls onDrop(paths) and onHover(bool). */
