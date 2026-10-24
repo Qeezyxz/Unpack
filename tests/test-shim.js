@@ -7,10 +7,11 @@
     since = r.next;
     for (const e of r.events) (listeners[e.event] || []).forEach((fn) => fn({ payload: e.payload }));
   }, 50);
-  window.__TEST = { pick: [], folder: null, save: null, drop: null };
+  window.__TEST = { pick: [], folder: null, save: null, drop: null, calls: [], version: "1.7.0" };
   window.__TAURI__ = {
     core: {
       invoke: async (cmd, args) => {
+        window.__TEST.calls.push([cmd, args]);
         if (cmd === "pick_save") {
           const v = window.__TEST.save;
           if (v) {
@@ -31,6 +32,7 @@
         return v;
       },
     },
+    app: { getVersion: async () => window.__TEST.version },
     event: { listen: async (name, fn) => { (listeners[name] ||= []).push(fn); return () => {}; } },
     dialog: {
       open: async (o) => (o.directory ? window.__TEST.folder : window.__TEST.pick),

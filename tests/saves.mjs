@@ -101,6 +101,16 @@ await click("[data-xb-shots-dl]");
 await until(() => fs.existsSync(LOCAL + "/shots/demo.png"));
 check("screenshot pull saves file", fs.readFileSync(LOCAL + "/shots/demo.png").equals(png));
 
+// R21 L3: when demo.png is already taken the pull saves demo-2.png; the thumbnail must show that file.
+fs.writeFileSync(LOCAL + "/shots/demo.png", Buffer.from("NOT-THE-SCREENSHOT"));
+fs.rmSync(LOCAL + "/shots/demo-2.png", { force: true });
+await until(async () => await p.evaluate(() => !!document.querySelector("[data-xb-shots-dl]")));
+await click("[data-xb-shots-dl]");
+await until(() => fs.existsSync(LOCAL + "/shots/demo-2.png"));
+await until(async () => await p.evaluate(() => !!document.querySelector("[data-xb-shot-grid] img")));
+const thumb = await p.evaluate(() => document.querySelector("[data-xb-shot-grid] img")?.getAttribute("src") || "");
+check("thumbnail uses the real saved file (demo-2.png)", thumb === "data:image/png;base64," + png.toString("base64"), thumb.slice(0, 80));
+
 check("no page errors", !errors.length, errors.join("; "));
 await b.close();
 srv.kill();
