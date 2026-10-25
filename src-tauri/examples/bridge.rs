@@ -136,6 +136,8 @@ static PICKED: std::sync::LazyLock<std::sync::Mutex<unpack_lib::picked_folders::
         let d = std::env::temp_dir().join("unpack-bridge-picked");
         std::sync::Mutex::new(unpack_lib::picked_folders::PickedFolders::load(d))
     });
+static LAST_SCAN: std::sync::LazyLock<unpack_lib::picked_folders::LastScannedRoots> =
+    std::sync::LazyLock::new(unpack_lib::picked_folders::LastScannedRoots::default);
 // Same as the app's setup: built-in menus from UNPACK_TEST_MENUS (fixtures) or resources/menus.
 static BUILTIN: std::sync::LazyLock<unpack_lib::mods::BuiltinSet> =
     std::sync::LazyLock::new(|| {
@@ -394,6 +396,7 @@ fn extra(
         }
         "record_user_folder" => {
             let p = a["path"].as_str().unwrap_or("");
+            LAST_SCAN.require_scanned_root(std::path::Path::new(p))?;
             PICKED
                 .lock()
                 .unwrap()
@@ -836,6 +839,7 @@ fn extra(
             let r = std::env::var("UNPACK_TEST_DRIVES")
                 .map(|d| unpack_lib::dlc::scan_roots(&[PathBuf::from(d)]))
                 .unwrap_or_default();
+            LAST_SCAN.set_from_scan(&r);
             Ok(json!(r))
         }
         "god_extracted" => {

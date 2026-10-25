@@ -64,11 +64,15 @@ await p.evaluate(() => {
 });
 await p.evaluate(() => document.querySelector("[data-action=settings]")?.click());
 await new Promise((r) => setTimeout(r, 400));
-check("Settings 320px shows library path text", await p.evaluate(() => {
+check("Settings 320px wraps long library path", await p.evaluate(() => {
   const el = document.querySelector(".dialog-settings .cmp-list .name");
   if (!el) return false;
   const cs = getComputedStyle(el);
-  return cs.whiteSpace === "normal" || el.scrollWidth > 0;
+  if (cs.whiteSpace !== "normal") return false;
+  const text = el.textContent || "";
+  if (!text.includes("VeryLongLibraryFolderNameForNarrowLayout")) return false;
+  const title = el.getAttribute("title") || "";
+  return title.includes("VeryLongLibraryFolderNameForNarrowLayout") || el.scrollHeight > el.clientHeight + 2;
 }));
 await p.evaluate(() => document.querySelector("[data-settings-close]")?.click());
 await p.setViewport({ width: 1180, height: 900 });

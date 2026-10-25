@@ -48,10 +48,13 @@ fn dest_already_valid_image(dest: &Path) -> bool {
         .is_ok_and(|_| is_image(&head))
 }
 
-fn rename_with_retry(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+fn rename_with_retry_using<F>(mut rename: F, tmp: &Path, dest: &Path) -> std::io::Result<()>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
     let mut last: Option<std::io::Error> = None;
     for attempt in 0..5 {
-        match fs::rename(tmp, dest) {
+        match rename(tmp, dest) {
             Ok(()) => return Ok(()),
             Err(e) if rename_denied_retryable(&e) && attempt < 4 => {
                 last = Some(e);
@@ -63,6 +66,10 @@ fn rename_with_retry(tmp: &Path, dest: &Path) -> std::io::Result<()> {
     Err(last.unwrap_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::PermissionDenied, "rename failed after retries")
     }))
+}
+
+fn rename_with_retry(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    rename_with_retry_using(|a, b| fs::rename(a, b), tmp, dest)
 }
 
 /// Write via a temp file in the same folder, then rename, so readers never see a torn file.
@@ -565,6 +572,37 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(left.is_empty());
+    }
+
+    #[test]
+    fn dest_already_valid_image_checks_magic() {
+        let d = crate::testutil::TmpDir::new("covers-valid");
+        let jpg = d.join("x.jpg");
+        fs::write(&jpg, [0xFF, 0xD8, 0xFF, 0x00, 0, 0, 0, 0]).unwrap();
+        assert!(dest_already_valid_image(&jpg));
+        let txt = d.join("y.jpg");
+        fs::write(&txt, b"not an image").unwrap();
+        assert!(!dest_already_valid_image(&txt));
+    }
+
+    #[test]
+    fn rename_with_retry_retries_permission_denied() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let d = crate::testutil::TmpDir::new("covers-rename");
+        let tmp = d.join("part.tmp");
+        let dest = d.join("cover.jpg");
+        fs::write(&tmp, b"x").unwrap();
+        fs::write(&dest, [0xFF, 0xD8, 0xFF, 0x00, 0, 0, 0, 0]).unwrap();
+        static TRIES: AtomicU32 = AtomicU32::new(0);
+        let try_rename = |from: &Path, to: &Path| {
+            let n = TRIES.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                return Err(std::io::Error::from_raw_os_error(5));
+            }
+            fs::rename(from, to)
+        };
+        rename_with_retry_using(try_rename, &tmp, &dest).unwrap();
+        assert!(TRIES.load(Ordering::SeqCst) >= 3);
     }
 
     #[test]

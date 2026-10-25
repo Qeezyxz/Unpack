@@ -175,6 +175,10 @@ if (want("create")) {
   });
   await p.evaluate((x) => (window.__TEST.save = x), C + "/secret.7z");
   await click("[data-composer] button[type=submit]");
+  check("composer clears stale Created before second save", await p.evaluate(() => {
+    const t = document.querySelector("[data-composer] .status-line")?.textContent || "";
+    return t === "" || !/\/made\.zip/.test(t);
+  }));
   await p.waitForFunction(() => /Created|Failed/.test(document.querySelector("[data-composer] .status-line")?.textContent || ""), { timeout: 20000 }).catch(() => {});
   check("password 7z created", fs.existsSync(C + "/secret.7z"));
   await click("[data-cmp-close]");

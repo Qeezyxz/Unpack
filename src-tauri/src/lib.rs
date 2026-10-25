@@ -1063,10 +1063,13 @@ async fn mod_copy(
 }
 
 #[tauri::command]
-async fn dlc_scan_drives(_grants: State<'_, safecopy::Grants>) -> Result<Vec<String>, String> {
+async fn dlc_scan_drives(
+    scan: State<'_, picked_folders::LastScannedRoots>,
+) -> Result<Vec<String>, String> {
     let roots = tauri::async_runtime::spawn_blocking(dlc::scan_content_roots)
         .await
         .map_err(|e| e.to_string())?;
+    scan.set_from_scan(&roots);
     Ok(roots)
 }
 
@@ -1104,10 +1107,12 @@ async fn pick_path(
 /// Record explicit user consent for a folder (scan results, etc.) the same way as a native pick.
 #[tauri::command]
 fn record_user_folder(
+    scan: State<'_, picked_folders::LastScannedRoots>,
     grants: State<'_, safecopy::Grants>,
     picked_store: State<'_, picked_folders::PickedFolders>,
     path: String,
 ) -> Result<(), String> {
+    scan.require_scanned_root(Path::new(&path))?;
     picked_store.record_dialog_pick(&grants, Path::new(&path))
 }
 
@@ -1918,6 +1923,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(pending)
         .manage(Jobs::default())
+        .manage(picked_folders::LastScannedRoots::default())
         .setup(|app| {
             let dir = app
                 .path()

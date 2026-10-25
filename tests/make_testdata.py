@@ -21,6 +21,7 @@ else:
 sz = os.environ.get("UNPACK_7ZA") or next((p for p in ["/usr/lib/7zip/7za", "/usr/bin/7za", "/usr/bin/7zz", "/usr/bin/7z"] if os.path.exists(p)), None)
 if not sz:
     sys.exit("7-Zip not found (set UNPACK_7ZA)")
+sz = os.path.abspath(sz)
 os.makedirs(dest, exist_ok=True)
 
 

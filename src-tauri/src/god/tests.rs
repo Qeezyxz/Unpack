@@ -557,65 +557,64 @@ fn verify_package_detects_damage() {
     make_iso(&iso, 0x4D53_07E6, 400 * 1024 * 1024);
     let out = d.join("out");
     convert(&iso, &out, None, &Jobs::default(), "v", &mut |_, _| {}).unwrap();
-    let f = File::open(&iso).unwrap();
-    let src = iso::IsoReader::read(f).unwrap();
-    let root = src.volume_descriptor.root_offset;
     let len = fs::metadata(&iso).unwrap().len();
-    let ti = {
-        let img = File::open(&iso).unwrap();
-        TitleInfo::from_image(&mut iso::IsoReader::read(img).unwrap()).unwrap()
-    };
-    let exec = ti.execution_info.clone();
-    let layout = god::FileLayout::new(&out, &exec, ti.content_type);
-    verify_package(&layout, 3, len, root).unwrap();
-    // header magic
-    let hp = layout.con_header_file_path();
-    let mut h = fs::read(&hp).unwrap();
-    h[0] = b'X';
-    fs::write(&hp, &h).unwrap();
-    assert!(verify_package(&layout, 3, len, root)
-        .unwrap_err()
-        .contains("LIVE"));
-    h[0] = b'L';
-    fs::write(&hp, &h).unwrap();
-    // hash chain: corrupt part 1's master hash list
-    let p1 = layout.part_file_path(1);
-    let mut b = fs::read(&p1).unwrap();
-    b[0] ^= 0xff;
-    fs::write(&p1, &b).unwrap();
-    assert!(verify_package(&layout, 3, len, root)
-        .unwrap_err()
-        .contains("chain"));
-    // M1 (round 3): data damage inside Data0001 passes the cheap check but fails deep_verify
-    fs::write(&p1, &{
-        b[0] ^= 0xff;
-        b.clone()
-    })
-    .unwrap();
-    verify_package(&layout, 3, len, root).unwrap();
-    deep_verify(&layout, 3, len, root).unwrap();
-    let mut dmg = b.clone();
-    let off = 4096 * 2 + 4096 * 100; // inside sub-part 0's data
-    for x in &mut dmg[off..off + 4096] {
-        *x ^= 0x5a;
-    }
-    fs::write(&p1, &dmg).unwrap();
-    verify_package(&layout, 3, len, root).unwrap();
-    assert!(deep_verify(&layout, 3, len, root)
-        .unwrap_err()
-        .contains("damaged"));
-    fs::write(&p1, &b).unwrap();
-    // size: truncate part 1
     {
-        let f = File::options().write(true).open(&p1).unwrap();
-        f.set_len(b.len() as u64 - 4096).unwrap();
+        let f = File::open(&iso).unwrap();
+        let src = iso::IsoReader::read(f).unwrap();
+        let root = src.volume_descriptor.root_offset;
+        let ti = {
+            let img = File::open(&iso).unwrap();
+            TitleInfo::from_image(&mut iso::IsoReader::read(img).unwrap()).unwrap()
+        };
+        let exec = ti.execution_info.clone();
+        let layout = god::FileLayout::new(&out, &exec, ti.content_type);
+        verify_package(&layout, 3, len, root).unwrap();
+        // header magic
+        let hp = layout.con_header_file_path();
+        let mut h = fs::read(&hp).unwrap();
+        h[0] = b'X';
+        fs::write(&hp, &h).unwrap();
+        assert!(verify_package(&layout, 3, len, root)
+            .unwrap_err()
+            .contains("LIVE"));
+        h[0] = b'L';
+        fs::write(&hp, &h).unwrap();
+        // hash chain: corrupt part 1's master hash list
+        let p1 = layout.part_file_path(1);
+        let mut b = fs::read(&p1).unwrap();
+        b[0] ^= 0xff;
+        fs::write(&p1, &b).unwrap();
+        assert!(verify_package(&layout, 3, len, root)
+            .unwrap_err()
+            .contains("chain"));
+        // M1 (round 3): data damage inside Data0001 passes the cheap check but fails deep_verify
+        fs::write(&p1, &{
+            b[0] ^= 0xff;
+            b.clone()
+        })
+        .unwrap();
+        verify_package(&layout, 3, len, root).unwrap();
+        deep_verify(&layout, 3, len, root).unwrap();
+        let mut dmg = b.clone();
+        let off = 4096 * 2 + 4096 * 100; // inside sub-part 0's data
+        for x in &mut dmg[off..off + 4096] {
+            *x ^= 0x5a;
+        }
+        fs::write(&p1, &dmg).unwrap();
+        verify_package(&layout, 3, len, root).unwrap();
+        assert!(deep_verify(&layout, 3, len, root)
+            .unwrap_err()
+            .contains("damaged"));
+        fs::write(&p1, &b).unwrap();
+        // size: truncate part 1
+        {
+            let f = File::options().write(true).open(&p1).unwrap();
+            f.set_len(b.len() as u64 - 4096).unwrap();
+        }
+        assert!(verify_package(&layout, 3, len, root)
+            .unwrap_err()
+            .contains("expected"));
     }
-    assert!(verify_package(&layout, 3, len, root)
-        .unwrap_err()
-        .contains("expected"));
-    drop(src);
-    drop(layout);
-    fs::remove_dir_all(&d).unwrap();
 }
 
 /// L2: the free-space estimate equals what a conversion actually writes (minus header slack).

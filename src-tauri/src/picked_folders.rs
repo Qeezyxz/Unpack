@@ -13,6 +13,43 @@ use crate::safecopy::{plain, simplify, Grants};
 const FILE: &str = "picked-folders.json";
 const MIGRATION_MARKER: &str = ".picked-folders-library-migration-v1";
 
+/// Roots from the most recent `dlc_scan_drives` call; cleared/replaced on each scan.
+#[derive(Default)]
+pub struct LastScannedRoots {
+    roots: Mutex<Vec<PathBuf>>,
+}
+
+impl LastScannedRoots {
+    pub fn set_from_scan(&self, paths: &[String]) {
+        let mut roots = Vec::new();
+        for p in paths {
+            if p.trim().is_empty() {
+                continue;
+            }
+            if let Ok(c) = fs::canonicalize(p) {
+                roots.push(simplify(c));
+            }
+        }
+        *self.roots.lock().unwrap() = roots;
+    }
+
+    /// `record_user_folder` may only persist a path that equals one of these roots.
+    pub fn require_scanned_root(&self, path: &Path) -> Result<(), String> {
+        let Ok(c) = fs::canonicalize(path) else {
+            return Err("That folder doesn't exist or can't be accessed.".into());
+        };
+        let c = simplify(c);
+        if self.roots.lock().unwrap().iter().any(|r| r == &c) {
+            Ok(())
+        } else {
+            Err(
+                "That folder wasn't in the last Scan drives result. Scan again, then click Add."
+                    .into(),
+            )
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct PickedFolders {
     paths: Mutex<Vec<PathBuf>>,
@@ -341,10 +378,14 @@ fn windows_system_folder_on_drive(s: &str) -> bool {
 }
 
 fn windows_users_blocked(s: &str) -> bool {
-    if !s.starts_with("c:\\users\\") {
+    if s.len() < 10 || s.as_bytes().get(1) != Some(&b':') || s.as_bytes().get(2) != Some(&b'\\') {
         return false;
     }
-    let rest = &s["c:\\users\\".len()..];
+    let after_drive = &s[3..];
+    if !after_drive.starts_with("users\\") {
+        return false;
+    }
+    let rest = &after_drive[6..];
     let first = rest.split('\\').next().unwrap_or("");
     if first.eq_ignore_ascii_case("default") || first.eq_ignore_ascii_case("all users") {
         return true;
@@ -529,7 +570,23 @@ mod tests {
     fn users_downloads_allowed_appdata_refused() {
         assert!(!is_system_path(r"C:\Users\Justin\Downloads\x"));
         assert!(is_system_path(r"C:\Users\Justin\AppData\Roaming"));
+        assert!(!is_system_path(r"D:\Users\me\Downloads\game"));
+        assert!(is_system_path(r"D:\Users\me\AppData\Local"));
+        assert!(is_system_path(r"D:\Users\Default"));
         assert!(is_system_path("/etc/passwd"));
+    }
+
+    #[test]
+    fn record_user_folder_requires_scanned_root() {
+        let d = crate::testutil::TmpDir::new("scan-roots");
+        let allowed = d.join("usb");
+        let other = d.join("other");
+        fs::create_dir_all(&allowed).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let scan = LastScannedRoots::default();
+        scan.set_from_scan(&[allowed.display().to_string()]);
+        assert!(scan.require_scanned_root(&other).is_err());
+        assert!(scan.require_scanned_root(&allowed).is_ok());
     }
 
     #[cfg(unix)]

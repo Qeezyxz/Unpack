@@ -19,12 +19,15 @@ use sha1::{Digest, Sha1};
 pub const PARTIAL: &str = ".partial";
 pub const FAT_MAX: u64 = 0xFFFF_FFFF; // FAT32 max file size is 4 GiB - 1
 
-/// Windows `canonicalize` returns `\\?\C:\...`; show and use the plain `C:\...` form.
+/// Windows `canonicalize` returns `\\?\C:\...` or `\\?\UNC\...`; use the plain form.
 pub fn simplify(p: PathBuf) -> PathBuf {
     let s = p.to_string_lossy();
     if let Some(rest) = s.strip_prefix(r"\\?\") {
         if rest.as_bytes().get(1) == Some(&b':') {
             return PathBuf::from(rest.to_string());
+        }
+        if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case("UNC\\") {
+            return PathBuf::from(format!(r"\\{}", &rest[4..]));
         }
     }
     p
@@ -500,6 +503,14 @@ pub fn write_export_text(grants: &Grants, path: &str, text: &str) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn simplify_strips_extended_unc_prefix() {
+        let p = PathBuf::from(r"\\?\UNC\server\share\games");
+        assert_eq!(
+            simplify(p).to_string_lossy().replace('/', "\\"),
+            r"\\server\share\games"
+        );
+    }
     fn tmp(n: &str) -> crate::testutil::TmpDir {
         crate::testutil::TmpDir::canonical(&format!("safe-{n}"))
     }

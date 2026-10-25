@@ -61,6 +61,10 @@ check("copy, not move: extracted DLC still there", fs.existsSync(OUT + "/pack/su
 // Settings: scan drives (bridge maps it to UNPACK_TEST_DRIVES) and approve the found root
 await p.click("[data-action=settings]"); await wait(300);
 await p.click("[data-lib-scan]"); await wait(500);
+const bogus = W + "/not-scanned-root";
+fs.mkdirSync(bogus, { recursive: true });
+const ung = await p.evaluate((p) => window.__TAURI__.core.invoke("record_user_folder", { path: p }).then(() => "ok", (e) => String(e)), bogus);
+check("record_user_folder refuses path not from last scan", /last Scan drives/i.test(ung), ung);
 const found = await p.evaluate(() => [...document.querySelectorAll("[data-root-add]")].length);
 check("scan drives lists Content folder for approval (not auto-added)", found === 1 && (await p.evaluate(() => localStorage.getItem("unpack.libraries"))) === null);
 await wait(500); if (process.env.UPDATE_SHOTS === "1") await p.screenshot({ path: new URL("../screenshots/11-settings-dlc-library.png", import.meta.url).pathname });

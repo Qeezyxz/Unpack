@@ -2514,8 +2514,14 @@ fn recover_one(note: &RecoverNote, m: &mut ReplaceManifest, st: &mut Steps, warn
                 if d && there(&a) && entry_count <= 1 {
                     folder.ensure_same_folder().map_err(std::io::Error::other)?;
                     let quarantine = free_name(ct_dst, &format!("{ASIDE_NEW}conflict.{ln}"));
+                    let live = p.display().to_string();
                     st.next()?;
                     fs::rename(&p, &quarantine)?;
+                    warnings.push(format!(
+                        "During repair I moved unrelated edits at {} aside to {} so I could restore the interrupted Replace.",
+                        live,
+                        quarantine.display()
+                    ));
                 } else {
                     warnings.push(format!(
                         "An earlier Replace of {unit} was interrupted, but {} is taken by something that isn't from that Replace. I left the old copy at {} untouched; check them yourself.",
