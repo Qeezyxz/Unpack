@@ -141,7 +141,12 @@ fn file_info(path: String) -> Result<FileInfo, String> {
 }
 
 #[tauri::command]
-async fn list_archive(path: String, password: Option<String>) -> Result<archive::Listing, String> {
+async fn list_archive(
+    grants: State<'_, safecopy::Grants>,
+    path: String,
+    password: Option<String>,
+) -> Result<archive::Listing, String> {
+    grants.check(&path)?;
     let exe = seven_zip()?;
     tauri::async_runtime::spawn_blocking(move || {
         archive::list(&exe, &PathBuf::from(path), opt_pw(&password))
@@ -152,10 +157,12 @@ async fn list_archive(path: String, password: Option<String>) -> Result<archive:
 
 #[tauri::command]
 async fn read_entry(
+    grants: State<'_, safecopy::Grants>,
     path: String,
     entry: String,
     password: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
+    grants.check(&path)?;
     let exe = seven_zip()?;
     let bytes = tauri::async_runtime::spawn_blocking(move || {
         archive::read_entry(
@@ -2061,6 +2068,17 @@ fn discord_set_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
 #[cfg(test)]
 mod launch_tests {
     use super::*;
+
+    #[test]
+    fn archive_list_and_read_require_grants() {
+        let t = crate::testutil::TmpDir::new("arch-grant-gate");
+        let arch = t.path().join("pack.7z");
+        std::fs::write(&arch, b"7z").unwrap();
+        let g = safecopy::Grants::default();
+        assert!(g.check(arch.to_str().unwrap()).is_err());
+        g.grant_session(t.path());
+        assert!(g.check(arch.to_str().unwrap()).is_ok());
+    }
 
     /// Bully case: a 7 GB ISO + a small .txt bound for a FAT32 drive with Auto ISO → GOD.
     /// The .txt lands on the destination, the ISO waits in staging and points its output at the

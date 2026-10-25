@@ -48,8 +48,16 @@ fn main() {
                     "file_info" => std::fs::metadata(s("path")).map_err(|e| e.to_string()).map(|m| {
                         json!({"path": s("path"), "name": PathBuf::from(s("path")).file_name().unwrap().to_string_lossy(), "size": m.len(), "is_dir": m.is_dir()})
                     }),
-                    "list_archive" => archive::list(&exe, &PathBuf::from(s("path")), pw.as_deref()).map(|l| serde_json::to_value(l).unwrap()),
-                    "read_entry" => archive::read_entry(&exe, &PathBuf::from(s("path")), &s("entry"), pw.as_deref(), 4 << 20).map(|b| json!(b)),
+                    "list_archive" => match GRANTS.check(a["path"].as_str().unwrap_or("")) {
+                        Err(e) => Err(e),
+                        Ok(p) => archive::list(&exe, &p, pw.as_deref())
+                            .map(|l| serde_json::to_value(l).unwrap()),
+                    },
+                    "read_entry" => match GRANTS.check(a["path"].as_str().unwrap_or("")) {
+                        Err(e) => Err(e),
+                        Ok(p) => archive::read_entry(&exe, &p, &s("entry"), pw.as_deref(), 4 << 20)
+                            .map(|b| json!(b)),
+                    },
                     "cancel_job" => Ok(json!(jobs.cancel(&s("id")))),
                     "extract_archive" => {
                         let id = s("id");

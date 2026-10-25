@@ -28,7 +28,22 @@ fs.mkdirSync(W + "/MyApp/cfg", { recursive: true }); fs.writeFileSync(W + "/MyAp
 fs.writeFileSync(W + "/secret.txt", "SECRET"); fs.symlinkSync(W + "/secret.txt", W + "/MyApp/link.txt");
 fs.writeFileSync(W + "/big.bin", Buffer.alloc(400 << 20, 9));
 
-const srv = spawn("python3", [here + "fake_aurora.py", ROOT, String(FTP_PORT), "--limit", "40"], { stdio: ["ignore", "pipe", "pipe"] });
+const ftpProcs = [];
+const trackFtp = (...args) => {
+  const p = spawn(...args);
+  ftpProcs.push(p);
+  return p;
+};
+const killFtps = () => {
+  for (const p of ftpProcs) {
+    try {
+      p.kill();
+    } catch {}
+  }
+};
+process.on("exit", killFtps);
+
+const srv = trackFtp("python3", [here + "fake_aurora.py", ROOT, String(FTP_PORT), "--limit", "40"], { stdio: ["ignore", "pipe", "pipe"] });
 await new Promise((r) => srv.stdout.on("data", (d) => /fake aurora/.test(d) && r()));
 const BR = `http://127.0.0.1:${process.env.UNPACK_BRIDGE_PORT || 18790}`;
 await fetch(BR + "/invoke/__test_grant", { method: "POST", body: JSON.stringify({ paths: [LIB] }) });
@@ -204,7 +219,7 @@ const ROOT2 = W + "/console425", P2 = FTP_PORT + 1;
 fs.mkdirSync(ROOT2 + "/Hdd1/Games", { recursive: true }); fs.writeFileSync(ROOT2 + "/Hdd1/Games/game.bin", "existing-18-bytes!");
 fs.mkdirSync(W + "/r10", { recursive: true }); fs.writeFileSync(W + "/r10/game.bin", Buffer.alloc(5000, 1));
 await fetch(BR + "/invoke/__test_grant", { method: "POST", body: JSON.stringify({ paths: [W + "/r10"] }) });
-const srv2 = spawn("python3", [here + "fake_aurora.py", ROOT2, String(P2), "--list-425"], { stdio: ["ignore", "pipe", "pipe"] });
+const srv2 = trackFtp("python3", [here + "fake_aurora.py", ROOT2, String(P2), "--list-425"], { stdio: ["ignore", "pipe", "pipe"] });
 await new Promise((r) => srv2.stdout.on("data", (d) => /fake aurora/.test(d) && r()));
 const r425 = await p.evaluate((w, port) => window.__TAURI__.core.invoke("ftp_send", { id: "z", args: { host: "127.0.0.1", port, user: "xboxftp", pass: "xboxftp", src: w + "/r10/game.bin", kind: "custom", drive: "Hdd1", custom: "/Hdd1/Games" } }).then((r) => JSON.stringify(r), (e) => String(e)), W, P2);
 srv2.kill();
@@ -213,7 +228,7 @@ check("R10: failed LIST never overwrites (pyftpdlib 425)", /Couldn't list/.test(
 // USB, and the choice is remembered per console.
 const ROOT3 = W + "/console-usb", P3 = FTP_PORT + 2;
 fs.mkdirSync(ROOT3, { recursive: true });
-const srv3 = spawn("python3", [here + "fake_aurora.py", ROOT3, String(P3), "--drives", "Usb0,Usb1"], { stdio: ["ignore", "pipe", "pipe"] });
+const srv3 = trackFtp("python3", [here + "fake_aurora.py", ROOT3, String(P3), "--drives", "Usb0,Usb1"], { stdio: ["ignore", "pipe", "pipe"] });
 await new Promise((r) => srv3.stdout.on("data", (d) => /fake aurora/.test(d) && r()));
 while (await p.$("[data-xb-remove]")) { await click("[data-xb-remove='0']"); await wait(50); }
 await setField("host", "127.0.0.1"); await setField("port", String(P3)); await setField("pass", "xboxftp");
@@ -250,7 +265,8 @@ check("drives: stored keys need a valid IP and port 1–65535", !("1.1.1.1:99999
 srv3.kill();
 check("no page errors", errors.length === 0, errors.join(" | "));
 check("no external requests", external.length === 0, external.join(" "));
-await b.close(); srv.kill();
+killFtps();
+await b.close().catch(() => {});
 if (process.env.UPDATE_SHOTS !== "1") fs.rmSync(path.join(TMP, "unpack-shots-xbox"), { recursive: true, force: true });
 fs.rmSync(W, { recursive: true, force: true });
 console.log(`${total - fails}/${total} passed`);

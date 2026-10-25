@@ -1,5 +1,6 @@
 //! Trusted native drag-and-drop: validate, grant, and tell the page which paths to open.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -15,8 +16,13 @@ pub struct NativeDropOutcome {
 pub fn process_native_drop(paths: &[&Path], grants: &Grants) -> NativeDropOutcome {
     let mut accepted = Vec::new();
     let mut refused = None;
+    let mut seen = HashSet::new();
     for p in paths {
         let p = *p;
+        let key = p.to_string_lossy().into_owned();
+        if !seen.insert(key.clone()) {
+            continue;
+        }
         let meta = fs::symlink_metadata(p);
         if let Ok(m) = meta {
             if crate::safecopy::is_link(&m) {
@@ -76,6 +82,17 @@ mod tests {
         assert_eq!(outcome.accepted[0], good.to_string_lossy());
         assert!(grants.check(good.to_str().unwrap()).is_ok());
         assert!(grants.check(other.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn duplicate_paths_in_one_drop_accepted_once() {
+        let tmp = TmpDir::new("native-drop-dedupe");
+        let good = tmp.path().join("mods");
+        fs::create_dir_all(&good).unwrap();
+        let grants = Grants::default();
+        let dropped = [good.as_path(), good.as_path()];
+        let outcome = process_native_drop(&dropped, &grants);
+        assert_eq!(outcome.accepted.len(), 1);
     }
 
     #[test]

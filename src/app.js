@@ -672,6 +672,7 @@ function paintAllJobBars() {
 }
 
 async function addPaths(paths, action = "open") {
+  paths = [...new Set(paths)];
   if (action === "convert-god") {
     const isos = [];
     for (const p of paths) {
@@ -703,7 +704,6 @@ async function addPaths(paths, action = "open") {
     const found = [];
     for (const f of folders) {
       try {
-        // Session grant comes from native DragDrop (prepare only filters that pending set).
         const list = await N.invoke("list_archives_in_folder", { path: f.path });
         found.push(...list);
       } catch (err) { toast(String(err)); }
@@ -4622,17 +4622,17 @@ window.addEventListener("keydown", (e) => {
 
 async function initDesktop() {
   if (!N.IS_DESKTOP) return;
+  const dropReady = N.beginNativeDrop(
+    (paths) => addPaths(paths),
+    (on) => document.querySelector(".drop")?.classList.toggle("dragging", on)
+  );
   try {
     nativeOk = (await N.invoke("native_info")).available;
   } catch {
     nativeOk = false;
   }
+  await dropReady;
   await N.initNativeEvents({ onPathGrantRefused: toast });
-  // Register native drop before other startup IPC so test bridge can call __TEST.drop promptly.
-  await N.onNativeDrop(
-    (paths) => addPaths(paths),
-    (on) => document.querySelector(".drop")?.classList.toggle("dragging", on)
-  );
   await refreshLibraryGrants();
   await N.invoke("discord_set_enabled", { enabled: N.settings.discordPresence }).catch(() => {});
   // One-time notice when the update had to set the older settings profile aside (R19 L5).

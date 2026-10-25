@@ -81,7 +81,7 @@ jobs:
       - name: UI suites
         run: |
           set -e
-          for t in e2e drop-grant autogod dlc download mods builtin catalog xbox saves v160 v170 multidisc content; do
+          for t in e2e drop-grant archive-grant autogod dlc download mods builtin catalog xbox saves v160 v170 multidisc content; do
             echo "::group::tests/$t.mjs"
             node tests/$t.mjs
             echo "::endgroup::"

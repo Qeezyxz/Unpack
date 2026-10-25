@@ -26,10 +26,28 @@ fs.writeFileSync(LOCAL + "/restore/profile.sav", "NEW-FROM-PC-SAVE");
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
 fs.writeFileSync(ROOT + "/Hdd1/Aurora/Screenshots/demo.png", png);
 
-const srv = spawn("python3", [here + "fake_aurora.py", ROOT, String(FTP_PORT)], { stdio: ["ignore", "pipe", "pipe"] });
+const ftpProcs = [];
+const trackFtp = (...args) => {
+  const p = spawn(...args);
+  ftpProcs.push(p);
+  return p;
+};
+const killFtps = () => {
+  for (const p of ftpProcs) {
+    try {
+      p.kill();
+    } catch {}
+  }
+};
+process.on("exit", killFtps);
+
+const srv = trackFtp("python3", [here + "fake_aurora.py", ROOT, String(FTP_PORT)], { stdio: ["ignore", "pipe", "pipe"] });
 await new Promise((r) => srv.stdout.on("data", (d) => /fake aurora/.test(d) && r()));
 
-const b = await puppeteer.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox"] });
+let b;
+let fails = 0;
+try {
+b = await puppeteer.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1180, height: 900 });
 const errors = [];
@@ -62,7 +80,6 @@ await p.goto(BR + "/", { waitUntil: "load" });
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const click = (sel) => p.evaluate((s) => { const e = document.querySelector(s); if (!e) throw new Error("missing " + s); e.click(); }, sel);
 const until = async (fn, ms = 12000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await fn()) return true; await wait(150); } return false; };
-let fails = 0;
 const check = (n, ok, info = "") => { if (!ok) fails++; console.log((ok ? "PASS " : "FAIL ") + n + (info ? " — " + info : "")); };
 
 await wait(600);
@@ -114,7 +131,9 @@ const thumb = await p.evaluate(() => document.querySelector("[data-xb-shot-grid]
 check("thumbnail uses the real saved file (demo-2.png)", thumb === "data:image/png;base64," + png.toString("base64"), thumb.slice(0, 80));
 
 check("no page errors", !errors.length, errors.join("; "));
-await b.close();
-srv.kill();
+} finally {
+  killFtps();
+  if (b) await b.close().catch(() => {});
+}
 if (fails) process.exit(1);
 console.log("saves.mjs: all passed");

@@ -1,16 +1,26 @@
 // TEST ONLY: fake window.__TAURI__ that forwards to examples/bridge.rs. Never loaded by the app.
 (() => {
   const listeners = {};
-  let since = null;
-  setInterval(async () => {
-    const r = await fetch("/events?since=" + (since ?? 0)).then((r) => r.json());
-    if (since === null) {
-      since = r.next;
-      return;
+  let since = 0;
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "/events?since=0", false);
+    xhr.send();
+    since = JSON.parse(xhr.responseText).next;
+  } catch {
+    since = 0;
+  }
+  const pollEvents = async () => {
+    for (;;) {
+      try {
+        const r = await fetch("/events?since=" + since).then((res) => res.json());
+        since = r.next;
+        for (const e of r.events) (listeners[e.event] || []).forEach((fn) => fn({ payload: e.payload }));
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    since = r.next;
-    for (const e of r.events) (listeners[e.event] || []).forEach((fn) => fn({ payload: e.payload }));
-  }, 50);
+  };
+  void pollEvents();
   window.__TEST = { pick: [], folder: null, save: null, drop: null, calls: [], version: "1.7.4" };
   window.__TAURI__ = {
     core: {
