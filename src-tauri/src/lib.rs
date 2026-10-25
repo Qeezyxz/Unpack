@@ -1407,6 +1407,12 @@ fn migration_notices() -> Vec<String> {
     migrate::take_notices()
 }
 
+/// Persist grants for folders saved in Settings (library locations, output folder).
+#[tauri::command]
+fn grant_paths(grants: State<'_, safecopy::Grants>, paths: Vec<String>) {
+    grants.grant_paths(&paths);
+}
+
 #[tauri::command]
 fn cancel_job(jobs: State<'_, Jobs>, id: String) -> bool {
     jobs.cancel(&id)
@@ -1997,6 +2003,7 @@ pub fn run() {
             discord_set_activity,
             discord_set_enabled,
             migration_notices,
+            grant_paths,
             error_help,
             preflight_local,
             lan_discover,

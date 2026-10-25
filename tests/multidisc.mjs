@@ -3,9 +3,12 @@
 // Headless Chrome + tests/test-shim.js + the real Rust code through examples/bridge.rs.
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 import { execFileSync } from "child_process";
 
-const OUT = "/tmp/unpack-multidisc";
+const OUT = path.join(TMP, "unpack-multidisc");
 const PORT = process.env.UNPACK_BRIDGE_PORT || 18790;
 const SZ = ["/usr/lib/7zip/7za", "/usr/bin/7za", "/usr/bin/7z"].find((x) => fs.existsSync(x));
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -1,8 +1,11 @@
 // E2E: DLC auto-install after a batch extract + manual "Install DLC" (headless Chrome + Rust bridge).
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 import { execFileSync } from "child_process";
-const W = "/tmp/unpack-dlc-e2e", OUT = W + "/out", SRC = W + "/src";
+const W = path.join(TMP, "unpack-dlc-e2e"), OUT = W + "/out", SRC = W + "/src";
 fs.rmSync(W, { recursive: true, force: true });
 fs.mkdirSync(SRC + "/pack/sub", { recursive: true });
 const mk = (...a) => execFileSync("python3", [new URL("./make_stfs.py", import.meta.url).pathname, ...a]);
@@ -56,7 +59,7 @@ await wait(2500);
 r = await rows(); console.log(r);
 check("manual DLC installed into console-layout library", fs.existsSync(LIB2 + "/Content/0000000000000000/0ABCDEF1/00000002/OTHERDLC"));
 check("same DLC twice: identical skipped", r.some((t) => /already installed \(identical/.test(t)) && fs.readdirSync(LIB2 + "/Content/0000000000000000/0ABCDEF1/00000002").length === 1);
-const SHOTS = process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : "/tmp/unpack-shots-dlc/";
+const SHOTS = process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : path.join(TMP, "unpack-shots-dlc/");
 fs.mkdirSync(SHOTS, { recursive: true });
 check("batch summary shown", await p.evaluate(() => /Batch finished/.test(document.querySelector(".summary")?.textContent || "")));
 await p.screenshot({ path: SHOTS + "09-dlc-queue-summary.png" });
@@ -85,5 +88,5 @@ check("tips dismissible", await p.evaluate(() => { document.querySelector("[data
 check("no page errors", !errors.length, errors.join("; "));
 await b.close();
 fs.rmSync(W, { recursive: true, force: true });
-if (process.env.UPDATE_SHOTS !== "1") fs.rmSync("/tmp/unpack-shots-dlc", { recursive: true, force: true });
+if (process.env.UPDATE_SHOTS !== "1") fs.rmSync(path.join(TMP, "unpack-shots-dlc"), { recursive: true, force: true });
 process.exit(fails ? 1 : 0);

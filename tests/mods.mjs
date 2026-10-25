@@ -1,8 +1,11 @@
 // E2E: Mod Menus manager (headless Chrome + Rust bridge). Local files only.
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 import { execFileSync } from "child_process";
-const W = "/tmp/unpack-mods-e2e", USB = W + "/usb";
+const W = path.join(TMP, "unpack-mods-e2e"), USB = W + "/usb";
 fs.rmSync(W, { recursive: true, force: true });
 fs.mkdirSync(W + "/MyMenu/cfg", { recursive: true }); fs.mkdirSync(USB, { recursive: true });
 const xex = Buffer.alloc(0x400); xex.write("XEX2", 0); xex.writeUInt32BE(1, 0x14); xex.writeUInt32BE(0x000100ff, 0x18);
@@ -82,7 +85,7 @@ const raw3 = await p.evaluate(async () => { try { await window.__TAURI__.core.in
 check("R5: copy_to_usb raw path refused", /wasn't picked/.test(raw3), raw3);
 await p.evaluate((u) => { window.__TEST.folder = u; }, USB);
 await sel(2);
-const SHOTS = process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : "/tmp/unpack-shots-mods/";
+const SHOTS = process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : path.join(TMP, "unpack-shots-mods/");
 fs.mkdirSync(SHOTS, { recursive: true });
 await p.screenshot({ path: SHOTS + "12-mod-menus.png" });
 await p.keyboard.press("Escape"); await wait(300);
@@ -138,11 +141,13 @@ check("JSON import: existing skipped, junk dropped", impj.added === 0, JSON.stri
 await p.evaluate(() => localStorage.setItem("unpack.modNames", JSON.stringify([{ key: "=cmd", tid: "415608C3", gname: "@x" }])));
 await p.click("[data-mods-close]"); await wait(300); await p.click("[data-action=mods]"); await wait(800);
 await p.click("[data-mods-tab=names]"); await wait(300);
-fs.mkdirSync("/tmp/unpack-mods-export", { recursive: true });
-await p.evaluate(() => { window.__TEST.save = "/tmp/unpack-mods-export/names.csv"; });
+const modsExportDir = path.join(TMP, "unpack-mods-export");
+const modsExportCsv = path.join(modsExportDir, "names.csv");
+fs.mkdirSync(modsExportDir, { recursive: true });
+await p.evaluate((save) => { window.__TEST.save = save; }, modsExportCsv);
 await p.click("[data-mn-export]"); await p.waitForSelector("[data-fmt-csv]"); await p.click("[data-fmt-csv]"); await wait(500);
-const exp = fs.existsSync("/tmp/unpack-mods-export/names.csv") ? fs.readFileSync("/tmp/unpack-mods-export/names.csv", "utf8") : "";
-fs.rmSync("/tmp/unpack-mods-export", { recursive: true, force: true });
+const exp = fs.existsSync(modsExportCsv) ? fs.readFileSync(modsExportCsv, "utf8") : "";
+fs.rmSync(modsExportDir, { recursive: true, force: true });
 check("CSV export escapes formulas", /"'=cmd"/.test(exp) && /"'@x"/.test(exp), exp);
 await p.click("[data-mn-del='0']"); await wait(200);
 check("delete entry", await p.evaluate(() => JSON.parse(localStorage.getItem("unpack.modNames")).length === 0));
@@ -150,5 +155,5 @@ check("no network requests", !external.length, external.join(" "));
 check("no page errors", !errors.length, errors.join(" | "));
 await b.close();
 fs.rmSync(W, { recursive: true, force: true });
-if (process.env.UPDATE_SHOTS !== "1") fs.rmSync("/tmp/unpack-shots-mods", { recursive: true, force: true });
+if (process.env.UPDATE_SHOTS !== "1") fs.rmSync(path.join(TMP, "unpack-shots-mods"), { recursive: true, force: true });
 console.log(`${total - fails}/${total} passed`); console.log(fails ? `${fails} FAILED` : "ALL PASS"); process.exit(fails ? 1 : 0);

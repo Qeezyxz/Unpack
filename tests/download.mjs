@@ -1,10 +1,13 @@
 // E2E: Download from link tab + folder drop confirm (local HTTP server only).
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 import http from "http";
 import { execFileSync } from "child_process";
 
-const W = "/tmp/unpack-dl-e2e";
+const W = path.join(TMP, "unpack-dl-e2e");
 fs.rmSync(W, { recursive: true, force: true });
 fs.mkdirSync(W + "/dropme/sub", { recursive: true });
 fs.writeFileSync(W + "/dropme/a.zip", "PK\x05\x06" + "\0".repeat(18)); // empty zip EOCD
@@ -60,7 +63,7 @@ const sha = await p.evaluate(() => document.querySelector("[data-dl-sha]")?.text
 const crypto = await import("crypto");
 const expect = crypto.createHash("sha256").update(payload).digest("hex");
 check("SHA-256 shown", sha === expect, sha.slice(0, 16) + "…");
-const dlDir = "/tmp/unpack-bridge-downloads";
+const dlDir = path.join(TMP, "unpack-bridge-downloads");
 const onDisk = fs.existsSync(dlDir) && fs.readdirSync(dlDir).some((n) => n.endsWith("from-link.bin"));
 check("file on disk", onDisk, fs.existsSync(dlDir) ? fs.readdirSync(dlDir).join(",") : "no dir");
 await p.click("[data-dl-add-mod]"); await wait(500);
@@ -102,11 +105,13 @@ const bypass = await p.evaluate(async (sec) => {
 }, secret);
 check("R5 addendum: skip extract does not unlock sibling for mod_copy", /wasn't picked|Cannot open|Not a folder|link/i.test(bypass) || bypass !== "copied", bypass);
 
-fs.mkdirSync("/tmp/ungranted-r8", { recursive: true });
+const ungrantedR8 = path.join(TMP, "ungranted-r8");
+const nopeIso = path.join(TMP, "nope.iso");
+fs.mkdirSync(ungrantedR8, { recursive: true });
 // R8: bridge enforces the same dest grant as the app for ISO → GOD / XEX
-const isoGrant = await p.evaluate(async () => { const out = []; for (const c of ["iso_to_god", "iso_to_xex"]) { try { await window.__TAURI__.core.invoke(c, { id: "g-" + c, path: "/tmp/nope.iso", dest: "/tmp/ungranted-r8", title: null }); out.push("accepted"); } catch (e) { out.push(String(e)); } } return out; });
-check("R8: ISO→GOD/XEX ungranted dest refused", isoGrant.every((x) => /wasn't picked/.test(x)) && fs.readdirSync("/tmp/ungranted-r8").length === 0, isoGrant.join(" | "));
-fs.rmSync("/tmp/ungranted-r8", { recursive: true, force: true });
+const isoGrant = await p.evaluate(async (iso, dest) => { const out = []; for (const c of ["iso_to_god", "iso_to_xex"]) { try { await window.__TAURI__.core.invoke(c, { id: "g-" + c, path: iso, dest, title: null }); out.push("accepted"); } catch (e) { out.push(String(e)); } } return out; }, nopeIso, ungrantedR8);
+check("R8: ISO→GOD/XEX ungranted dest refused", isoGrant.every((x) => /wasn't picked/.test(x)) && fs.readdirSync(ungrantedR8).length === 0, isoGrant.join(" | "));
+fs.rmSync(ungrantedR8, { recursive: true, force: true });
 // Homebrew Tools section (close mods overlay first so toolbar is clickable)
 await p.click("[data-mods-close]"); await wait(300);
 await p.click("[data-action=homebrew]"); await wait(400);
@@ -188,15 +193,15 @@ check("app.js has normalizeLinkUrl", srcHas.normalize);
 check("app.js dedupes import", srcHas.dedupe);
 check("app.js length caps", srcHas.caps);
 
-const SHOTS = process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : "/tmp/unpack-shots-dl/";
+const SHOTS = process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : path.join(TMP, "unpack-shots-dl/");
 fs.mkdirSync(SHOTS, { recursive: true });
 await p.screenshot({ path: SHOTS + "13-mod-download.png" });
 check("no page errors", !errors.length, errors.join(" | "));
 check("frontend made no remote requests", !external.length, external.join(" "));
 await b.close(); server.close();
 fs.rmSync(W, { recursive: true, force: true });
-fs.rmSync("/tmp/unpack-bridge-downloads", { recursive: true, force: true });
-if (process.env.UPDATE_SHOTS !== "1") fs.rmSync("/tmp/unpack-shots-dl", { recursive: true, force: true });
+fs.rmSync(path.join(TMP, "unpack-bridge-downloads"), { recursive: true, force: true });
+if (process.env.UPDATE_SHOTS !== "1") fs.rmSync(path.join(TMP, "unpack-shots-dl"), { recursive: true, force: true });
 console.log(`${total - fails}/${total} passed`);
 console.log(fails ? `${fails} FAILED` : "ALL PASS");
 process.exit(fails ? 1 : 0);

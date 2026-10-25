@@ -3,13 +3,16 @@
 // and its files; fake_aurora.py for the console target. Keys come from unpack-catalog-sign.
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 import http from "http";
 import crypto from "crypto";
 import { spawn, execFileSync } from "child_process";
 const here = new URL(".", import.meta.url).pathname;
 const tauri = new URL("../src-tauri/", import.meta.url).pathname;
 const SIGN = tauri + "target/debug/unpack-catalog-sign";
-const W = "/tmp/unpack-catalog-e2e", USB = W + "/usb", FTP_ROOT = W + "/ftp", STORE = W + "/store", KEYS = W + "/keys";
+const W = path.join(TMP, "unpack-catalog-e2e"), USB = W + "/usb", FTP_ROOT = W + "/ftp", STORE = W + "/store", KEYS = W + "/keys";
 fs.rmSync(W, { recursive: true, force: true });
 for (const d of [USB, FTP_ROOT + "/Hdd1", KEYS]) fs.mkdirSync(d, { recursive: true });
 const INI = "; DashLaunch\r\n[Paths]\r\nDefault = Usb:\\Aurora\\Aurora.xex\r\n\r\n[Plugins]\r\nplugin1 = Usb:\\Plugins\\main.xex\r\nplugin2 = Usb:\\Plugins\\other.xex\r\n\r\n[Settings]\r\nnohud = true\r\n";
@@ -70,7 +73,7 @@ const has = (sel) => p.evaluate((s) => !!document.querySelector(s), sel);
 const text = (sel) => p.evaluate((s) => document.querySelector(s)?.textContent.replace(/\s+/g, " ").trim() || "", sel);
 const type = (sel, v) => p.evaluate((s, v) => { const e = document.querySelector(s); e.value = v; e.dispatchEvent(new Event("input", { bubbles: true })); }, sel, v);
 const until = async (fn, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await fn()) return true; await wait(150); } return false; };
-const shot = (n) => p.screenshot({ path: (process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : "/tmp/") + n });
+const shot = (n) => p.screenshot({ path: process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/" + n, import.meta.url).pathname : path.join(TMP, n) });
 const row = (id) => `[data-cat-entry='${id}']`;
 await wait(700);
 await click("[data-action=mods]"); await wait(700);

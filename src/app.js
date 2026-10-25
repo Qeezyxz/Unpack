@@ -1090,10 +1090,33 @@ function tileColor(tid) {
   return [h, (h + 50) % 360];
 }
 function gameTile(g, coverUrl) {
-  if (coverUrl) return `<img class="lib-cover" src="${escapeHtml(coverUrl)}" alt="" loading="lazy"/>`;
   const [a, b] = tileColor(g.title_id);
   const initials = g.name.replace(/[^\p{L}\p{N} ]/gu, "").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
-  return `<svg class="tile" viewBox="0 0 64 80" aria-hidden="true"><defs><linearGradient id="t${escapeHtml(g.title_id)}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${a} 70% 55%)"/><stop offset="1" stop-color="hsl(${b} 70% 38%)"/></linearGradient></defs><rect width="64" height="80" rx="10" fill="url(#t${escapeHtml(g.title_id)})"/><circle cx="52" cy="14" r="22" fill="#fff" fill-opacity=".08"/><path d="M0 62 L64 46 V80 H0z" fill="#000" fill-opacity=".18"/><text x="32" y="44" text-anchor="middle" font-family="Outfit, sans-serif" font-weight="700" font-size="22" fill="#fff">${escapeHtml(initials)}</text><text x="32" y="72" text-anchor="middle" font-family="Outfit, sans-serif" font-size="7" fill="#fff" fill-opacity=".8">${escapeHtml(g.title_id)}</text></svg>`;
+  const tile = `<svg class="tile" viewBox="0 0 64 80" aria-hidden="true" ${coverUrl ? "hidden" : ""}><defs><linearGradient id="t${escapeHtml(g.title_id)}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${a} 70% 55%)"/><stop offset="1" stop-color="hsl(${b} 70% 38%)"/></linearGradient></defs><rect width="64" height="80" rx="10" fill="url(#t${escapeHtml(g.title_id)})"/><circle cx="52" cy="14" r="22" fill="#fff" fill-opacity=".08"/><path d="M0 62 L64 46 V80 H0z" fill="#000" fill-opacity=".18"/><text x="32" y="44" text-anchor="middle" font-family="Outfit, sans-serif" font-weight="700" font-size="22" fill="#fff">${escapeHtml(initials)}</text><text x="32" y="72" text-anchor="middle" font-family="Outfit, sans-serif" font-size="7" fill="#fff" fill-opacity=".8">${escapeHtml(g.title_id)}</text></svg>`;
+  const img = coverUrl
+    ? `<img class="lib-cover" data-lib-cover-path="${escapeHtml(g.path)}" src="${escapeHtml(coverUrl)}" alt="" loading="lazy"/>`
+    : `<img class="lib-cover" data-lib-cover-path="${escapeHtml(g.path)}" alt="" hidden/>`;
+  return img + tile;
+}
+function patchLibraryCoverArt(view) {
+  const root = app.querySelector("[data-library]");
+  if (!root || view !== libraryView) return;
+  for (const g of view.games || []) {
+    const url = view.covers?.[g.path];
+    if (!url) continue;
+    const img = root.querySelector(`[data-lib-cover-path="${CSS.escape(g.path)}"]`);
+    if (!img || img.getAttribute("src") === url) continue;
+    img.src = url;
+    img.hidden = false;
+    const tile = img.nextElementSibling;
+    if (tile?.classList?.contains("tile")) tile.hidden = true;
+  }
+}
+async function syncLibraryGrants() {
+  if (!N.IS_DESKTOP) return;
+  const paths = [...N.settings.libraries];
+  if (N.settings.destMode === "folder" && N.settings.destPath) paths.push(N.settings.destPath);
+  await N.invoke("grant_paths", { paths: [...new Set(paths.filter(Boolean))] }).catch(() => {});
 }
 const EMPTY_LIB_ART = `<svg viewBox="0 0 120 80" width="120" height="80" aria-hidden="true"><rect x="14" y="18" width="30" height="40" rx="6" fill="var(--elevated)" stroke="var(--border-strong)" transform="rotate(-8 29 38)"/><rect x="45" y="12" width="30" height="40" rx="6" fill="var(--elevated)" stroke="var(--accent)"/><rect x="76" y="18" width="30" height="40" rx="6" fill="var(--elevated)" stroke="var(--border-strong)" transform="rotate(8 91 38)"/><path d="M54 32h12M60 26v12" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/><ellipse cx="60" cy="72" rx="40" ry="3" fill="var(--border)"/></svg>`;
 function filterLibraryGames(games) {
@@ -1131,20 +1154,30 @@ async function loadLibraryCovers() {
   const view = libraryView;
   if (!view || !N.IS_DESKTOP) return;
   const games = view.allGames || [];
+  view.coverGrantHint = view.coverGrantHint || {};
+  let needHintRender = false;
   const hydrate = async (g) => {
     if (run !== libCoverRun || view !== libraryView || view.covers[g.path]) return;
     try {
       // Local cover beside the game, else the disk cache; no network here.
       const src = await N.invoke("library_cover", { titleId: g.title_id, gamePath: g.path, allowCoverNetwork: false });
       if (src) view.covers[g.path] = src;
-    } catch {}
+    } catch (e) {
+      if (/wasn't picked/i.test(String(e))) {
+        view.coverGrantHint[g.path] = true;
+        needHintRender = true;
+      }
+    }
   };
   for (let i = 0; i < games.length; i += 8) {
     if (run !== libCoverRun || view !== libraryView) return;
     await Promise.all(games.slice(i, i + 8).map(hydrate));
-    if (view === libraryView) render();
+    if (view === libraryView) patchLibraryCoverArt(view);
   }
-  if (!N.settings.coverArtNetwork) return;
+  if (!N.settings.coverArtNetwork) {
+    if (needHintRender && view === libraryView) render();
+    return;
+  }
   for (let i = 0; i < games.length; i += 4) {
     if (run !== libCoverRun || view !== libraryView || !N.settings.coverArtNetwork) return;
     await Promise.all(games.slice(i, i + 4).map(async (g) => {
@@ -1152,10 +1185,16 @@ async function loadLibraryCovers() {
       try {
         const path = await N.invoke("library_cover", { titleId: g.title_id, gamePath: g.path, allowCoverNetwork: true });
         if (path) view.covers[g.path] = path;
-      } catch {}
+      } catch (e) {
+        if (/wasn't picked/i.test(String(e))) {
+          view.coverGrantHint[g.path] = true;
+          needHintRender = true;
+        }
+      }
     }));
-    if (view === libraryView) render();
+    if (view === libraryView) patchLibraryCoverArt(view);
   }
+  if (needHintRender && view === libraryView) render();
 }
 // Every running library_index job I started (the visible scan and a background refresh).
 const libScanIds = new Set();
@@ -1195,6 +1234,7 @@ async function openLibrary(forceFresh = false) {
     sort: N.settings.libSort,
     filterKind: N.settings.libFilterKind,
     covers: {},
+    coverGrantHint: {},
   };
   render();
   const offProgress = N.onLibraryScanProgress(scanId, (p) => {
@@ -1263,9 +1303,10 @@ function renderLibrary() {
       </div>`;
   const body = L.loading ? `<div class="preview-empty"><span class="spin">◌</span> ${escapeHtml(L.scanMessage || "Looking in your library folders…")}${L.scanId ? ` <button class="btn btn-quiet btn-sm" data-lib-cancel type="button">Cancel</button>` : ""}</div>`
     : `${libBar}${!L.games.length ? `<div class="preview-empty lib-empty">${EMPTY_LIB_ART}<div><strong>No games found yet</strong><br>Add the folder with your GOD games (or a USB drive's Content folder) in Settings → Game library folders.</div></div>`
-    : `<div class="lib-grid">${L.games.map((g, i) => { const c = L.copying[g.path]; return `<div class="lib-card">
+    : `<div class="lib-grid">${L.games.map((g, i) => { const c = L.copying[g.path]; return `<div class="lib-card" data-lib-path="${escapeHtml(g.path)}">
         ${gameTile(g, L.covers?.[g.path])}
         <div class="lib-info"><strong title="${escapeHtml(g.path)}">${escapeHtml(g.name)}</strong>
+          ${L.coverGrantHint?.[g.path] ? `<span class="meta warn-text">Re-pick this game's library folder in Settings to show cover art.</span>` : ""}
           <span>${escapeHtml(g.title_id)} · ${g.size_approx ? "about " : ""}${formatBytes(g.game_size)} · <span class="pill">${escapeHtml(libraryKindLabel(g.kind))}</span></span>
           <span><span class="pill">${g.dlc_count} DLC</span> ${g.dlc_count ? formatBytes(g.dlc_size) : ""} ${g.tu_count ? `<span class="pill">${g.tu_count} TU</span>` : ""}</span>
           ${c ? `<div class="qbar"><div data-job-bar="${escapeHtml(c.id)}" style="width:${c.progress || 0}%"></div></div><span class="${c.error ? "danger" : ""}" data-job-status="${escapeHtml(c.id)}">${escapeHtml(c.error || c.status)}</span>` : ""}
@@ -3384,7 +3425,7 @@ function bindSettings() {
   app.querySelector("[data-action=settings]")?.addEventListener("click", () => { settingsOpen = true; render(); app.querySelector("[data-settings-close]")?.focus(); });
   const root = app.querySelector("[data-settings]");
   if (!root) return;
-  const close = () => { settingsOpen = false; confirmDelIso = false; foundRoots = null; render(); app.querySelector("[data-action=settings]")?.focus(); };
+  const close = () => { settingsOpen = false; confirmDelIso = false; foundRoots = null; syncLibraryGrants(); render(); app.querySelector("[data-action=settings]")?.focus(); };
   root.querySelector("[data-settings-close]")?.addEventListener("click", close);
   app.querySelector("[data-settings-overlay]")?.addEventListener("click", (e) => { if (e.target === e.currentTarget) close(); });
   root.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
@@ -3415,10 +3456,10 @@ function bindSettings() {
   root.querySelector("[data-set-release]")?.addEventListener("change", (e) => { N.settings.releaseCheck = e.target.checked; });
   root.querySelector("[data-set-export]")?.addEventListener("click", () => exportSettings());
   root.querySelector("[data-set-import]")?.addEventListener("click", () => importSettings());
-  root.querySelectorAll("[data-lib-remove]").forEach((b) => b.addEventListener("click", () => { const l = N.settings.libraries; l.splice(Number(b.dataset.libRemove), 1); N.settings.libraries = l; render(); }));
-  root.querySelector("[data-lib-add]")?.addEventListener("click", async () => { const p = await N.pickFolder("Add a game library folder"); if (p) { N.settings.libraries = [...N.settings.libraries, p]; retryDlcNotFound(true); render(); } });
+  root.querySelectorAll("[data-lib-remove]").forEach((b) => b.addEventListener("click", () => { const l = N.settings.libraries; l.splice(Number(b.dataset.libRemove), 1); N.settings.libraries = l; syncLibraryGrants(); render(); }));
+  root.querySelector("[data-lib-add]")?.addEventListener("click", async () => { const p = await N.pickFolder("Add a game library folder"); if (p) { N.settings.libraries = [...N.settings.libraries, p]; syncLibraryGrants(); retryDlcNotFound(true); render(); } });
   root.querySelector("[data-lib-scan]")?.addEventListener("click", async () => { foundRoots = await N.invoke("dlc_scan_drives").catch(() => []); render(); });
-  root.querySelectorAll("[data-root-add]").forEach((b) => b.addEventListener("click", () => { const r = foundRoots[Number(b.dataset.rootAdd)]; if (r) { N.settings.libraries = [...N.settings.libraries, r]; retryDlcNotFound(true); render(); } }));
+  root.querySelectorAll("[data-root-add]").forEach((b) => b.addEventListener("click", () => { const r = foundRoots[Number(b.dataset.rootAdd)]; if (r) { N.settings.libraries = [...N.settings.libraries, r]; syncLibraryGrants(); retryDlcNotFound(true); render(); } }));
   root.querySelector("[data-deliso-yes]")?.addEventListener("click", () => { N.settings.deleteIsoAfterGod = true; confirmDelIso = false; render(); });
   root.querySelector("[data-deliso-no]")?.addEventListener("click", () => { confirmDelIso = false; render(); });
   root.querySelector("[data-set-autowrite]")?.addEventListener("change", (e) => { const m = app.querySelector(".desk [data-setting=autoWrite]"); if (m) { m.checked = e.target.checked; m.dispatchEvent(new Event("change")); } });
@@ -4493,6 +4534,11 @@ async function initDesktop() {
     nativeOk = false;
   }
   await N.initNativeEvents();
+  await syncLibraryGrants();
+  if (!localStorage.getItem("unpack.libraryGrantsSynced") && N.settings.libraries.length) {
+    localStorage.setItem("unpack.libraryGrantsSynced", "1");
+    showMigrationNotice("Your saved game library folders were approved for file access and cover art.");
+  }
   await N.invoke("discord_set_enabled", { enabled: N.settings.discordPresence }).catch(() => {});
   // One-time notice when the update had to set the older settings profile aside (R19 L5).
   for (const msg of await N.invoke("migration_notices").catch(() => [])) showMigrationNotice(msg);

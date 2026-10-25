@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -19,9 +21,15 @@ const FAIL_TTL_SECS: u64 = 6 * 3600;
 
 const UNITY_BASE: &str = "https://xboxunity.net/Resources/Lib";
 
-/// Largest CoverInfo JSON / cover image I accept from the network or the cache.
-const MAX_INFO_BYTES: u64 = 256 * 1024;
-const MAX_IMG_BYTES: u64 = 2 * 1024 * 1024;
+/// Largest cover image I accept from the network or the cache (after downscale).
+const MAX_IMG_BYTES: u64 = 512 * 1024;
+
+const MAX_DECODE_DIM: u32 = 4096;
+const COVER_MAX_W: u32 = 300;
+const COVER_MAX_H: u32 = 420;
+const JPEG_QUALITY: u8 = 80;
+
+static FAILURE_LOCK: Mutex<()> = Mutex::new(());
 
 /// True when the bytes start like a PNG or JPEG.
 pub fn is_image(b: &[u8]) -> bool {
@@ -30,11 +38,42 @@ pub fn is_image(b: &[u8]) -> bool {
 
 /// Write via a temp file in the same folder, then rename, so readers never see a torn file.
 fn write_atomic(dest: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = dest.with_extension(format!("{}.tmp", std::process::id()));
+    static N: AtomicU64 = AtomicU64::new(0);
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    let tmp = dest.with_file_name(format!(
+        ".{name}.{}.{:?}.{}.tmp",
+        std::process::id(),
+        std::thread::current().id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    ));
     fs::write(&tmp, data)?;
     fs::rename(&tmp, dest).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
     })
+}
+
+/// Downscale to at most 300×420 and re-encode as JPEG (~quality 80). Rejects decompression bombs.
+pub fn prepare_cover_bytes(raw: &[u8]) -> Option<Vec<u8>> {
+    if !is_image(raw) {
+        return None;
+    }
+    let img = image::load_from_memory(raw).ok()?;
+    let (w, h) = (img.width(), img.height());
+    if w > MAX_DECODE_DIM || h > MAX_DECODE_DIM {
+        return None;
+    }
+    let scaled = if w > COVER_MAX_W || h > COVER_MAX_H {
+        img.thumbnail(COVER_MAX_W, COVER_MAX_H)
+    } else {
+        img
+    };
+    let mut out = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY);
+    enc.encode_image(&scaled).ok()?;
+    (out.len() as u64 <= MAX_IMG_BYTES).then_some(out)
 }
 
 /// Why a download produced no cover: the network itself failed, or this title has none.
@@ -70,7 +109,11 @@ pub fn data_url(path: &Path) -> Option<String> {
     if buf.len() as u64 > MAX_IMG_BYTES || !is_image(&buf) {
         return None;
     }
-    let mime = if buf.starts_with(&[0xFF, 0xD8]) { "image/jpeg" } else { "image/png" };
+    let mime = if buf.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg"
+    } else {
+        "image/png"
+    };
     Some(format!("data:{mime};base64,{}", b64(&buf)))
 }
 
@@ -78,17 +121,27 @@ fn b64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
 
 fn cache_path(cache_dir: &Path, title_id: &str) -> PathBuf {
-    cache_dir.join(format!("{}.png", title_id.to_ascii_uppercase()))
+    cache_dir.join(format!("{}.jpg", title_id.to_ascii_uppercase()))
 }
 
 fn failures_path(cache_dir: &Path) -> PathBuf {
@@ -120,10 +173,10 @@ fn failure_active(cache_dir: &Path, title_id: &str) -> bool {
 }
 
 fn note_failure(cache_dir: &Path, title_id: &str) {
+    let _g = FAILURE_LOCK.lock().unwrap();
     let tid = title_id.to_ascii_uppercase();
     let mut map = read_failures(cache_dir);
     map.insert(tid, now_secs());
-    // Drop stale entries so the file stays small.
     map.retain(|_, t| now_secs().saturating_sub(*t) < FAIL_TTL_SECS);
     write_failures(cache_dir, &map);
 }
@@ -136,7 +189,7 @@ fn clear_failure(cache_dir: &Path, title_id: &str) {
     }
 }
 
-/// Path to a cached PNG if it already exists on disk.
+/// Path to a cached cover if it already exists on disk.
 pub fn cached_file(cache_dir: &Path, title_id: &str) -> Option<PathBuf> {
     if !valid_tid(title_id) {
         return None;
@@ -150,7 +203,6 @@ pub fn cached_file(cache_dir: &Path, title_id: &str) -> Option<PathBuf> {
     if ok {
         Some(p)
     } else {
-        // Missing or not a real image: drop it so it is fetched again.
         let _ = fs::remove_file(&p);
         None
     }
@@ -178,6 +230,13 @@ pub fn local_cover(game_path: &Path, title_id: &str) -> Option<PathBuf> {
     None
 }
 
+fn cache_prepared(dest: &Path, raw: &[u8]) -> bool {
+    match prepare_cover_bytes(raw) {
+        Some(data) => write_atomic(dest, &data).is_ok(),
+        None => false,
+    }
+}
+
 /// Copy local cover into cache if present.
 pub fn cache_local(game_path: &Path, title_id: &str, cache_dir: &Path) -> Option<CoverInfo> {
     if !valid_tid(title_id) {
@@ -187,11 +246,12 @@ pub fn cache_local(game_path: &Path, title_id: &str, cache_dir: &Path) -> Option
     fs::create_dir_all(cache_dir).ok()?;
     let dest = cache_path(cache_dir, title_id);
     let mut data = vec![];
-    fs::File::open(&src).ok()?.take(MAX_IMG_BYTES + 1).read_to_end(&mut data).ok()?;
-    if data.len() as u64 > MAX_IMG_BYTES || !is_image(&data) {
-        return None;
-    }
-    if write_atomic(&dest, &data).is_ok() {
+    fs::File::open(&src)
+        .ok()?
+        .take(8 * 1024 * 1024 + 1)
+        .read_to_end(&mut data)
+        .ok()?;
+    if cache_prepared(&dest, &data) {
         return Some(CoverInfo {
             path: dest.display().to_string(),
             source: "local".into(),
@@ -245,19 +305,18 @@ fn download_unity_cover(title_id: &str) -> Result<Vec<u8>, Miss> {
         Err(_) => Err(Miss::Network),
     };
     let info_resp = get(&format!("{UNITY_BASE}/CoverInfo.php?titleid={tid}"))?;
-    let body = read_capped(info_resp, MAX_INFO_BYTES).ok_or(Miss::Network)?;
+    let body = read_capped(info_resp, 256 * 1024).ok_or(Miss::Network)?;
     let info: UnityCoverInfo = serde_json::from_slice(&body).map_err(|_| Miss::Title)?;
     let cid = pick_cover_id(&info.covers).ok_or(Miss::Title)?;
     if cid.is_empty() || cid.len() > 12 || !cid.bytes().all(|b| b.is_ascii_digit()) {
         return Err(Miss::Title);
     }
-    // cid is digits only, so it is already URL-safe.
     let img_resp = get(&format!("{UNITY_BASE}/Cover.php?cid={cid}&size=large"))?;
     let ct = img_resp.content_type().to_ascii_lowercase();
     if ct != "image/png" && ct != "image/jpeg" && ct != "image/jpg" {
         return Err(Miss::Title);
     }
-    let img = read_capped(img_resp, MAX_IMG_BYTES).ok_or(Miss::Title)?;
+    let img = read_capped(img_resp, 8 * 1024 * 1024).ok_or(Miss::Title)?;
     if !is_image(&img) {
         return Err(Miss::Title);
     }
@@ -288,7 +347,7 @@ pub fn fetch_opt_in(title_id: &str, cache_dir: &Path, allow_network: bool) -> Op
     };
     fs::create_dir_all(cache_dir).ok()?;
     let dest = cache_path(cache_dir, title_id);
-    if write_atomic(&dest, &body).is_ok() {
+    if cache_prepared(&dest, &body) {
         clear_failure(cache_dir, title_id);
         Some(CoverInfo {
             path: dest.display().to_string(),
@@ -300,7 +359,7 @@ pub fn fetch_opt_in(title_id: &str, cache_dir: &Path, allow_network: bool) -> Op
     }
 }
 
-/// Local cover first, then cached PNG, then optional network fetch.
+/// Local cover first, then cached file, then optional network fetch.
 pub fn resolve_cover(
     game_path: &Path,
     title_id: &str,
@@ -317,13 +376,15 @@ pub fn resolve_cover(
             source: "cache".into(),
         });
     }
-    let info = fetch_opt_in(title_id, cache_dir, allow_network)?;
-    Some(info)
+    fetch_opt_in(title_id, cache_dir, allow_network)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::ImageEncoder;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
     fn failure_cache_expires() {
@@ -358,11 +419,17 @@ mod tests {
         fs::write(cache_path(&c, "415608C3"), vec![b'<'; 500]).unwrap();
         assert!(cached_file(&c, "415608C3").is_none());
         assert!(!cache_path(&c, "415608C3").exists());
-        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-        png.extend([0u8; 300]);
-        write_atomic(&cache_path(&c, "415608C3"), &png).unwrap();
+        let img = image::RgbaImage::from_pixel(32, 40, image::Rgba([9, 9, 9, 255]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(img.as_raw(), 32, 40, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let jpeg = prepare_cover_bytes(&png).unwrap();
+        write_atomic(&cache_path(&c, "415608C3"), &jpeg).unwrap();
         assert!(cached_file(&c, "415608C3").is_some());
-        assert!(data_url(&cache_path(&c, "415608C3")).unwrap().starts_with("data:image/png;base64,"));
+        assert!(data_url(&cache_path(&c, "415608C3"))
+            .unwrap()
+            .starts_with("data:image/jpeg;base64,"));
         note_failure(&c, "11111111");
         clear_failures(&c);
         assert!(!failure_active(&c, "11111111"));
@@ -383,5 +450,82 @@ mod tests {
             },
         ];
         assert_eq!(pick_cover_id(&entries).as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn big_png_becomes_small_jpeg() {
+        let img = image::RgbaImage::from_pixel(2000, 2800, image::Rgba([40, 80, 120, 255]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(img.as_raw(), 2000, 2800, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        assert!(png.len() > 20_000);
+        let out = prepare_cover_bytes(&png).unwrap();
+        assert!(out.starts_with(&[0xFF, 0xD8, 0xFF]));
+        assert!(out.len() < 50_000);
+        let decoded = image::load_from_memory(&out).unwrap();
+        assert!(decoded.width() <= COVER_MAX_W && decoded.height() <= COVER_MAX_H);
+    }
+
+    #[test]
+    fn decompression_bomb_rejected() {
+        let img = image::RgbaImage::from_pixel(5000, 5000, image::Rgba([0, 0, 0, 255]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(img.as_raw(), 5000, 5000, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        assert!(prepare_cover_bytes(&png).is_none());
+    }
+
+    #[test]
+    fn write_atomic_concurrent_valid_images() {
+        let d = crate::testutil::TmpDir::new("covers-atomic");
+        let dest = d.join("c/415608C3.jpg");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let png = {
+            let img = image::RgbaImage::from_pixel(64, 80, image::Rgba([1, 2, 3, 255]));
+            let mut b = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut b)
+                .write_image(img.as_raw(), 64, 80, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            b
+        };
+        let dest = Arc::new(dest);
+        let png = Arc::new(png);
+        thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..50 {
+                        let data = prepare_cover_bytes(png.as_slice()).unwrap();
+                        write_atomic(dest.as_ref(), &data).unwrap();
+                    }
+                });
+            }
+        });
+        let final_bytes = fs::read(dest.as_ref()).unwrap();
+        assert!(is_image(&final_bytes));
+        assert!(prepare_cover_bytes(&final_bytes).is_some());
+        let left: Vec<_> = fs::read_dir(d.join("c"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty());
+    }
+
+    #[test]
+    fn note_failure_keeps_all_concurrent_entries() {
+        let d = crate::testutil::TmpDir::new("covers-fail-par");
+        let cache = Arc::new(d.join("cache"));
+        thread::scope(|s| {
+            for i in 0..16 {
+                let c = Arc::clone(&cache);
+                s.spawn(move || {
+                    note_failure(c.as_ref(), &format!("{:08X}", i));
+                });
+            }
+        });
+        let map = read_failures(cache.as_ref());
+        assert_eq!(map.len(), 16);
     }
 }

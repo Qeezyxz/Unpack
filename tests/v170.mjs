@@ -2,10 +2,13 @@
 // Copy details button, pick_save export format modal, companion setting, error_help hint.
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 import { execFileSync } from "child_process";
 
 const D = process.env.TESTDATA || "/workspace/testdata";
-const OUT = "/tmp/unpack-v170";
+const OUT = path.join(TMP, "unpack-v170");
 const PORT = process.env.UNPACK_BRIDGE_PORT || 18790;
 const SZ = ["/usr/lib/7zip/7za", "/usr/bin/7za", "/usr/bin/7z"].find((x) => fs.existsSync(x));
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -118,16 +121,17 @@ await wait(800);
   await wait(500);
   await click("[data-mods-tab=names]");
   await wait(300);
-  await p.evaluate(() => {
-    window.__TEST.save = "/tmp/unpack-v170/export.json";
-  });
+  const exportPath = path.join(TMP, "unpack-v170/export.json");
+  await p.evaluate((save) => {
+    window.__TEST.save = save;
+  }, exportPath);
   await click("[data-mn-export]");
   await p.waitForSelector("[data-fmt-overlay]", { timeout: 3000 }).catch(() => {});
   check("export: format picker modal", await p.evaluate(() => !!document.querySelector("[data-fmt-json]")));
   await click("[data-fmt-json]");
   await wait(400);
   check("export: pick_save was used", await p.evaluate(() => window.__exportPickSaveCalled === true));
-  check("export: file written to the picked path", fs.existsSync("/tmp/unpack-v170/export.json") && Array.isArray(JSON.parse(fs.readFileSync("/tmp/unpack-v170/export.json", "utf8"))));
+  check("export: file written to the picked path", fs.existsSync(exportPath) && Array.isArray(JSON.parse(fs.readFileSync(exportPath, "utf8"))));
   await click("[data-mods-close]");
 }
 

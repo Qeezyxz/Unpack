@@ -2,9 +2,12 @@
 // Starts its own bridge with UNPACK_TEST_MENUS pointing at a generated fixture folder.
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 import crypto from "crypto";
 import { spawn } from "child_process";
-const W = "/tmp/unpack-builtin-e2e", MENUS = W + "/menus", USB = W + "/usb";
+const W = path.join(TMP, "unpack-builtin-e2e"), MENUS = W + "/menus", USB = W + "/usb";
 fs.rmSync(W, { recursive: true, force: true });
 fs.mkdirSync(MENUS + "/sub", { recursive: true }); fs.mkdirSync(USB, { recursive: true });
 const plug = Buffer.alloc(0x400); plug.write("XEX2", 0);

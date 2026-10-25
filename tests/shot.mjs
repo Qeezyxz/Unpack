@@ -1,13 +1,16 @@
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 const b = await puppeteer.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox"] });
 const p = await b.newPage(); await p.setViewport({ width: 1180, height: 820 });
 await p.evaluateOnNewDocument(fs.readFileSync(new URL("./test-shim.js", import.meta.url), "utf8"));
 await p.goto(`http://127.0.0.1:${process.env.UNPACK_BRIDGE_PORT || 18790}/`, { waitUntil: "load" }); await new Promise((r) => setTimeout(r, 800));
 await p.evaluate(() => window.__TEST.drop(["/workspace/testdata/plain.7z", "/workspace/testdata/plain.zip"]));
 await new Promise((r) => setTimeout(r, 1500));
-await p.screenshot({ path: "/tmp/shot-main.png" });
+await p.screenshot({ path: path.join(TMP, "shot-main.png") });
 await p.evaluate(() => window.__TEST.drop(["/workspace/testdata/halo3.iso"]));
 await new Promise((r) => setTimeout(r, 1200));
-await p.screenshot({ path: "/tmp/shot-god.png" });
+await p.screenshot({ path: path.join(TMP, "shot-god.png") });
 await b.close();

@@ -1,7 +1,10 @@
 // E2E: batch extract into one folder with "Auto-convert ISOs to GOD" on + screenshots of the new UI.
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
-const SRC = process.env.SRC || "/tmp/gt", OUT = "/tmp/gt-out", SHOTS = process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : "/tmp/unpack-shots/";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
+const SRC = process.env.SRC || path.join(TMP, "gt"), OUT = path.join(TMP, "gt-out"), SHOTS = process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : path.join(TMP, "unpack-shots/");
 fs.mkdirSync(SHOTS, { recursive: true }); // screenshots/ in the repo is only rewritten with UPDATE_SHOTS=1
 fs.rmSync(OUT, { recursive: true, force: true }); fs.mkdirSync(OUT);
 // fixtures: built here when missing (an Xbox ISO + a non-Xbox ISO in a zip, and a plain 7z)

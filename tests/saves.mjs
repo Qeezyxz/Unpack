@@ -1,10 +1,13 @@
 // E2E: save backup/restore and Aurora screenshot gallery (bridge + fake_aurora.py).
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 import path from "path";
 import { spawn } from "child_process";
 
-const W = "/tmp/unpack-saves-e2e";
+const W = path.join(TMP, "unpack-saves-e2e");
 const ROOT = W + "/console";
 const LOCAL = W + "/pc";
 const FTP_PORT = 21400 + Math.floor(Math.random() * 200);

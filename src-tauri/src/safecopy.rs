@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use sha1::{Digest, Sha1};
@@ -335,8 +336,12 @@ impl Grants {
     pub fn with_file(file: PathBuf) -> Self {
         let g = Grants::default();
         if let Ok(s) = fs::read_to_string(&file) {
-            if let Ok(v) = serde_json::from_str::<Vec<PathBuf>>(&s) {
-                g.persist.lock().unwrap().extend(v.into_iter().take(5000));
+            match serde_json::from_str::<Vec<PathBuf>>(&s) {
+                Ok(v) => g.persist.lock().unwrap().extend(v.into_iter().take(5000)),
+                Err(_) => {
+                    let bak = file.with_extension("json.bak");
+                    let _ = fs::copy(&file, &bak);
+                }
             }
         }
         *g.file.lock().unwrap() = Some(file);
@@ -346,10 +351,30 @@ impl Grants {
         let s = self.persist.lock().unwrap();
         if let Some(f) = self.file.lock().unwrap().as_ref() {
             let v: Vec<&PathBuf> = s.iter().collect();
+            let body = serde_json::to_string(&v).unwrap_or_default();
             if let Some(d) = f.parent() {
                 let _ = fs::create_dir_all(d);
             }
-            let _ = fs::write(f, serde_json::to_string(&v).unwrap_or_default());
+            static N: AtomicU64 = AtomicU64::new(0);
+            let tmp = f.with_file_name(format!(
+                ".grants.{}.{:?}.{}.tmp",
+                std::process::id(),
+                std::thread::current().id(),
+                N.fetch_add(1, Ordering::SeqCst)
+            ));
+            if fs::write(&tmp, &body).is_ok() && fs::rename(&tmp, f).is_ok() {
+                return;
+            }
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+    /// Grant every path that canonicalizes (e.g. saved library folders from Settings).
+    pub fn grant_paths(&self, paths: &[impl AsRef<Path>]) {
+        for p in paths {
+            if p.as_ref().as_os_str().is_empty() {
+                continue;
+            }
+            self.grant(p.as_ref());
         }
     }
     /// User-picked / scan-approved path — persisted across restarts.
@@ -644,6 +669,41 @@ mod tests {
                 .is_ok(),
             "under picked parent"
         );
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn grant_paths_batch() {
+        let d = tmp("grant-batch");
+        fs::create_dir_all(d.join("a")).unwrap();
+        fs::create_dir_all(d.join("b/game")).unwrap();
+        let g = Grants::default();
+        g.grant_paths(&[d.join("a"), d.join("b")]);
+        assert!(g.check(d.join("b/game").to_str().unwrap()).is_ok());
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn grants_save_atomic_and_corrupt_load() {
+        let d = tmp("grants-io");
+        let f = d.join("state/grants.json");
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(&f, b"not json").unwrap();
+        let g = Grants::with_file(f.clone());
+        assert!(g.persist.lock().unwrap().is_empty());
+        assert!(f.with_extension("json.bak").is_file());
+        fs::create_dir_all(d.join("lib/game")).unwrap();
+        g.grant(&d.join("lib"));
+        assert!(g.check(d.join("lib/game").to_str().unwrap()).is_ok());
+        let g2 = Grants::with_file(f.clone());
+        assert!(g2.check(d.join("lib/game").to_str().unwrap()).is_ok());
+        let stray: Vec<_> = fs::read_dir(d.join("state"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(stray.is_empty(), "{stray:?}");
         fs::remove_dir_all(&d).unwrap();
     }
 

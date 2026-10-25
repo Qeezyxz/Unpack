@@ -1,8 +1,11 @@
 // End-to-end UI test: headless Chrome + fake __TAURI__ (tests/test-shim.js) + real Rust archive code (examples/bridge.rs).
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 const D = process.env.TESTDATA || "/workspace/testdata";
-const OUT = "/tmp/unpack-e2e";
+const OUT = path.join(TMP, "unpack-e2e");
 // Self-contained test data: build the big/ISO fixtures if they're missing. Failure = test failure.
 import { execFileSync } from "child_process";
 const SZ = ["/usr/lib/7zip/7za", "/usr/bin/7za", "/usr/bin/7z"].find((x) => fs.existsSync(x));

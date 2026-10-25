@@ -2,9 +2,12 @@
 // mimics Aurora: xboxftp/xboxftp, no MLSD/EPSV, one connection). Local loopback only.
 import puppeteer from "/workspace/testenv/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import fs from "fs";
+import os from "os";
+import path from "path";
+const TMP = os.tmpdir();
 import path from "path";
 import { execFileSync, spawn } from "child_process";
-const W = "/tmp/unpack-xbox-e2e", ROOT = W + "/console", LIB = W + "/lib";
+const W = path.join(TMP, "unpack-xbox-e2e"), ROOT = W + "/console", LIB = W + "/lib";
 const FTP_PORT = 2121 + Math.floor(Math.random() * 500);
 fs.rmSync(W, { recursive: true, force: true });
 fs.mkdirSync(ROOT, { recursive: true });
@@ -47,7 +50,7 @@ const setField = async (f, v) => { await p.evaluate((f, v) => { const e = docume
 // DOM clicks (the re-rendered dialog animates in, which makes mouse clicks flaky in headless Chrome)
 const click = (sel) => p.evaluate((s) => { const e = document.querySelector(s); if (!e) throw new Error("no " + s); e.click(); }, sel);
 const sends = () => p.evaluate(() => [...document.querySelectorAll(".xb-send")].map((e) => e.textContent.replace(/\s+/g, " ").trim()));
-const SHOTS = process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : "/tmp/unpack-shots-xbox/";
+const SHOTS = process.env.UPDATE_SHOTS === "1" ? new URL("../screenshots/", import.meta.url).pathname : path.join(TMP, "unpack-shots-xbox/");
 fs.mkdirSync(SHOTS, { recursive: true });
 
 await wait(800);
@@ -236,7 +239,7 @@ srv3.kill();
 check("no page errors", errors.length === 0, errors.join(" | "));
 check("no external requests", external.length === 0, external.join(" "));
 await b.close(); srv.kill();
-if (process.env.UPDATE_SHOTS !== "1") fs.rmSync("/tmp/unpack-shots-xbox", { recursive: true, force: true });
+if (process.env.UPDATE_SHOTS !== "1") fs.rmSync(path.join(TMP, "unpack-shots-xbox"), { recursive: true, force: true });
 fs.rmSync(W, { recursive: true, force: true });
 console.log(`${total - fails}/${total} passed`);
 process.exit(fails ? 1 : 0);
