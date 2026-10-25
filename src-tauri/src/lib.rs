@@ -1958,24 +1958,32 @@ pub fn run() {
         .on_webview_event(|webview, event| {
             if let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 let grants = webview.state::<safecopy::Grants>();
+                let app = webview.app_handle().clone();
+                let mut refused: Option<String> = None;
                 for p in paths {
                     let meta = std::fs::symlink_metadata(p);
                     if let Ok(m) = meta {
                         if safecopy::is_link(&m) {
                             continue;
                         }
-                        if m.is_dir() {
-                            if let Ok(c) = picked_folders::validate_session_grant(p) {
-                                grants.grant_session(&c);
-                            }
+                        let grant_target = if m.is_dir() {
+                            Some(p.as_ref())
                         } else if m.is_file() {
-                            if let Some(parent) = p.parent() {
-                                if let Ok(c) = picked_folders::validate_session_grant(parent) {
-                                    grants.grant_session(&c);
-                                }
+                            p.parent()
+                        } else {
+                            None
+                        };
+                        if let Some(target) = grant_target {
+                            match picked_folders::validate_session_grant(target) {
+                                Ok(c) => grants.grant_session(&c),
+                                Err(e) if refused.is_none() => refused = Some(e),
+                                Err(_) => {}
                             }
                         }
                     }
+                }
+                if let Some(msg) = refused {
+                    let _ = app.emit("path-grant-refused", msg);
                 }
             }
         })

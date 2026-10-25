@@ -334,6 +334,21 @@ pub fn is_bare_drive_root(p: &Path) -> bool {
     false
 }
 
+fn trim_segment_trailing_dot_space(seg: &str) -> String {
+    let mut s = seg.to_string();
+    while s.ends_with('.') || s.ends_with(' ') {
+        s.pop();
+    }
+    s
+}
+
+fn normalize_windows_segments(s: &str) -> String {
+    s.split('\\')
+        .map(trim_segment_trailing_dot_space)
+        .collect::<Vec<_>>()
+        .join("\\")
+}
+
 /// Normalize a path string for system-folder checks (string only; use `fs::canonicalize` at pick/restore time).
 pub fn normalize_path_for_check(p: &str) -> String {
     let mut s = p.trim().to_string();
@@ -346,7 +361,12 @@ pub fn normalize_path_for_check(p: &str) -> String {
     if s.starts_with('/') {
         return s.to_ascii_lowercase();
     }
-    s.replace('/', "\\").to_ascii_lowercase()
+    let s = s.replace('/', "\\").to_ascii_lowercase();
+    if s.len() >= 3 && s.as_bytes()[1] == b':' && s.as_bytes()[2] == b'\\' {
+        normalize_windows_segments(&s)
+    } else {
+        s
+    }
 }
 
 fn raw_path_is_device_or_unc(p: &str) -> bool {
@@ -615,7 +635,11 @@ mod tests {
     fn system_folder_checks_use_path_segments() {
         assert!(!is_system_path(r"E:\Windows Games\save"));
         assert!(!is_system_path(r"D:\ProgramData2\cache"));
+        assert!(!is_system_path(r"D:\x\System32"));
         assert!(is_system_path(r"E:\Windows\System32"));
+        assert!(is_system_path(r"C:\WINDOWS."));
+        assert!(is_system_path(r"C:\Windows "));
+        assert!(is_system_path(r"C:\Mods\subdir\system32\evil"));
     }
 
     #[test]

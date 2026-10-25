@@ -38,6 +38,9 @@ const tests = process.argv.slice(2);
 const want = (n) => !tests.length || tests.includes(n);
 
 check("desktop desk rendered", await p.$("[data-setting=destMode]"));
+await drop(["/etc"]);
+await p.waitForFunction(() => /system location|whole system drive/.test(document.querySelector(".toast")?.textContent || ""), { timeout: 5000 }).catch(() => {});
+check("hostile folder drop shows refusal toast", await p.evaluate(() => /system location|whole system drive/i.test(document.querySelector(".toast")?.textContent || "")));
 
 if (want("extract")) {
   fs.copyFileSync(D + "/plain.7z", OUT + "/plain.7z");

@@ -405,6 +405,7 @@ fn extra(
         }
         "__test_drop_grant" => {
             // Mirrors Tauri DragDrop: session-only grants for dropped dirs / file parents.
+            let mut refused: Option<String> = None;
             for p in a["paths"]
                 .as_array()
                 .cloned()
@@ -419,17 +420,23 @@ fn extra(
                 if unpack_lib::safecopy::is_link(&m) {
                     continue;
                 }
-                if m.is_dir() {
-                    if let Ok(c) = unpack_lib::picked_folders::validate_session_grant(&path) {
-                        GRANTS.grant_session(&c);
-                    }
+                let grant_target = if m.is_dir() {
+                    Some(path.as_path())
                 } else if m.is_file() {
-                    if let Some(parent) = path.parent() {
-                        if let Ok(c) = unpack_lib::picked_folders::validate_session_grant(parent) {
-                            GRANTS.grant_session(&c);
-                        }
+                    path.parent()
+                } else {
+                    None
+                };
+                if let Some(target) = grant_target {
+                    match unpack_lib::picked_folders::validate_session_grant(target) {
+                        Ok(c) => GRANTS.grant_session(&c),
+                        Err(e) if refused.is_none() => refused = Some(e),
+                        Err(_) => {}
                     }
                 }
+            }
+            if let Some(msg) = refused {
+                events.lock().unwrap().push(json!({"event":"path-grant-refused","payload": msg}));
             }
             Ok(json!(true))
         }

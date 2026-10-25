@@ -166,7 +166,7 @@ export function onLibraryScanProgress(id, fn) {
   libraryScanHandlers.set(id, fn);
   return () => libraryScanHandlers.delete(id);
 }
-export async function initNativeEvents() {
+export async function initNativeEvents(opts = {}) {
   await T.event.listen("job-progress", (e) => {
     const p = e.payload;
     progressHandlers.get(p.id)?.(p);
@@ -174,6 +174,10 @@ export async function initNativeEvents() {
   await T.event.listen("library-scan-progress", (e) => {
     const p = e.payload;
     libraryScanHandlers.get(p.id)?.(p);
+  });
+  await T.event.listen("path-grant-refused", (e) => {
+    const msg = typeof e.payload === "string" ? e.payload : e.payload?.message;
+    if (msg) opts.onPathGrantRefused?.(msg);
   });
 }
 

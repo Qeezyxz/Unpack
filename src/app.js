@@ -4627,7 +4627,7 @@ async function initDesktop() {
   } catch {
     nativeOk = false;
   }
-  await N.initNativeEvents();
+  await N.initNativeEvents({ onPathGrantRefused: toast });
   // Register native drop before other startup IPC so test bridge can call __TEST.drop promptly.
   await N.onNativeDrop(
     (paths) => addPaths(paths),
