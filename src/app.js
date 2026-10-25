@@ -2429,13 +2429,18 @@ function renderModsDownload(M) {
       <div class="mod-act"><div class="actions"><button class="btn btn-secondary btn-sm" data-dl-reuse="${i}" type="button">Download</button><button class="btn btn-quiet btn-sm" data-dl-edit="${i}" type="button">Edit</button><button class="btn btn-quiet btn-sm" data-dl-del="${i}" type="button" aria-label="Delete">${SV(14,14,ICONS.x)}</button></div></div></div>`).join("") || `<div class="preview-empty">No saved links yet. Paste a URL and click Save link.</div>`}</div>
   </div>`;
 }
+let downloadBusy = false;
 async function runDownload(url, name) {
   if (!modsView) return;
+  if (downloadBusy) {
+    toast("A download is still finishing. Wait a moment and try again.");
+    return;
+  }
+  downloadBusy = true;
   const id = uid();
   modsView.dl.job = { id, progress: 0, status: "Starting…", error: "", done: false };
   modsView.dl.last = null;
   render();
-  setTaskbar(0);
   const off = N.onJobProgress(id, (p) => { const j = modsView?.dl?.job; if (!j || j.id !== id) return; j.progress = p.percent; j.status = p.file; paintJob(j); setTaskbar(p.percent); });
   try {
     const dest = modsView.dl.destDir || null;
@@ -2461,7 +2466,12 @@ async function runDownload(url, name) {
     notifyDone("Unpack — download finished", `${r.name} · SHA-256 ${r.sha256.slice(0, 12)}…`);
   } catch (err) {
     if (modsView?.dl?.job) { modsView.dl.job.error = friendlyError(err); }
-  } finally { off(); setTaskbar(null); render(); }
+  } finally {
+    downloadBusy = false;
+    off();
+    void setTaskbar(null);
+    render();
+  }
 }
 
 function bindMods() {

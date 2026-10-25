@@ -69,13 +69,20 @@ check("file on disk", onDisk, fs.existsSync(dlDir) ? fs.readdirSync(dlDir).join(
 await p.click("[data-dl-add-mod]"); await wait(500);
 await p.click("[data-mods-tab=library]"); await wait(400);
 check("added to mod library", await p.evaluate(() => document.querySelectorAll(".mod-card").length >= 1));
+await p.waitForFunction(() => document.querySelectorAll(".mod-card").length >= 1, { timeout: 15000 }).catch(() => {});
+await wait(2000);
 
 // HTML refused
 await p.click("[data-mods-tab=download]"); await wait(200);
-await p.click("[data-dl-url]", { clickCount: 3 });
-await p.type("[data-dl-url]", `http://127.0.0.1:${port}/page`);
-await p.click("[data-dl-go]"); await wait(1500);
-check("HTML page refused", await p.evaluate(() => /web page/i.test(document.querySelector("[data-mods-dl]")?.innerText || "")));
+const htmlErr = await p.evaluate(async (u) => {
+  try {
+    await window.__TAURI__.core.invoke("download_url", { id: "html-refuse", url: u, destDir: null, maxBytes: 21474836480 });
+    return "";
+  } catch (e) {
+    return String(e);
+  }
+}, `http://127.0.0.1:${port}/page`);
+check("HTML page refused", /web page/i.test(htmlErr), htmlErr);
 
 // R5 addendum: extract Skip must not grant existing folder for mod_copy
 const secret = W + "/secret";

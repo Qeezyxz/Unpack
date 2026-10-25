@@ -20,6 +20,8 @@ fn app_csp() -> String {
 }
 
 fn main() {
+    // Headless UI tests use loopback FTP fixtures and local HTTP download servers.
+    std::env::set_var("UNPACK_TEST_ALLOW_LOOPBACK", "1");
     unpack_lib::ftp::set_resume_dir(std::env::temp_dir().join("unpack-bridge-ftp-resume"));
     let root = PathBuf::from(std::env::args().nth(1).unwrap_or("../src".into()));
     let port = std::env::var("UNPACK_BRIDGE_PORT").unwrap_or_else(|_| "18790".into());

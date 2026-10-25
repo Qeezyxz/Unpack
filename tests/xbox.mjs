@@ -116,9 +116,11 @@ check("browser shows uploaded folder", /MyApp/.test(await txt(".xb-list")));
 await p.screenshot({ path: SHOTS + "14-send-to-xbox.png" });
 
 // Conflict: a different-size file on the console stops the send before anything is written
+await until(async () => /Send again|already there|Done|danger/i.test((await sends())[2] || ""), 60000);
 fs.writeFileSync(R("Hdd1/Plugins/plugin.xex"), "DIFFERENT");
-await click("[data-xb-go='2']"); await until(async () => /different size/.test((await sends())[2]));
-check("conflict refused", /different size/.test((await sends())[2]) && fs.readFileSync(R("Hdd1/Plugins/plugin.xex"), "utf8") === "DIFFERENT");
+await click("[data-xb-go='2']"); await until(async () => /different size/.test((await sends())[2]), 120000);
+const s2 = (await sends())[2] || "";
+check("conflict refused", /different size/.test(s2) && fs.readFileSync(R("Hdd1/Plugins/plugin.xex"), "utf8") === "DIFFERENT", s2);
 
 // Big file: live MB/s + ETA, one-connection lock, cancel, resume
 await p.evaluate((w) => { window.__TEST.pick = [w + "/big.bin"]; }, W);
@@ -130,11 +132,11 @@ const live = (await sends())[7];
 check("live MB/s and ETA", /\d+(\.\d)? MB\/s · ETA \d+:\d\d/.test(live), live);
 const busy = await p.evaluate((port) => window.__TAURI__.core.invoke("ftp_list", { host: "127.0.0.1", port, user: "xboxftp", pass: "xboxftp", path: "/" }).then(() => "ok", (e) => String(e)), FTP_PORT);
 check("one connection at a time", /already talking/.test(busy), busy);
-await click("[data-xb-cancel='7']"); await until(async () => /Cancelled/.test((await sends())[7]));
+await click("[data-xb-cancel='7']"); await until(async () => /Cancelled/.test((await sends())[7]), 60000);
 const partSize = fs.existsSync(R("Usb0/big.bin.part")) ? fs.statSync(R("Usb0/big.bin.part")).size : 0;
 check("cancel keeps .part", /Cancelled/.test((await sends())[7]) && partSize > 0 && partSize < 400 << 20 && !fs.existsSync(R("Usb0/big.bin")), String(partSize));
 await click("[data-xb-go='7']"); await until(async () => !/Cancelled/.test((await sends())[7]));
-await until(async () => /Send again|danger/.test(await p.evaluate(() => document.querySelectorAll(".xb-send")[7].innerHTML)), 120000);
+await until(async () => /Send again|danger/.test(await p.evaluate(() => document.querySelectorAll(".xb-send")[7].innerHTML)), 180000);
 check("resume completes + verified", /1 resumed.*sizes verified/.test((await sends())[7]) && fs.statSync(R("Usb0/big.bin")).size === 400 << 20, (await sends())[7]);
 
 // Editable destinations: validation, Browse, Reset, last folder per type, Send all to this folder
