@@ -647,7 +647,7 @@ function paintJob(job) {
   const sel = (attr) => document.querySelectorAll(`[${attr}="${CSS.escape(job.id)}"]`);
   sel("data-job-bar").forEach((el) => { el.style.width = (job.progress || 0) + "%"; });
   sel("data-job-status").forEach((el) => {
-    el.textContent = el.dataset.statusKind === "god" ? godStatusText(job) : job.status || "";
+    el.textContent = el.dataset.statusKind === "god" ? godStatusText(job) : job.error || job.status || "";
   });
 }
 

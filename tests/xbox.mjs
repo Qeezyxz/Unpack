@@ -125,26 +125,11 @@ check("browser shows uploaded folder", /MyApp/.test(await txt(".xb-list")));
 await p.screenshot({ path: SHOTS + "14-send-to-xbox.png" });
 
 // Conflict: a different-size file on the console stops the send before anything is written
-await waitXboxIdle();
-await until(async () => /Send again|already there|Done|danger/i.test((await sends())[2] || ""), 60000);
 fs.writeFileSync(R("Hdd1/Plugins/plugin.xex"), "DIFFERENT");
-const conflictErr = await p.evaluate(async (w, port) => {
-  const src = w + "/plugin.xex";
-  await fetch("/invoke/__test_grant", { method: "POST", body: JSON.stringify({ paths: [src] }) });
-  try {
-    await window.__TAURI__.core.invoke("ftp_send", {
-      id: "xb-conflict",
-      args: { host: "127.0.0.1", port, user: "xboxftp", pass: "xboxftp", src, kind: "plugins", drive: "Hdd1", parallel: false, dest: "/Hdd1/Plugins" },
-    });
-    return "sent";
-  } catch (e) {
-    return typeof e === "string" ? e : JSON.stringify(e);
-  }
-}, W, FTP_PORT);
-check("conflict refused", /different size/.test(conflictErr) && fs.readFileSync(R("Hdd1/Plugins/plugin.xex"), "utf8") === "DIFFERENT", conflictErr);
+await click("[data-xb-go='2']"); await until(async () => /different size/.test((await sends())[2]));
+check("conflict refused", /different size/.test((await sends())[2]) && fs.readFileSync(R("Hdd1/Plugins/plugin.xex"), "utf8") === "DIFFERENT");
 
 // Big file: live MB/s + ETA, one-connection lock, cancel, resume
-await waitXboxIdle();
 await p.evaluate((w) => { window.__TEST.pick = [w + "/big.bin"]; }, W);
 await click("[data-xb-files]"); await until(async () => (await sends()).length === 8);
 await p.select("[data-xb-kind='7']", "custom"); await wait(400);
@@ -154,33 +139,11 @@ const live = (await sends())[7];
 check("live MB/s and ETA", /\d+(\.\d)? MB\/s · ETA \d+:\d\d/.test(live), live);
 const busy = await p.evaluate((port) => window.__TAURI__.core.invoke("ftp_list", { host: "127.0.0.1", port, user: "xboxftp", pass: "xboxftp", path: "/" }).then(() => "ok", (e) => String(e)), FTP_PORT);
 check("one connection at a time", /already talking/.test(busy), busy);
-await until(async () => !!(await p.$("[data-xb-cancel='7']")), 30000);
-const jobId = await p.evaluate(() => document.querySelector("[data-xb-item='7'] [data-job-bar]")?.getAttribute("data-job-bar"));
-if (!jobId) throw new Error("no ftp_send job id");
-for (let i = 0; i < 80; i++) {
-  await fetch(BR + "/invoke/cancel_job", { method: "POST", body: JSON.stringify({ id: jobId }) });
-  const done = await p.evaluate(() => {
-    const item = document.querySelector("[data-xb-item='7']");
-    const foot = item?.querySelector(".xb-send-foot span")?.textContent || "";
-    const running = !!item?.querySelector("[data-xb-cancel]");
-    return /Cancelled/i.test(foot) && !running;
-  });
-  if (done) break;
-  await wait(250);
-}
-await until(async () => {
-  return await p.evaluate(() => {
-    const item = document.querySelector("[data-xb-item='7']");
-    const foot = item?.querySelector(".xb-send-foot span")?.textContent || "";
-    const running = !!item?.querySelector("[data-xb-cancel]");
-    return /Cancelled/i.test(foot) && !running;
-  });
-}, 120000);
+await click("[data-xb-cancel='7']"); await until(async () => /Cancelled/.test((await sends())[7]));
 const partSize = fs.existsSync(R("Usb0/big.bin.part")) ? fs.statSync(R("Usb0/big.bin.part")).size : 0;
-const foot7 = () => p.evaluate(() => document.querySelector("[data-xb-item='7'] .xb-send-foot span")?.textContent || "");
-check("cancel keeps .part", /Cancelled/i.test(await foot7()) && partSize > 0 && partSize < 400 << 20 && !fs.existsSync(R("Usb0/big.bin")), String(partSize));
-await click("[data-xb-go='7']"); await until(async () => !/Cancelled/i.test(await foot7()));
-await until(async () => /Send again|danger/.test(await p.evaluate(() => document.querySelectorAll(".xb-send")[7].innerHTML)), 180000);
+check("cancel keeps .part", /Cancelled/.test((await sends())[7]) && partSize > 0 && partSize < 400 << 20 && !fs.existsSync(R("Usb0/big.bin")), String(partSize));
+await click("[data-xb-go='7']"); await until(async () => !/Cancelled/.test((await sends())[7]));
+await until(async () => /Send again|danger/.test(await p.evaluate(() => document.querySelectorAll(".xb-send")[7].innerHTML)), 120000);
 check("resume completes + verified", /1 resumed.*sizes verified/.test((await sends())[7]) && fs.statSync(R("Usb0/big.bin")).size === 400 << 20, (await sends())[7]);
 
 // Editable destinations: validation, Browse, Reset, last folder per type, Send all to this folder

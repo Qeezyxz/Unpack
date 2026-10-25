@@ -4,10 +4,28 @@ use std::path::{Path, PathBuf};
 
 pub struct TmpDir(PathBuf);
 
+fn test_temp_base() -> PathBuf {
+    #[cfg(windows)]
+    {
+        let base = std::env::temp_dir();
+        let disp = base.to_string_lossy().to_lowercase();
+        // Wine on Linux CI: POSIX temp. Real Windows / Wine %TEMP% under Users is treated as a
+        // system path by picked_folders and cannot be auto-restored in tests.
+        if disp.starts_with('/')
+            || disp.starts_with(r"c:\users\")
+            || disp.starts_with(r"c:\windows\")
+        {
+            return PathBuf::from(format!(r"C:\unpack-test-{}", std::process::id()));
+        }
+        return base;
+    }
+    std::env::temp_dir()
+}
+
 impl TmpDir {
     /// `<temp>/unpack-<name>-<pid>`, emptied first.
     pub fn new(name: &str) -> TmpDir {
-        let p = std::env::temp_dir().join(format!("unpack-{name}-{}", std::process::id()));
+        let p = test_temp_base().join(format!("unpack-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         TmpDir(p)
