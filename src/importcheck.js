@@ -23,7 +23,7 @@ const LOCAL_PATHS = ["destPath", "libraries"];
 
 /** A Windows or Unix system folder (or anything inside one). Rust `is_system_path` is authoritative in the app. */
 export function isSystemPath(p) {
-  const raw = String(p || "");
+  const raw = String(p || "").trim();
   if (/^\\\\\.\\|^\\\\\?\\/i.test(raw) || /^[\\/]{2}(?![\\/])/.test(raw)) return true;
   const s = raw.replace(/^\\\\\?\\/, "").replace(/\//g, "\\").toLowerCase();
   if (/^[a-z]:\\(windows|program files|program files \(x86\)|programdata|\$recycle\.bin|system volume information)(\\|$)/.test(s)) return true;

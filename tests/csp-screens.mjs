@@ -58,23 +58,27 @@ await openClose("GOD", "[data-action=god]", "[data-god]", "[data-god-close]");
 await openClose("Homebrew", "[data-action=homebrew]", "[data-homebrew]", "[data-hb-close]");
 await openClose("Create archive", "[data-action=create]", "[data-composer]", "[data-cmp-close]");
 
-await p.setViewport({ width: 320, height: 800 });
-await p.evaluate(() => {
-  localStorage.setItem("unpack.libraries", JSON.stringify(["D:\\Games\\VeryLongLibraryFolderNameForNarrowLayout"]));
-});
-await p.evaluate(() => document.querySelector("[data-action=settings]")?.click());
-await new Promise((r) => setTimeout(r, 400));
-check("Settings 320px wraps long library path", await p.evaluate(() => {
-  const el = document.querySelector(".dialog-settings .cmp-list .name");
-  if (!el) return false;
-  const cs = getComputedStyle(el);
-  if (cs.whiteSpace !== "normal") return false;
-  const text = el.textContent || "";
-  if (!text.includes("VeryLongLibraryFolderNameForNarrowLayout")) return false;
-  const title = el.getAttribute("title") || "";
-  return title.includes("VeryLongLibraryFolderNameForNarrowLayout") || el.scrollHeight > el.clientHeight + 2;
-}));
-await p.evaluate(() => document.querySelector("[data-settings-close]")?.click());
+const narrowSettingsPathCheck = async (width, label) => {
+  await p.setViewport({ width, height: 800 });
+  await p.evaluate(() => {
+    localStorage.setItem("unpack.libraries", JSON.stringify(["D:\\Games\\VeryLongLibraryFolderNameForNarrowLayout"]));
+  });
+  await p.evaluate(() => document.querySelector("[data-action=settings]")?.click());
+  await new Promise((r) => setTimeout(r, 400));
+  check(`Settings ${label} wraps long library path`, await p.evaluate(() => {
+    const el = document.querySelector(".dialog-settings .cmp-list .name");
+    if (!el) return false;
+    const cs = getComputedStyle(el);
+    if (cs.whiteSpace !== "normal") return false;
+    const text = el.textContent || "";
+    if (!text.includes("VeryLongLibraryFolderNameForNarrowLayout")) return false;
+    const title = el.getAttribute("title") || "";
+    return title.includes("VeryLongLibraryFolderNameForNarrowLayout") || el.scrollHeight > el.clientHeight + 2;
+  }));
+  await p.evaluate(() => document.querySelector("[data-settings-close]")?.click());
+};
+await narrowSettingsPathCheck(320, "320px");
+await narrowSettingsPathCheck(340, "340px");
 await p.setViewport({ width: 1180, height: 900 });
 
 await fetch(`${BR}invoke/__plant_migration_notice`, { method: "POST", body: "{}" }).catch(() => {});

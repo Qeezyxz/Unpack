@@ -901,7 +901,6 @@ fn c1_iso_list_is_exact_and_replace_is_flagged() {
     assert!(!r.merged);
     assert!(r.isos.iter().all(|p| p.contains("merge-2")), "{:?}", r.isos);
     assert_eq!(r.isos.len(), 2);
-    fs::remove_dir_all(&d).unwrap();
 }
 
 /// Overseer round-3 H1/M2: Rust alone decides delete-allowed. A Replace-mode extraction into a
@@ -2751,6 +2750,48 @@ fn k1_edited_data_after_kill_never_mixes_package() {
             assert_ne!(live_hdr.as_deref(), Some(b"OLD" as &[u8]), "{ctx}: never the old header beside edited data");
         }
     }
+}
+
+/// Undo repair quarantines a foreign live `.data` with at most one entry instead of deleting it.
+#[test]
+fn undo_quarantines_foreign_single_entry_data() {
+    let td = crate::testutil::TmpDir::new("arch-quarantine");
+    let prof = td.path().join("prof");
+    let dst = r27_setup(&prof);
+    let (st, tree) = r27_stage(td.path(), "q", b"NEW");
+    REPLACE_KILL_AT.with(|k| k.set(5));
+    assert!(place_title_trees(&st, &[tree], &prof, Collision::Replace, 1, 0, 0, vec![], &Jobs::default(), "t", &mut |_, _| {}).is_err());
+    REPLACE_KILL_AT.with(|k| k.set(0));
+    let data_dir = dst.join("abcd0001.data");
+    if !data_dir.exists() {
+        fs::create_dir_all(&data_dir).unwrap();
+    } else {
+        for e in fs::read_dir(&data_dir).unwrap().flatten() {
+            remove_any(&e.path()).unwrap();
+        }
+    }
+    fs::write(data_dir.join("solo.txt"), b"USER").unwrap();
+    let mut w = vec![];
+    recover_asides_locked(&dst, &mut w);
+    assert!(w.iter().any(|x| x.contains("moved unrelated edits")), "{w:?}");
+    let conflict = names_in_dir(&dst)
+        .into_iter()
+        .find(|n| n.starts_with(".unpack-new.conflict.") && n.contains("abcd0001.data"))
+        .expect("quarantine dir");
+    assert_eq!(fs::read(dst.join(conflict).join("solo.txt")).unwrap(), b"USER");
+    assert_eq!(r27_check(&dst, "quarantine"), b"OLD");
+}
+
+#[test]
+fn recover_asides_removes_stale_unpack_part_files() {
+    let td = crate::testutil::TmpDir::new("arch-unpack-part");
+    let d = td.path();
+    fs::create_dir_all(d.join("ABCD0001.data")).unwrap();
+    fs::write(d.join(".unpack-part.job1"), b"half").unwrap();
+    let mut w = vec![];
+    recover_asides_locked(d, &mut w);
+    assert!(!d.join(".unpack-part.job1").exists());
+    assert!(w.iter().any(|x| x.contains(".unpack-part.") && x.contains("Removed")), "{w:?}");
 }
 
 /// B41-H1: recovery must not delete a foreign live `.data` folder when undoing a Replace.

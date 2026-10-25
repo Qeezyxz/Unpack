@@ -1965,10 +1965,14 @@ pub fn run() {
                             continue;
                         }
                         if m.is_dir() {
-                            grants.grant_session(p);
+                            if let Ok(c) = picked_folders::validate_session_grant(p) {
+                                grants.grant_session(&c);
+                            }
                         } else if m.is_file() {
                             if let Some(parent) = p.parent() {
-                                grants.grant_session(parent);
+                                if let Ok(c) = picked_folders::validate_session_grant(parent) {
+                                    grants.grant_session(&c);
+                                }
                             }
                         }
                     }

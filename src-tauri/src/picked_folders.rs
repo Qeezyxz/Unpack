@@ -340,9 +340,6 @@ pub fn normalize_path_for_check(p: &str) -> String {
     while let Some(rest) = s.strip_prefix(r"\\?\") {
         s = rest.to_string();
     }
-    while let Some(rest) = s.strip_prefix(r"\\.\\") {
-        s = rest.to_string();
-    }
     if s.starts_with("//") {
         return s.replace('/', "\\").to_ascii_lowercase();
     }
@@ -365,32 +362,69 @@ pub fn is_system_path(p: &str) -> bool {
     regex_hostile(normalize_path_for_check(p))
 }
 
+fn windows_path_after_drive(s: &str) -> Option<&str> {
+    if s.len() >= 3 && s.as_bytes()[1] == b':' && s.as_bytes()[2] == b'\\' {
+        Some(&s[3..])
+    } else {
+        None
+    }
+}
+
+fn path_has_prefix_segment(path: &str, segment: &str) -> bool {
+    path == segment || path.starts_with(&(segment.to_string() + "\\"))
+}
+
 fn windows_system_folder_on_drive(s: &str) -> bool {
-    s.len() >= 3
-        && s.as_bytes()[1] == b':'
-        && s.as_bytes()[2] == b'\\'
-        && (s[3..].starts_with("windows")
-            || s[3..].starts_with("program files")
-            || s[3..].starts_with("program files (x86)")
-            || s[3..].starts_with("programdata")
-            || s[3..].starts_with("$recycle.bin")
-            || s[3..].starts_with("system volume information"))
+    let Some(rest) = windows_path_after_drive(s) else {
+        return false;
+    };
+    const BLOCKED: &[&str] = &[
+        "windows",
+        "program files",
+        "program files (x86)",
+        "programdata",
+        "$recycle.bin",
+        "system volume information",
+    ];
+    BLOCKED.iter().any(|name| path_has_prefix_segment(rest, name))
 }
 
 fn windows_users_blocked(s: &str) -> bool {
-    if s.len() < 10 || s.as_bytes().get(1) != Some(&b':') || s.as_bytes().get(2) != Some(&b'\\') {
+    let Some(after_drive) = windows_path_after_drive(s) else {
         return false;
-    }
-    let after_drive = &s[3..];
+    };
     if !after_drive.starts_with("users\\") {
         return false;
     }
     let rest = &after_drive[6..];
-    let first = rest.split('\\').next().unwrap_or("");
-    if first.eq_ignore_ascii_case("default") || first.eq_ignore_ascii_case("all users") {
+    let segs: Vec<&str> = rest.split('\\').filter(|p| !p.is_empty()).collect();
+    if segs.is_empty() {
+        return false;
+    }
+    if segs[0].eq_ignore_ascii_case("default") || segs[0].eq_ignore_ascii_case("all users") {
         return true;
     }
-    rest.contains("\\appdata\\") || rest.ends_with("\\appdata")
+    segs.len() >= 2 && segs[1].eq_ignore_ascii_case("appdata")
+}
+
+/// Session-only grant (drag-and-drop): same refusal rules as a dialog pick, without persisting.
+pub fn validate_session_grant(p: &Path) -> Result<PathBuf, String> {
+    let Ok(c) = fs::canonicalize(p) else {
+        return Err("That folder doesn't exist or can't be accessed.".into());
+    };
+    let c = simplify(c);
+    if is_system_drive_root(&c) {
+        return Err(
+            "Unpack can't use the whole system drive as a folder. Pick a folder on your PC or a USB drive root like E:\\.".into(),
+        );
+    }
+    let disp = c.display().to_string();
+    if is_system_path(&disp) {
+        return Err(
+            "That folder is a Windows or Unix system location. Pick a normal folder instead.".into(),
+        );
+    }
+    Ok(c)
 }
 
 fn regex_hostile(s: String) -> bool {
@@ -570,10 +604,37 @@ mod tests {
     fn users_downloads_allowed_appdata_refused() {
         assert!(!is_system_path(r"C:\Users\Justin\Downloads\x"));
         assert!(is_system_path(r"C:\Users\Justin\AppData\Roaming"));
+        assert!(!is_system_path(r"C:\Users\Justin\Games\AppData"));
         assert!(!is_system_path(r"D:\Users\me\Downloads\game"));
         assert!(is_system_path(r"D:\Users\me\AppData\Local"));
         assert!(is_system_path(r"D:\Users\Default"));
         assert!(is_system_path("/etc/passwd"));
+    }
+
+    #[test]
+    fn system_folder_checks_use_path_segments() {
+        assert!(!is_system_path(r"E:\Windows Games\save"));
+        assert!(!is_system_path(r"D:\ProgramData2\cache"));
+        assert!(is_system_path(r"E:\Windows\System32"));
+    }
+
+    #[test]
+    fn session_grant_refuses_system_drive_root() {
+        if cfg!(unix) {
+            assert!(validate_session_grant(Path::new("/")).is_err());
+        }
+        if cfg!(windows) {
+            assert!(validate_session_grant(Path::new(r"C:\")).is_err());
+        }
+        let d = crate::testutil::TmpDir::new("session-grant");
+        let games = d.join("games");
+        fs::create_dir_all(&games).unwrap();
+        assert!(validate_session_grant(&games).is_ok());
+    }
+
+    #[test]
+    fn normalize_path_for_check_trims_leading_space() {
+        assert!(is_system_path("  C:\\Windows\\System32"));
     }
 
     #[test]

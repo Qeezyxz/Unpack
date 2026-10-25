@@ -420,10 +420,14 @@ fn extra(
                     continue;
                 }
                 if m.is_dir() {
-                    GRANTS.grant_session(&path);
+                    if let Ok(c) = unpack_lib::picked_folders::validate_session_grant(&path) {
+                        GRANTS.grant_session(&c);
+                    }
                 } else if m.is_file() {
                     if let Some(parent) = path.parent() {
-                        GRANTS.grant_session(parent);
+                        if let Ok(c) = unpack_lib::picked_folders::validate_session_grant(parent) {
+                            GRANTS.grant_session(&c);
+                        }
                     }
                 }
             }
