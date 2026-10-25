@@ -108,6 +108,10 @@ const settled = () => p.waitForFunction(() => document.querySelectorAll(".god-ro
 {
   const A = OUT + "/auto";
   fs.mkdirSync(A, { recursive: true });
+  await fetch(`http://127.0.0.1:${PORT}/invoke/__test_grant`, {
+    method: "POST",
+    body: JSON.stringify({ paths: [A] }),
+  });
   await p.evaluate((o) => { localStorage.setItem("unpack.autoIso", "god"); localStorage.setItem("unpack.destMode", "folder"); localStorage.setItem("unpack.destPath", o); }, A);
   await p.reload({ waitUntil: "load" });
   await wait(900);

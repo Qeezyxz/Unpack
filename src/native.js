@@ -147,18 +147,17 @@ export function beginNativeDrop(onDrop, onHover) {
       if (paths.length) onDrop(paths);
     });
     const wv = T.webview?.getCurrentWebview?.();
-    if (!wv?.onDragDropEvent) return;
-    await wv.onDragDropEvent((ev) => {
-      const t = ev.payload?.type;
-      if (t === "enter" || t === "over") onHover(true);
-      else if (t === "leave") onHover(false);
-      else if (t === "drop") onHover(false);
-    });
+    if (wv?.onDragDropEvent) {
+      await wv.onDragDropEvent((ev) => {
+        const t = ev.payload?.type;
+        if (t === "enter" || t === "over") onHover(true);
+        else if (t === "leave") onHover(false);
+        else if (t === "drop") onHover(false);
+      });
+    }
+    await invoke("drop_listener_ready");
   })();
 }
-
-/** @deprecated use beginNativeDrop */
-export const onNativeDrop = beginNativeDrop;
 
 /** job-progress events from Rust, routed by job id. */
 const progressHandlers = new Map();

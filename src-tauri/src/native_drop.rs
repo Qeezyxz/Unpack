@@ -3,13 +3,62 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
+
+use tauri::{AppHandle, Emitter};
 
 use crate::picked_folders::validate_session_grant;
-use crate::safecopy::Grants;
+use crate::safecopy::{simplify, Grants};
 
 pub struct NativeDropOutcome {
     pub accepted: Vec<String>,
     pub refused: Option<String>,
+}
+
+/// Dedupe key for one physical drop path (trailing separators; case on Windows).
+pub fn drop_dedupe_key(p: &Path) -> String {
+    let c = fs::canonicalize(p)
+        .map(simplify)
+        .unwrap_or_else(|_| simplify(p.to_path_buf()));
+    let s = c.display().to_string();
+    #[cfg(windows)]
+    {
+        s.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        s
+    }
+}
+
+/// Holds accepted drops until the page calls `drop_listener_ready`.
+#[derive(Default)]
+pub struct DropDelivery {
+    listener_ready: Mutex<bool>,
+    queued: Mutex<Vec<Vec<String>>>,
+}
+
+impl DropDelivery {
+    pub fn set_listener_ready(&self, app: &AppHandle) {
+        *self.listener_ready.lock().unwrap() = true;
+        let batches: Vec<Vec<String>> = self.queued.lock().unwrap().drain(..).collect();
+        for batch in batches {
+            if !batch.is_empty() {
+                let _ = app.emit("native-drop-accepted", batch);
+            }
+        }
+    }
+
+    pub fn emit_accepted(&self, app: &AppHandle, accepted: Vec<String>) {
+        if accepted.is_empty() {
+            return;
+        }
+        if *self.listener_ready.lock().unwrap() {
+            let _ = app.emit("native-drop-accepted", accepted);
+        } else {
+            self.queued.lock().unwrap().push(accepted);
+        }
+    }
 }
 
 /// Called only from the native drag-drop handler (or the test bridge simulator).
@@ -19,8 +68,7 @@ pub fn process_native_drop(paths: &[&Path], grants: &Grants) -> NativeDropOutcom
     let mut seen = HashSet::new();
     for p in paths {
         let p = *p;
-        let key = p.to_string_lossy().into_owned();
-        if !seen.insert(key.clone()) {
+        if !seen.insert(drop_dedupe_key(p)) {
             continue;
         }
         let meta = fs::symlink_metadata(p);

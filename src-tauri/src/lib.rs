@@ -126,15 +126,15 @@ struct FileInfo {
 }
 
 #[tauri::command]
-fn file_info(path: String) -> Result<FileInfo, String> {
-    let p = PathBuf::from(&path);
-    let m = std::fs::metadata(&p).map_err(|e| format!("{path}: {e}"))?;
+fn file_info(grants: State<'_, safecopy::Grants>, path: String) -> Result<FileInfo, String> {
+    let p = grants.check(&path)?;
+    let m = std::fs::metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?;
     Ok(FileInfo {
         name: p
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        path,
+        path: p.display().to_string(),
         size: m.len(),
         is_dir: m.is_dir(),
     })
@@ -146,10 +146,10 @@ async fn list_archive(
     path: String,
     password: Option<String>,
 ) -> Result<archive::Listing, String> {
-    grants.check(&path)?;
+    let path = grants.check(&path)?;
     let exe = seven_zip()?;
     tauri::async_runtime::spawn_blocking(move || {
-        archive::list(&exe, &PathBuf::from(path), opt_pw(&password))
+        archive::list(&exe, &path, opt_pw(&password))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -162,12 +162,12 @@ async fn read_entry(
     entry: String,
     password: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
-    grants.check(&path)?;
+    let path = grants.check(&path)?;
     let exe = seven_zip()?;
     let bytes = tauri::async_runtime::spawn_blocking(move || {
         archive::read_entry(
             &exe,
-            &PathBuf::from(path),
+            &path,
             &entry,
             opt_pw(&password),
             4 * 1024 * 1024,
@@ -195,12 +195,12 @@ async fn extract_archive(
     nested: Option<bool>,
     auto_iso: Option<String>,
 ) -> Result<archive::ExtractResult, String> {
+    let archive_path = grants.check(&path)?;
     // Dest must be a picked folder, or (Extract beside) the archive's own parent.
     let dest_path = match grants.check(&dest) {
         Ok(d) => d,
         Err(e) => {
-            let arch = PathBuf::from(&path);
-            let parent = arch.parent().ok_or_else(|| e.clone())?;
+            let parent = archive_path.parent().ok_or_else(|| e.clone())?;
             let (Ok(d), Ok(p)) = (std::fs::canonicalize(&dest), std::fs::canonicalize(parent))
             else {
                 return Err(e);
@@ -214,13 +214,12 @@ async fn extract_archive(
     };
     let exe = seven_zip()?;
     let fat_dest = dest_path.clone();
-    let (fat_exe, fat_arch, fat_pw) = (exe.clone(), PathBuf::from(&path), password.clone());
+    let (fat_exe, fat_arch, fat_pw) = (exe.clone(), archive_path.clone(), password.clone());
     let registry = jobs.inner().clone();
     registry.register(&id);
     let jobs = registry.clone();
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
-        let archive_path = PathBuf::from(&path);
         let here = layout == "here";
         let stage = fat_stage_for(
             &exe,
@@ -483,6 +482,7 @@ fn finish_fat_stage(
 
 #[tauri::command]
 async fn extract_entry(
+    grants: State<'_, safecopy::Grants>,
     jobs: State<'_, Jobs>,
     id: String,
     path: String,
@@ -490,6 +490,8 @@ async fn extract_entry(
     password: Option<String>,
     out_file: String,
 ) -> Result<(), String> {
+    let archive_path = grants.check(&path)?;
+    let out_path = grants.check_or_parent(&out_file)?;
     let exe = seven_zip()?;
     let registry = jobs.inner().clone();
     registry.register(&id);
@@ -498,10 +500,10 @@ async fn extract_entry(
     let res = tauri::async_runtime::spawn_blocking(move || {
         archive::extract_entry_to(
             &exe,
-            &PathBuf::from(path),
+            &archive_path,
             &entry,
             opt_pw(&password),
-            &PathBuf::from(out_file),
+            &out_path,
             &j,
             &jid,
         )
@@ -514,12 +516,16 @@ async fn extract_entry(
 
 /// Fallback when 7za is missing: hand the raw archive to the in-page WebAssembly engines.
 #[tauri::command]
-async fn read_file(path: String) -> Result<tauri::ipc::Response, String> {
+async fn read_file(
+    grants: State<'_, safecopy::Grants>,
+    path: String,
+) -> Result<tauri::ipc::Response, String> {
     // Only used for the in-page (wasm) fallback; refuse anything that isn't an archive so a
     // compromised page can't use it to read arbitrary files.
     if !archive::is_archive_name(&path) {
         return Err("Only archives can be opened this way.".into());
     }
+    let path = grants.check(&path)?;
     let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
     if size > 1500 * 1024 * 1024 {
         return Err("ARCHIVE_TOO_LARGE".into());
@@ -544,14 +550,18 @@ async fn create_archive(
     password: Option<String>,
     level: u32,
 ) -> Result<String, String> {
-    let out_file = grants.check_or_parent(&out_file)?.display().to_string();
+    let out_file = grants.check_or_parent(&out_file)?;
+    let srcs: Vec<PathBuf> = sources
+        .iter()
+        .map(|s| grants.check(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    let out_file = out_file.display().to_string();
     let exe = seven_zip()?;
     let registry = jobs.inner().clone();
     registry.register(&id);
     let j = registry.clone();
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
-        let srcs: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
         let mut cb = |percent: u32, file: &str| {
             let _ = app.emit(
                 "job-progress",
@@ -647,11 +657,15 @@ async fn dlc_install(
 }
 
 #[tauri::command]
-fn dlc_match_games(libraries: Vec<String>, title_id: String) -> Vec<String> {
+fn dlc_match_games(
+    grants: State<'_, safecopy::Grants>,
+    libraries: Vec<String>,
+    title_id: String,
+) -> Vec<String> {
     let libs: Vec<PathBuf> = libraries
         .iter()
         .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from)
+        .filter_map(|l| grants.check(l).ok())
         .collect();
     dlc::find_games(&libs, &title_id)
         .into_iter()
@@ -1268,8 +1282,12 @@ async fn pick_save(
 }
 
 #[tauri::command]
-async fn iso_info(path: String) -> Result<god::IsoInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || god::iso_info(&PathBuf::from(path)))
+async fn iso_info(
+    grants: State<'_, safecopy::Grants>,
+    path: String,
+) -> Result<god::IsoInfo, String> {
+    let path = grants.check(&path)?;
+    tauri::async_runtime::spawn_blocking(move || god::iso_info(&path))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -1331,6 +1349,7 @@ async fn iso_to_god(
     dest: String,
     title: Option<String>,
 ) -> Result<god::GodResult, String> {
+    let path = grants.check(&path)?;
     let dest = grants.check(&dest)?;
     let registry = jobs.inner().clone();
     registry.register(&id);
@@ -1348,7 +1367,7 @@ async fn iso_to_god(
             );
         };
         god::convert_to_dest(
-            &PathBuf::from(path),
+            &path,
             &dest,
             title.as_deref(),
             &j,
@@ -1372,6 +1391,7 @@ async fn iso_to_xex(
     dest: String,
     title: Option<String>,
 ) -> Result<iso_extract::ExtractResult, String> {
+    let path = grants.check(&path)?;
     let dest = grants.check(&dest)?;
     let registry = jobs.inner().clone();
     registry.register(&id);
@@ -1390,7 +1410,7 @@ async fn iso_to_xex(
         };
         // Manual: dest is parent; claim named folder inside.
         iso_extract::extract_named(
-            &PathBuf::from(path),
+            &path,
             &dest,
             title.as_deref(),
             &j,
@@ -1459,14 +1479,18 @@ fn error_help(message: String) -> hints::ErrorHelp {
 
 #[tauri::command]
 fn preflight_local(
+    grants: State<'_, safecopy::Grants>,
     dest: String,
     paths: Vec<String>,
     list_cap: Option<u64>,
     auto_iso: Option<String>,
 ) -> Result<preflight::PreflightReport, String> {
-    let dest = PathBuf::from(dest);
+    let dest = grants.check(&dest)?;
     let cap = list_cap.unwrap_or(64 << 20);
-    let pbs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    let pbs: Vec<PathBuf> = paths
+        .iter()
+        .map(|p| grants.check(p))
+        .collect::<Result<Vec<_>, _>>()?;
     let need = preflight::estimate_local_need(&pbs).min(cap);
     let fat_blocks = preflight::fat_blocks(
         &dest,
@@ -1518,10 +1542,23 @@ async fn usb_prepare(
 }
 
 #[tauri::command]
-async fn god_verify_only(path: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || god::verify_readonly_folder(&PathBuf::from(path)))
+async fn god_verify_only(
+    grants: State<'_, safecopy::Grants>,
+    path: String,
+) -> Result<String, String> {
+    let path = grants.check(&path)?;
+    tauri::async_runtime::spawn_blocking(move || god::verify_readonly_folder(&path))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn drop_listener_ready(
+    app: AppHandle,
+    delivery: State<'_, native_drop::DropDelivery>,
+) -> Result<(), String> {
+    delivery.set_listener_ready(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1960,24 +1997,25 @@ pub fn run() {
             app.manage(grants);
             app.manage(menus);
             app.manage(discord::PresenceHandle::start());
+            app.manage(native_drop::DropDelivery::default());
             Ok(())
         })
         .on_webview_event(|webview, event| {
             if let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 let grants = webview.state::<safecopy::Grants>();
+                let delivery = webview.state::<native_drop::DropDelivery>();
                 let app = webview.app_handle().clone();
                 let path_refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
                 let outcome = native_drop::process_native_drop(&path_refs, &grants);
                 if let Some(msg) = outcome.refused {
                     let _ = app.emit("path-grant-refused", msg);
                 }
-                if !outcome.accepted.is_empty() {
-                    let _ = app.emit("native-drop-accepted", outcome.accepted);
-                }
+                delivery.emit_accepted(&app, outcome.accepted);
             }
         })
         .invoke_handler(tauri::generate_handler![
             native_info,
+            drop_listener_ready,
             file_info,
             list_archive,
             read_entry,
@@ -2078,6 +2116,20 @@ mod launch_tests {
         assert!(g.check(arch.to_str().unwrap()).is_err());
         g.grant_session(t.path());
         assert!(g.check(arch.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn read_file_and_extract_entry_require_grants() {
+        let t = crate::testutil::TmpDir::new("ipc-gate-entry");
+        let arch = t.path().join("pack.7z");
+        std::fs::write(&arch, b"7z").unwrap();
+        let out = t.path().join("out.bin");
+        let g = safecopy::Grants::default();
+        assert!(g.check(arch.to_str().unwrap()).is_err());
+        assert!(g.check_or_parent(out.to_str().unwrap()).is_err());
+        g.grant_session(t.path());
+        assert!(g.check(arch.to_str().unwrap()).is_ok());
+        assert!(g.check_or_parent(out.to_str().unwrap()).is_ok());
     }
 
     /// Bully case: a 7 GB ISO + a small .txt bound for a FAT32 drive with Auto ISO → GOD.

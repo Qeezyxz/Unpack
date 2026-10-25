@@ -45,9 +45,12 @@ fn main() {
                 let pw = a["password"].as_str().map(|s| s.to_string());
                 let res: Result<Value, String> = match cmd {
                     "native_info" => Ok(json!({"available": true, "path": exe.display().to_string()})),
-                    "file_info" => std::fs::metadata(s("path")).map_err(|e| e.to_string()).map(|m| {
-                        json!({"path": s("path"), "name": PathBuf::from(s("path")).file_name().unwrap().to_string_lossy(), "size": m.len(), "is_dir": m.is_dir()})
-                    }),
+                    "file_info" => match GRANTS.check(a["path"].as_str().unwrap_or("")) {
+                        Err(e) => Err(e),
+                        Ok(p) => std::fs::metadata(&p).map_err(|e| e.to_string()).map(|m| {
+                            json!({"path": p.display().to_string(), "name": p.file_name().unwrap().to_string_lossy(), "size": m.len(), "is_dir": m.is_dir()})
+                        }),
+                    },
                     "list_archive" => match GRANTS.check(a["path"].as_str().unwrap_or("")) {
                         Err(e) => Err(e),
                         Ok(p) => archive::list(&exe, &p, pw.as_deref())
@@ -59,10 +62,14 @@ fn main() {
                             .map(|b| json!(b)),
                     },
                     "cancel_job" => Ok(json!(jobs.cancel(&s("id")))),
-                    "extract_archive" => {
+                    "extract_archive" => match (
+                        GRANTS.check(a["path"].as_str().unwrap_or("")),
+                        GRANTS.check(a["dest"].as_str().unwrap_or("")),
+                    ) {
+                        (Err(e), _) | (_, Err(e)) => Err(e),
+                        (Ok(ap), Ok(dp)) => {
                         let id = s("id");
                         jobs.register(&id);
-                        let (ap, dp) = (PathBuf::from(s("path")), PathBuf::from(s("dest")));
                         let opts = ExtractOptions {
                             archive: &ap, dest_parent: &dp, password: pw.as_deref(),
                             collision: Collision::parse(&s("collision")),
@@ -77,7 +84,8 @@ fn main() {
                         jobs.finish(&id);
                         if let Ok(res) = &r { if res.created && !res.skipped { GRANTS.grant_session(std::path::Path::new(&res.output)); } }
                         r.map(|r| serde_json::to_value(r).unwrap())
-                    }
+                        }
+                    },
                     other => extra(other, &a, &exe, &jobs, &events),
                 };
                 let (code, body) = match res {
@@ -146,6 +154,22 @@ static PICKED: std::sync::LazyLock<std::sync::Mutex<unpack_lib::picked_folders::
     });
 static LAST_SCAN: std::sync::LazyLock<unpack_lib::picked_folders::LastScannedRoots> =
     std::sync::LazyLock::new(unpack_lib::picked_folders::LastScannedRoots::default);
+static DROP_LISTENER_READY: Mutex<bool> = Mutex::new(false);
+static DROP_QUEUE: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+
+fn queue_or_emit_drop(events: &Arc<Mutex<Vec<Value>>>, accepted: Vec<String>) {
+    if accepted.is_empty() {
+        return;
+    }
+    if *DROP_LISTENER_READY.lock().unwrap() {
+        events
+            .lock()
+            .unwrap()
+            .push(json!({"event":"native-drop-accepted","payload": accepted}));
+    } else {
+        DROP_QUEUE.lock().unwrap().push(accepted);
+    }
+}
 // Same as the app's setup: built-in menus from UNPACK_TEST_MENUS (fixtures) or resources/menus.
 static BUILTIN: std::sync::LazyLock<unpack_lib::mods::BuiltinSet> =
     std::sync::LazyLock::new(|| {
@@ -196,12 +220,14 @@ fn extra(
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|v| PathBuf::from(v.as_str().unwrap()))
-                .collect();
+                .filter_map(|v| v.as_str())
+                .map(|s| GRANTS.check(s))
+                .collect::<Result<Vec<_>, _>>()?;
+            let out = GRANTS.check_or_parent(a["outFile"].as_str().unwrap_or(""))?;
             let r = archive::create(
                 exe,
                 &srcs,
-                &PathBuf::from(a["outFile"].as_str().unwrap()),
+                &out,
                 a["format"].as_str().unwrap(),
                 a["password"].as_str(),
                 a["level"].as_u64().unwrap_or(5) as u32,
@@ -214,8 +240,9 @@ fn extra(
             jobs.finish(&id);
             r.map(|v| json!(v))
         }
-        "iso_info" => unpack_lib::god::iso_info(&PathBuf::from(a["path"].as_str().unwrap()))
-            .map(|v| serde_json::to_value(v).unwrap()),
+        "iso_info" => GRANTS
+            .check(a["path"].as_str().unwrap_or(""))
+            .and_then(|p| unpack_lib::god::iso_info(&p).map(|v| serde_json::to_value(v).unwrap())),
         "iso_disc_status" => {
             let p = GRANTS.check(a["path"].as_str().unwrap_or(""))?;
             let list = |k: &str| {
@@ -425,13 +452,47 @@ fn extra(
             if let Some(msg) = outcome.refused {
                 events.lock().unwrap().push(json!({"event":"path-grant-refused","payload": msg}));
             }
-            if !outcome.accepted.is_empty() {
-                events
-                    .lock()
-                    .unwrap()
-                    .push(json!({"event":"native-drop-accepted","payload": outcome.accepted}));
-            }
+            queue_or_emit_drop(events, outcome.accepted);
             Ok(json!(true))
+        }
+        "drop_listener_ready" => {
+            *DROP_LISTENER_READY.lock().unwrap() = true;
+            for batch in DROP_QUEUE.lock().unwrap().drain(..) {
+                queue_or_emit_drop(events, batch);
+            }
+            Ok(json!(null))
+        }
+        "read_file" => match GRANTS.check(a["path"].as_str().unwrap_or("")) {
+            Err(e) => Err(e),
+            Ok(p) => {
+                if !unpack_lib::archive::is_archive_name(p.to_str().unwrap_or("")) {
+                    return Err("Only archives can be opened this way.".into());
+                }
+                let size = std::fs::metadata(&p).map_err(|e| e.to_string())?.len();
+                if size > 1500 * 1024 * 1024 {
+                    return Err("ARCHIVE_TOO_LARGE".into());
+                }
+                std::fs::read(&p).map(|b| json!(b)).map_err(|e| e.to_string())
+            }
+        },
+        "extract_entry" => {
+            let archive_path = GRANTS.check(a["path"].as_str().unwrap_or(""))?;
+            let out_path = GRANTS.check_or_parent(a["outFile"].as_str().unwrap_or(""))?;
+            let id = a["id"].as_str().unwrap_or("").to_string();
+            let entry = a["entry"].as_str().unwrap_or("").to_string();
+            let password = a["password"].as_str().map(|s| s.to_string());
+            jobs.register(&id);
+            let r = archive::extract_entry_to(
+                exe,
+                &archive_path,
+                &entry,
+                password.as_deref(),
+                &out_path,
+                jobs,
+                &id,
+            );
+            jobs.finish(&id);
+            r.map(|_| json!(null))
         }
         "dlc_install" => {
             let libs: Vec<PathBuf> = a["libraries"]
@@ -761,23 +822,24 @@ fn extra(
         ))
         .unwrap()),
         "preflight_local" => {
-            let dest = a["dest"].as_str().unwrap_or("");
+            let dest = GRANTS.check(a["dest"].as_str().unwrap_or(""))?;
             let paths: Vec<PathBuf> = a["paths"]
                 .as_array()
                 .map(|v| {
                     v.iter()
                         .filter_map(|x| x.as_str())
-                        .map(PathBuf::from)
-                        .collect()
+                        .map(|s| GRANTS.check(s))
+                        .collect::<Result<Vec<_>, _>>()
                 })
+                .transpose()?
                 .unwrap_or_default();
             let need = unpack_lib::preflight::estimate_local_need(&paths);
             Ok(
                 serde_json::to_value(unpack_lib::preflight::check_local_dest(
-                    &PathBuf::from(dest),
+                    &dest,
                     need,
                     &unpack_lib::preflight::fat_blocks(
-                        &PathBuf::from(dest),
+                        &dest,
                         &paths,
                         unpack_lib::archive::find_7za().as_deref(),
                         a["autoIso"].as_str().unwrap_or("off"),
@@ -792,7 +854,7 @@ fn extra(
                 .map(|v| {
                     v.iter()
                         .filter_map(|x| x.as_str())
-                        .map(PathBuf::from)
+                        .filter_map(|s| GRANTS.check(s).ok())
                         .collect()
                 })
                 .unwrap_or_default();
@@ -822,10 +884,9 @@ fn extra(
             unpack_lib::library::index_cached(&libs, &dir, max_age)
                 .map(|v| serde_json::to_value(v).unwrap())
         }
-        "god_verify_only" => unpack_lib::god::verify_readonly_folder(&PathBuf::from(
-            a["path"].as_str().unwrap_or(""),
-        ))
-        .map(|m| json!(m)),
+        "god_verify_only" => GRANTS
+            .check(a["path"].as_str().unwrap_or(""))
+            .and_then(|p| unpack_lib::god::verify_readonly_folder(&p).map(|m| json!(m))),
         "check_release" => Ok(serde_json::to_value(unpack_lib::download::ReleaseInfo {
             available: false,
             latest: a["current"].as_str().unwrap_or("0").into(),

@@ -671,8 +671,14 @@ function paintAllJobBars() {
     for (const d of h.dlcRows || []) if (d?.id) paintJob(d);
 }
 
+function dropPathDedupeKey(p) {
+  let s = String(p).replace(/[/\\]+$/, "") || String(p);
+  if (/^[a-zA-Z]:[\\/]/.test(s)) s = s.replace(/\//g, "\\").toLowerCase();
+  return s;
+}
+
 async function addPaths(paths, action = "open") {
-  paths = [...new Set(paths)];
+  paths = [...new Map(paths.map((p) => [dropPathDedupeKey(p), p])).values()];
   if (action === "convert-god") {
     const isos = [];
     for (const p of paths) {
@@ -4626,13 +4632,14 @@ async function initDesktop() {
     (paths) => addPaths(paths),
     (on) => document.querySelector(".drop")?.classList.toggle("dragging", on)
   );
+  const eventsReady = N.initNativeEvents({ onPathGrantRefused: toast });
   try {
     nativeOk = (await N.invoke("native_info")).available;
   } catch {
     nativeOk = false;
   }
+  await eventsReady;
   await dropReady;
-  await N.initNativeEvents({ onPathGrantRefused: toast });
   await refreshLibraryGrants();
   await N.invoke("discord_set_enabled", { enabled: N.settings.discordPresence }).catch(() => {});
   // One-time notice when the update had to set the older settings profile aside (R19 L5).

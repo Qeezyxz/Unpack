@@ -13,6 +13,12 @@ const OUT = path.join(TMP, "unpack-v160");
 const PORT = process.env.UNPACK_BRIDGE_PORT || 18790;
 const SZ = ["/usr/lib/7zip/7za", "/usr/bin/7za", "/usr/bin/7z"].find((x) => fs.existsSync(x));
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const grantPaths = async (...paths) => {
+  await fetch(`http://127.0.0.1:${PORT}/invoke/__test_grant`, {
+    method: "POST",
+    body: JSON.stringify({ paths }),
+  });
+};
 
 fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(OUT, { recursive: true });
@@ -129,6 +135,7 @@ async function runQueue(limit, count) {
     fs.linkSync(D + "/big.7z", Q + `/src/q${i}.7z`);
     names.push(Q + `/src/q${i}.7z`);
   }
+  await grantPaths(Q + "/out");
   await p.evaluate((o) => { localStorage.setItem("unpack.maxJobs", String(o.limit)); localStorage.setItem("unpack.destMode", "folder"); localStorage.setItem("unpack.destPath", o.out); }, { limit, out: Q + "/out" });
   await click("[data-action=clear-all]");
   await p.evaluate(() => { const cb = document.querySelector("[data-setting=autoWrite]"); if (cb && !cb.checked) cb.click(); });
@@ -154,6 +161,7 @@ async function runQueue(limit, count) {
 // ---- Nested archives + error banner ----
 async function extractOne(zip, out) {
   fs.mkdirSync(out, { recursive: true });
+  await grantPaths(out);
   await p.evaluate((o) => { localStorage.setItem("unpack.destMode", "folder"); localStorage.setItem("unpack.destPath", o); }, out);
   await click("[data-action=clear-all]");
   await drop([zip]);
@@ -253,6 +261,7 @@ async function pickGodDest(dir) {
   execFileSync(SZ, ["a", "-tzip", "-bso0", "-bsp0", F + "/twodiscs.zip", "Test Game (Disc 1).iso", "Test Game (Disc 2).iso"], { cwd: DISCS });
   const A = OUT + "/auto";
   fs.mkdirSync(A, { recursive: true });
+  await grantPaths(A);
   await p.evaluate((o) => { localStorage.setItem("unpack.autoIso", "god"); localStorage.setItem("unpack.destMode", "folder"); localStorage.setItem("unpack.destPath", o); }, A);
   await click("[data-action=clear-all]");
   await drop([F + "/twodiscs.zip"]);
