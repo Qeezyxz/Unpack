@@ -372,7 +372,7 @@ fn extra(
             r.map(|v| serde_json::to_value(v).unwrap())
         }
         "__test_grant" => {
-            // Persist grants (dialog picks). Dropped folders use __test_drop_grant (session-only).
+            // Mirror the app: folders go through picked-folders; files grant only that path (not the parent).
             for p in a["paths"]
                 .as_array()
                 .cloned()
@@ -386,8 +386,7 @@ fn extra(
                         .lock()
                         .unwrap()
                         .record_dialog_pick(&GRANTS, &path);
-                } else if let Some(parent) = path.parent() {
-                    let _ = PICKED.lock().unwrap().record_dialog_pick(&GRANTS, parent);
+                } else {
                     GRANTS.grant(&path);
                 }
             }

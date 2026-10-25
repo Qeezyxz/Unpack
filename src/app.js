@@ -2941,6 +2941,10 @@ async function createArchive() {
   const base = safeSegment((c.name || "archive").trim()).replace(/\.(zip|7z)$/i, "") || "archive";
   const dir = N.dirName(c.items[0].path);
   const sep = dir.includes("\\") ? "\\" : "/";
+  // Clear a prior "Created …" line before the async save picker (tests and users key off status).
+  c.status = "";
+  c.error = "";
+  render();
   let out = await N.pickSave(dir.endsWith(sep) ? dir + base + ext : dir + sep + base + ext, [{ name: c.format.toUpperCase() + " archive", extensions: [c.format] }]);
   if (!out) { toast("Save cancelled."); return; }
   if (!out.toLowerCase().endsWith(ext)) out += ext;
