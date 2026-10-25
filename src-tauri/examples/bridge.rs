@@ -772,7 +772,7 @@ fn extra(
                 .unwrap_or_default();
             let dir = std::env::temp_dir().join("unpack-bridge-lib-cache");
             let max_age = a["maxAgeSecs"].as_u64().unwrap_or(0);
-            unpack_lib::library::index_cached(&libs, &dir, false, max_age)
+            unpack_lib::library::index_cached(&libs, &dir, max_age)
                 .map(|v| serde_json::to_value(v).unwrap())
         }
         "god_verify_only" => unpack_lib::god::verify_readonly_folder(&PathBuf::from(

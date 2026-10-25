@@ -13,7 +13,7 @@ pub struct Game {
     pub title_id: String,
     pub name: String,
     pub path: String,
-    /// "god" (TitleID/00007000) or "extracted" (folder with default.xex).
+    /// `god`, `disc`, `xbla`, `xbox`, `app`, or `extracted` (folder with default.xex).
     pub kind: String,
     pub game_size: u64,
     pub dlc_count: usize,
@@ -25,7 +25,7 @@ pub struct Game {
 }
 
 /// On-disk library index format generation (bump when scan semantics change).
-pub const INDEX_CACHE_VERSION: u32 = 3;
+pub const INDEX_CACHE_VERSION: u32 = 4;
 
 /// Hard cap so a mis-pointed library root cannot walk forever.
 const SCAN_MAX_FOLDERS: usize = 50_000;
@@ -130,10 +130,44 @@ fn is_listable_dir(path: &Path) -> bool {
     m.is_dir() && !m.file_type().is_symlink() && !is_reparse_point(path)
 }
 
+fn content_kind_for_tid_dir(tid_dir: &Path) -> Option<&'static str> {
+    for (folder, kind) in [
+        ("00007000", "god"),
+        ("00004000", "disc"),
+        ("000D0000", "xbla"),
+        ("00005000", "xbox"),
+        ("00040000", "app"),
+    ] {
+        if is_listable_dir(&tid_dir.join(folder)) {
+            return Some(kind);
+        }
+    }
+    None
+}
+
 fn has_game_packages(tid_dir: &Path) -> bool {
-    ["00007000", "00004000"]
-        .iter()
-        .any(|c| is_listable_dir(&tid_dir.join(c)))
+    content_kind_for_tid_dir(tid_dir).is_some()
+}
+
+fn content_folder_for_kind(kind: &str) -> &'static str {
+    match kind {
+        "god" => "00007000",
+        "disc" => "00004000",
+        "xbla" => "000D0000",
+        "xbox" => "00005000",
+        "app" => "00040000",
+        _ => "00007000",
+    }
+}
+
+fn title_addon_counts(tid_dir: &Path) -> (usize, u64, usize) {
+    let (dlc_size, dlc_count) = count_files(&tid_dir.join("00000002"));
+    let (_, tu_count) = count_files(&tid_dir.join("000B0000"));
+    (dlc_count, dlc_size, tu_count)
+}
+
+fn package_size_for_kind(tid_dir: &Path, kind: &str) -> u64 {
+    god_content_size(&tid_dir.join(content_folder_for_kind(kind)))
 }
 
 fn dedupe_key(path: &Path) -> PathBuf {
@@ -191,7 +225,7 @@ impl ScanCtx {
         }
     }
 
-    fn push_god(
+    fn push_title_folder(
         &mut self,
         tid_dir: &Path,
         tid: &str,
@@ -202,14 +236,19 @@ impl ScanCtx {
             return;
         }
         let tid = tid.to_ascii_uppercase();
-        let (dlc_size, dlc_count) = count_files(&tid_dir.join("00000002"));
-        let (_, tu_count) = count_files(&tid_dir.join("000B0000"));
+        let kind = content_kind_for_tid_dir(tid_dir).unwrap_or("god");
+        let (dlc_count, dlc_size, tu_count) = title_addon_counts(tid_dir);
+        let game_size = if kind == "god" {
+            god_game_size(tid_dir)
+        } else {
+            package_size_for_kind(tid_dir, kind)
+        };
         self.out.push(Game {
-            name: game_name(tid_dir, &tid),
+            name: game_name(tid_dir, &tid, kind),
             title_id: tid,
             path: tid_dir.display().to_string(),
-            kind: "god".into(),
-            game_size: god_game_size(tid_dir),
+            kind: kind.into(),
+            game_size,
             dlc_count,
             dlc_size,
             tu_count,
@@ -282,7 +321,7 @@ impl ScanCtx {
                 continue;
             }
             if is_tid(&name) && has_game_packages(&p) {
-                self.push_god(&p, &name, on_progress);
+                self.push_title_folder(&p, &name, on_progress);
             } else if let Some((tid, gname)) = crate::iso_extract::folder_title_id(&p) {
                 self.push_extracted(&p, tid, gname.unwrap_or(name), on_progress);
             }
@@ -339,7 +378,7 @@ impl ScanCtx {
                     continue;
                 }
                 if is_tid(&n2) && has_game_packages(&p2) {
-                    self.push_god(&p2, &n2, on_progress);
+                    self.push_title_folder(&p2, &n2, on_progress);
                 } else if let Some((tid, gname)) = crate::iso_extract::folder_title_id(&p2) {
                     self.push_extracted(&p2, tid, gname.unwrap_or(n2), on_progress);
                 }
@@ -398,19 +437,30 @@ fn is_tid(name: &str) -> bool {
     name.len() == 8 && name.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Name from the first STFS header file in the game's content folder, else the built-in list.
-fn game_name(tid_dir: &Path, tid: &str) -> String {
-    for ct in ["00007000", "00004000"] {
-        if let Ok(rd) = fs::read_dir(tid_dir.join(ct)) {
-            for e in rd.flatten() {
-                if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                    if let Ok(i) = dlc::parse_stfs(&e.path()) {
-                        if !i.name.is_empty() {
-                            return i.name;
-                        }
-                    }
+fn name_from_stfs_dir(ct_dir: &Path) -> Option<String> {
+    let Ok(rd) = fs::read_dir(ct_dir) else {
+        return None;
+    };
+    for e in rd.flatten() {
+        if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            if let Ok(i) = dlc::parse_stfs(&e.path()) {
+                if !i.name.is_empty() {
+                    return Some(i.name);
                 }
             }
+        }
+    }
+    None
+}
+
+/// Name from the first STFS header file in the game's content folder, else the built-in list.
+fn game_name(tid_dir: &Path, tid: &str, kind: &str) -> String {
+    if let Some(n) = name_from_stfs_dir(&tid_dir.join(content_folder_for_kind(kind))) {
+        return n;
+    }
+    for ct in ["00007000", "00004000", "000D0000", "00005000"] {
+        if let Some(n) = name_from_stfs_dir(&tid_dir.join(ct)) {
+            return n;
         }
     }
     u32::from_str_radix(tid, 16)
@@ -450,7 +500,7 @@ pub fn scan_with(
         if let Some(name) = lib.file_name() {
             let n = name.to_string_lossy();
             if is_tid(&n) && has_game_packages(lib) {
-                ctx.push_god(lib, &n, on_progress);
+                ctx.push_title_folder(lib, &n, on_progress);
                 continue;
             }
         }
@@ -551,28 +601,19 @@ fn index_cache_valid(idx: &LibraryIndex, keys: &[String], now: u64, max_age_secs
     })
 }
 
-/// Scan libraries, optionally reuse a recent on-disk cache, and warm cover art cache.
+/// Scan libraries, optionally reuse a recent on-disk cache (cover art is fetched separately).
 pub fn index_cached(
     libraries: &[PathBuf],
     cache_dir: &Path,
-    allow_cover_network: bool,
     max_age_secs: u64,
 ) -> Result<LibraryIndex, String> {
     let mut progress = None;
-    index_cached_with_progress(
-        libraries,
-        cache_dir,
-        allow_cover_network,
-        max_age_secs,
-        &mut progress,
-        &|| false,
-    )
+    index_cached_with_progress(libraries, cache_dir, max_age_secs, &mut progress, &|| false)
 }
 
 pub fn index_cached_with_progress(
     libraries: &[PathBuf],
     cache_dir: &Path,
-    allow_cover_network: bool,
     max_age_secs: u64,
     on_progress: &mut Option<&mut dyn FnMut(ScanProgress)>,
     cancelled: &dyn Fn() -> bool,
@@ -602,15 +643,6 @@ pub fn index_cached_with_progress(
         return Err(crate::archive::ERR_CANCELLED.into());
     }
     let games = scan.games;
-    let covers = cache_dir.join("covers");
-    for g in &games {
-        if cancelled() {
-            return Err(crate::archive::ERR_CANCELLED.into());
-        }
-        if crate::covers::cache_local(Path::new(&g.path), &g.title_id, &covers).is_none() {
-            crate::covers::fetch_opt_in(&g.title_id, &covers, allow_cover_network);
-        }
-    }
     let idx = LibraryIndex {
         scanned_at: now,
         stale: false,
@@ -659,12 +691,10 @@ pub fn copy_to_usb(
         .file_name()
         .map(|s| s.to_string_lossy().to_ascii_uppercase())
         .unwrap_or_default();
-    if !is_tid(&tid)
-        || !["00007000", "00004000"]
-            .iter()
-            .any(|c| game_dir.join(c).is_dir())
-    {
-        return Err("That folder isn't a game (TitleID folder with 00007000, or extracted folder with default.xex).".into());
+    if !is_tid(&tid) || content_kind_for_tid_dir(game_dir).is_none() {
+        return Err(
+            "That folder isn't a game (TitleID folder with game content, or extracted folder with default.xex).".into(),
+        );
     }
     let dest = target_root
         .join("Content")
@@ -886,22 +916,22 @@ mod tests {
         let (a, b, cache) = (t.join("a"), t.join("b"), t.join("cache"));
         fs::create_dir_all(&a).unwrap();
         fs::create_dir_all(&b).unwrap();
-        let first = index_cached(std::slice::from_ref(&a), &cache, false, 3600).unwrap();
+        let first = index_cached(std::slice::from_ref(&a), &cache, 3600).unwrap();
         assert!(!first.cached);
         assert_eq!(first.cache_version, INDEX_CACHE_VERSION);
         assert!(
-            index_cached(std::slice::from_ref(&a), &cache, false, 3600)
+            index_cached(std::slice::from_ref(&a), &cache, 3600)
                 .unwrap()
                 .cached
         );
         // A different folder list must not reuse the cache.
         assert!(
-            !index_cached(std::slice::from_ref(&b), &cache, false, 3600)
+            !index_cached(std::slice::from_ref(&b), &cache, 3600)
                 .unwrap()
                 .cached
         );
         // max_age 0 always rescans.
-        assert!(!index_cached(&[b], &cache, false, 0).unwrap().cached);
+        assert!(!index_cached(&[b], &cache, 0).unwrap().cached);
     }
     #[test]
     fn scans_games_with_counts_and_names() {
@@ -1132,7 +1162,7 @@ mod justin_drive_tests {
         let cache = t.join("cache");
         fs::create_dir_all(&cache).unwrap();
         fs::write(cache.join("index.json"), b"{not json").unwrap();
-        let a = index_cached(std::slice::from_ref(&t.join("x")), &cache, false, 3600).unwrap();
+        let a = index_cached(std::slice::from_ref(&t.join("x")), &cache, 3600).unwrap();
         assert!(!a.cached);
         let legacy = LibraryIndex {
             scanned_at: 9_999_999_999,
@@ -1148,7 +1178,7 @@ mod justin_drive_tests {
             serde_json::to_vec(&legacy).unwrap(),
         )
         .unwrap();
-        let b = index_cached(std::slice::from_ref(&t.join("x")), &cache, false, 3600).unwrap();
+        let b = index_cached(std::slice::from_ref(&t.join("x")), &cache, 3600).unwrap();
         assert!(!b.cached, "legacy empty cache must not hide a rescan");
     }
 
@@ -1172,7 +1202,6 @@ mod justin_drive_tests {
         let err = index_cached_with_progress(
             std::slice::from_ref(&d),
             &d.join("cache"),
-            false,
             0,
             &mut None,
             &|| flag.load(std::sync::atomic::Ordering::Relaxed),
@@ -1216,8 +1245,8 @@ mod justin_drive_tests {
         assert_eq!(scan(std::slice::from_ref(&link)).len(), 2);
         // and the cache built from the link root is reused (its games resolve under the root)
         let cache = d.join("cache");
-        assert!(!index_cached(std::slice::from_ref(&link), &cache, false, 3600).unwrap().cached);
-        assert!(index_cached(std::slice::from_ref(&link), &cache, false, 3600).unwrap().cached);
+        assert!(!index_cached(std::slice::from_ref(&link), &cache, 3600).unwrap().cached);
+        assert!(index_cached(std::slice::from_ref(&link), &cache, 3600).unwrap().cached);
     }
 
     #[test]
@@ -1233,18 +1262,18 @@ mod justin_drive_tests {
         let d = justin_drive("r35-l4");
         let cache = d.join("cache");
         let root = d.join("Content");
-        let first = index_cached(std::slice::from_ref(&root), &cache, false, 3600).unwrap();
+        let first = index_cached(std::slice::from_ref(&root), &cache, 3600).unwrap();
         assert_eq!(first.games.len(), 1);
         let write = |idx: &LibraryIndex| fs::write(cache.join("index.json"), serde_json::to_vec(idx).unwrap()).unwrap();
         let mut bad = first.clone();
         bad.games[0].path = "/etc".into();
         write(&bad);
-        let r = index_cached(std::slice::from_ref(&root), &cache, false, 3600).unwrap();
+        let r = index_cached(std::slice::from_ref(&root), &cache, 3600).unwrap();
         assert!(!r.cached && r.games[0].path != "/etc");
         let mut future = first.clone();
         future.scanned_at = u64::MAX / 2;
         write(&future);
-        assert!(!index_cached(std::slice::from_ref(&root), &cache, false, 3600).unwrap().cached);
+        assert!(!index_cached(std::slice::from_ref(&root), &cache, 3600).unwrap().cached);
         // L3: the atomic write leaves no temp files behind
         let left: Vec<_> = fs::read_dir(&cache).unwrap().flatten().map(|e| e.file_name()).filter(|n| n.to_string_lossy().ends_with(".tmp")).collect();
         assert!(left.is_empty(), "{left:?}");
@@ -1266,6 +1295,93 @@ mod justin_drive_tests {
         let big = v.iter().find(|x| x.path.ends_with("Big")).unwrap();
         let sm = v.iter().find(|x| x.path.ends_with("Small")).unwrap();
         assert!(big.size_approx && !sm.size_approx);
+    }
+}
+
+#[cfg(test)]
+mod justin_listing_tests {
+    use super::*;
+    use crate::dlc::tests::make_stfs;
+    use std::collections::HashMap;
+
+    fn touch_files(dir: &Path, n: usize) {
+        fs::create_dir_all(dir).unwrap();
+        for i in 0..n {
+            fs::write(dir.join(format!("f{i}")), b"x").unwrap();
+        }
+    }
+
+    fn build_from_listing(root: &Path, listing: &str) {
+        fs::create_dir_all(root.join("Content")).unwrap();
+        for line in listing.lines() {
+            let line = line.trim();
+            if !line.contains('\\') || !line.contains(':') {
+                continue;
+            }
+            let (profile_tid, rest) = line.split_once('\\').unwrap();
+            let (tid, _rest) = rest.split_once(':').unwrap();
+            let tid_dir = root
+                .join("Content")
+                .join(profile_tid)
+                .join(tid);
+            let after = line.split(':').nth(1).unwrap_or("");
+            for (folder, cap) in content_folders_in_line(after) {
+                let dir = tid_dir.join(&folder);
+                touch_files(&dir, cap);
+                if folder == "000D0000" {
+                    make_stfs(
+                        &dir.join("PKG00001"),
+                        b"CON ",
+                        0xD000,
+                        u32::from_str_radix(tid, 16).unwrap_or(0),
+                        &format!("XBLA {tid}"),
+                        b"",
+                    );
+                }
+            }
+        }
+    }
+
+    fn content_folders_in_line(rest: &str) -> Vec<(String, usize)> {
+        let mut out = vec![];
+        for part in rest.split_whitespace() {
+            let Some((folder, tail)) = part.split_once('(') else {
+                continue;
+            };
+            if folder.len() != 8 || !folder.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            let n = tail.trim_end_matches(')').parse().unwrap_or(0);
+            out.push((folder.to_string(), n));
+        }
+        out
+    }
+
+    #[test]
+    fn justin_drive_listing_counts_and_tu_dlc() {
+        let listing = include_str!("../testdata/justin-d-content.txt");
+        let d = crate::testutil::TmpDir::new("lib-justin-listing");
+        build_from_listing(&d, listing);
+        let v = scan(std::slice::from_ref(&d.join("Content")));
+        let mut kinds: HashMap<String, usize> = HashMap::new();
+        for g in &v {
+            *kinds.entry(g.kind.clone()).or_default() += 1;
+        }
+        assert_eq!(kinds.get("god").copied(), Some(72), "{kinds:?}");
+        assert_eq!(kinds.get("xbla").copied(), Some(25), "{kinds:?}");
+        assert_eq!(kinds.get("xbox").copied(), Some(6), "{kinds:?}");
+        assert_eq!(kinds.get("app").copied(), Some(1), "{kinds:?}");
+        assert_eq!(v.len(), 104, "{v:?}");
+        assert!(
+            !v.iter().any(|g| g.title_id == "555308AE" || g.title_id == "584E07D2"),
+            "TU-only and DLC-only titles must not appear"
+        );
+        let b7 = v.iter().find(|g| g.title_id == "584108B7").expect("584108B7");
+        assert_eq!((b7.dlc_count, b7.tu_count), (4, 0));
+        let e0 = v.iter().find(|g| g.title_id == "584111E0").expect("584111E0");
+        assert_eq!((e0.dlc_count, e0.tu_count), (18, 1));
+        let a7 = v.iter().find(|g| g.title_id == "545408A7").expect("545408A7");
+        assert_eq!(a7.tu_count, 0, "empty 000B0000 is not a TU");
     }
 }
 

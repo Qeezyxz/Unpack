@@ -1112,7 +1112,10 @@ function filterLibraryGames(games) {
   const q = (libraryView?.q ?? N.settings.libQuery).trim().toLowerCase();
   const kind = libraryView?.filterKind ?? N.settings.libFilterKind;
   let list = games.filter((g) => {
-    if (kind === "god" && g.kind !== "god") return false;
+    if (kind === "god" && g.kind !== "god" && g.kind !== "disc") return false;
+    if (kind === "xbla" && g.kind !== "xbla") return false;
+    if (kind === "xbox" && g.kind !== "xbox") return false;
+    if (kind === "app" && g.kind !== "app") return false;
     if (kind === "xex" && g.kind !== "extracted") return false;
     if (kind === "dlc" && !g.dlc_count) return false;
     if (kind === "tu" && !g.tu_count) return false;
@@ -1132,6 +1135,45 @@ function filterLibraryGames(games) {
 }
 const LIB_SCAN_TIMEOUT_MS = 10 * 60 * 1000;
 const LIB_TIMED_OUT = "Library scan timed out. Try a narrower folder (e.g. Content\\0000000000000000).";
+const LIB_KIND_LABEL = { god: "GOD", disc: "Disc", xbla: "XBLA", xbox: "Xbox", app: "App", extracted: "XEX" };
+function libraryKindLabel(k) { return LIB_KIND_LABEL[k] || k; }
+let libCoverRun = 0;
+function coverFileSrc(path) {
+  const conv = window.__TAURI__?.core?.convertFileSrc;
+  return conv ? conv(path) : "";
+}
+async function loadLibraryCovers() {
+  const run = ++libCoverRun;
+  const view = libraryView;
+  if (!view || !N.IS_DESKTOP) return;
+  const games = view.allGames || [];
+  const hydrate = async (g) => {
+    if (run !== libCoverRun || view !== libraryView || view.covers[g.path]) return;
+    const local = await localCoverSrc(g.path);
+    if (local) { view.covers[g.path] = local; return; }
+    try {
+      const cached = await N.invoke("library_cover_cached", { titleId: g.title_id });
+      if (cached) view.covers[g.path] = coverFileSrc(cached);
+    } catch {}
+  };
+  for (let i = 0; i < games.length; i += 8) {
+    if (run !== libCoverRun || view !== libraryView) return;
+    await Promise.all(games.slice(i, i + 8).map(hydrate));
+    if (view === libraryView) render();
+  }
+  if (!N.settings.coverArtNetwork) return;
+  for (let i = 0; i < games.length; i += 4) {
+    if (run !== libCoverRun || view !== libraryView || !N.settings.coverArtNetwork) return;
+    await Promise.all(games.slice(i, i + 4).map(async (g) => {
+      if (view.covers[g.path]) return;
+      try {
+        const path = await N.invoke("library_cover", { titleId: g.title_id, gamePath: g.path, allowCoverNetwork: true });
+        if (path) view.covers[g.path] = coverFileSrc(path);
+      } catch {}
+    }));
+    if (view === libraryView) render();
+  }
+}
 // Every running library_index job I started (the visible scan and a background refresh).
 const libScanIds = new Set();
 // One way to stop library scans: close, Escape, Refresh/Ctrl+L starting a new one, the timeout.
@@ -1143,6 +1185,7 @@ function cancelLibraryScan(id) {
 }
 function closeLibrary() {
   cancelLibraryScan();
+  libCoverRun += 1;
   libraryView = null;
   render();
 }
@@ -1195,13 +1238,10 @@ async function openLibrary(forceFresh = false) {
     if (idx.cached && !forceFresh) {
       const view = libraryView;
       libraryIndex(libs, 0, uid())
-        .then((fresh) => { if (libraryView === view && fresh?.games) { view.allGames = fresh.games; view.games = filterLibraryGames(view.allGames); view.scannedAt = fresh.scanned_at || 0; render(); } })
+        .then((fresh) => { if (libraryView === view && fresh?.games) { view.allGames = fresh.games; view.games = filterLibraryGames(view.allGames); view.scannedAt = fresh.scanned_at || 0; render(); loadLibraryCovers(); } })
         .catch(() => {});
     }
-    for (const g of libraryView.allGames.slice(0, 80)) {
-      const src = await localCoverSrc(g.path);
-      if (src) libraryView.covers[g.path] = src;
-    }
+    loadLibraryCovers();
   } catch (e) {
     const cancelled = N.errCode(e) === "CANCELLED";
     if (libraryView?.scanId === scanId) toast(timedOut ? LIB_TIMED_OUT : cancelled ? "Library scan cancelled." : String(e));
@@ -1234,7 +1274,7 @@ function renderLibrary() {
   const libBar = `<div class="lib-bar">
         <input type="search" data-lib-q value="${escapeHtml(L.q)}" placeholder="Search name or TitleID" aria-label="Search library"/>
         <select data-lib-sort aria-label="Sort by"><option value="name" ${L.sort === "name" ? "selected" : ""}>Name</option><option value="title" ${L.sort === "title" ? "selected" : ""}>TitleID</option><option value="size" ${L.sort === "size" ? "selected" : ""}>Size</option><option value="dlc" ${L.sort === "dlc" ? "selected" : ""}>DLC count</option><option value="tu" ${L.sort === "tu" ? "selected" : ""}>TU count</option></select>
-        <select data-lib-filter aria-label="Filter"><option value="all" ${L.filterKind === "all" ? "selected" : ""}>All</option><option value="god" ${L.filterKind === "god" ? "selected" : ""}>GOD</option><option value="xex" ${L.filterKind === "xex" ? "selected" : ""}>Extracted (XEX)</option><option value="dlc" ${L.filterKind === "dlc" ? "selected" : ""}>Has DLC</option><option value="tu" ${L.filterKind === "tu" ? "selected" : ""}>Has TU</option></select>
+        <select data-lib-filter aria-label="Filter"><option value="all" ${L.filterKind === "all" ? "selected" : ""}>All</option><option value="god" ${L.filterKind === "god" ? "selected" : ""}>GOD / Disc</option><option value="xbla" ${L.filterKind === "xbla" ? "selected" : ""}>XBLA</option><option value="xbox" ${L.filterKind === "xbox" ? "selected" : ""}>Xbox originals</option><option value="app" ${L.filterKind === "app" ? "selected" : ""}>Apps</option><option value="xex" ${L.filterKind === "xex" ? "selected" : ""}>Extracted (XEX)</option><option value="dlc" ${L.filterKind === "dlc" ? "selected" : ""}>Has DLC</option><option value="tu" ${L.filterKind === "tu" ? "selected" : ""}>Has TU</option></select>
         ${L.stale ? `<span class="pill warn-text" title="Showing a fresh scan — cached index was older than an hour">Stale index</span>` : ""}
       </div>`;
   const body = L.loading ? `<div class="preview-empty"><span class="spin">◌</span> ${escapeHtml(L.scanMessage || "Looking in your library folders…")}${L.scanId ? ` <button class="btn btn-quiet btn-sm" data-lib-cancel type="button">Cancel</button>` : ""}</div>`
@@ -1242,7 +1282,7 @@ function renderLibrary() {
     : `<div class="lib-grid">${L.games.map((g, i) => { const c = L.copying[g.path]; return `<div class="lib-card">
         ${gameTile(g, L.covers?.[g.path])}
         <div class="lib-info"><strong title="${escapeHtml(g.path)}">${escapeHtml(g.name)}</strong>
-          <span>${escapeHtml(g.title_id)} · ${g.size_approx ? "about " : ""}${formatBytes(g.game_size)} · ${g.kind === "extracted" ? "XEX" : "GOD"}</span>
+          <span>${escapeHtml(g.title_id)} · ${g.size_approx ? "about " : ""}${formatBytes(g.game_size)} · <span class="pill">${escapeHtml(libraryKindLabel(g.kind))}</span></span>
           <span><span class="pill">${g.dlc_count} DLC</span> ${g.dlc_count ? formatBytes(g.dlc_size) : ""} ${g.tu_count ? `<span class="pill">${g.tu_count} TU</span>` : ""}</span>
           ${c ? `<div class="qbar"><div data-job-bar="${escapeHtml(c.id)}" style="width:${c.progress || 0}%"></div></div><span class="${c.error ? "danger" : ""}" data-job-status="${escapeHtml(c.id)}">${escapeHtml(c.error || c.status)}</span>` : ""}
           <div class="actions"><button class="btn btn-quiet btn-sm" data-lib-show="${i}" type="button" title="Show this game's folder in Explorer">Show</button><button class="btn btn-secondary btn-sm" data-lib-usb="${i}" type="button" title="Copy the game with its DLC and title updates to a USB drive's Content folder" ${c && !c.done && !c.error ? "disabled" : ""}>${icon("out")} Copy to USB…</button>${N.IS_DESKTOP ? `<button class="btn btn-secondary btn-sm" data-lib-xbox="${i}" type="button" title="Send this game to your Xbox over WiFi / LAN (FTP)">${SV(16, 16, ICONS.xbox)} Send to Xbox</button>` : ""}</div>
@@ -1671,7 +1711,7 @@ function startXboxLockPoll() {
   xboxLockTimer = setInterval(() => refreshXboxLock(), 2500);
 }
 // From Library / Mod Menus: close that window and queue the item in Send to Xbox.
-function sendGameToXbox(g) { cancelLibraryScan(); libraryView = null; openXbox(); xboxQueue({ src: g.path, name: g.name, kind: g.kind === "god" ? "god" : "xex", tid: g.title_id }); }
+function sendGameToXbox(g) { cancelLibraryScan(); libraryView = null; openXbox(); xboxQueue({ src: g.path, name: g.name, kind: g.kind === "extracted" ? "xex" : "god", tid: g.title_id }); }
 function sendModToXbox(it) {
   const f = it.info, g = modGame(it);
   const kind = f?.kind === "stfs" && f.content_type === "00000002" ? "dlc" : f?.kind === "stfs" && f.content_type === "000B0000" ? "tu" : f?.kind === "xex" || it.mode === "plugins" ? "plugins" : "custom";
@@ -3323,7 +3363,7 @@ function renderSettings() {
         <div class="actions set-mt"><button class="btn btn-secondary btn-sm" data-lib-add type="button">Add folder…</button><button class="btn btn-secondary btn-sm" data-lib-scan type="button">Scan drives for Content folders</button></div></div>
       <div class="set-row"><div class="txt"><strong>Multi-disc ISO companions</strong><small>When another disc of the same game sits next to an ISO, choose whether to offer it, always add it to the convert queue, or never prompt. Disc 2 alone is never added without disc 1.</small></div>
         <select data-set-companion aria-label="Companion disc mode"><option value="ask" ${N.settings.companionDiscMode === "ask" ? "selected" : ""}>Ask</option><option value="always" ${N.settings.companionDiscMode === "always" ? "selected" : ""}>Always add</option><option value="never" ${N.settings.companionDiscMode === "never" ? "selected" : ""}>Never</option></select></div>
-      <div class="set-row"><div class="txt"><strong>Library cover art from the internet</strong><small>Off by default. When on, Unpack may download cover images by TitleID while building the library index.</small></div>
+      <div class="set-row"><div class="txt"><strong>Library cover art from the internet</strong><small>Off by default. When on, Unpack downloads cover images in the background after the game list loads (a few at a time, from XboxUnity).</small></div>
         <label class="switch"><input type="checkbox" data-set-covernet aria-label="Download cover art" ${N.settings.coverArtNetwork ? "checked" : ""}/><span></span></label></div>
       <div class="set-row"><div class="txt"><strong>USB wizard</strong><small>Create the standard <code>Content</code> folder layout on a USB drive.</small></div>
         <button class="btn btn-secondary btn-sm" data-usb-wizard type="button">Prepare USB…</button></div>
@@ -3374,7 +3414,7 @@ function bindSettings() {
   root.querySelector("[data-set-autotu]")?.addEventListener("change", (e) => { N.settings.autoTu = e.target.checked; });
   root.querySelector("[data-set-movedlc]")?.addEventListener("change", (e) => { N.settings.moveDlc = e.target.checked; });
   root.querySelector("[data-set-companion]")?.addEventListener("change", (e) => { N.settings.companionDiscMode = e.target.value; });
-  root.querySelector("[data-set-covernet]")?.addEventListener("change", (e) => { N.settings.coverArtNetwork = e.target.checked; });
+  root.querySelector("[data-set-covernet]")?.addEventListener("change", (e) => { N.settings.coverArtNetwork = e.target.checked; if (!e.target.checked) libCoverRun += 1; else if (libraryView) loadLibraryCovers(); });
   root.querySelector("[data-usb-wizard]")?.addEventListener("click", async () => {
     const rootPath = await N.pickFolder("Pick the USB drive root (top folder)");
     if (!rootPath) return;

@@ -1521,10 +1521,10 @@ async fn library_index(
         };
         let mut progress: Option<&mut dyn FnMut(library::ScanProgress)> = Some(&mut emit);
         let cancelled = || !jid.is_empty() && registry.is_cancelled(&jid);
+        let _ = allow_cover_network;
         library::index_cached_with_progress(
             &libs,
             &dir,
-            allow_cover_network,
             max_age_secs.unwrap_or(3600),
             &mut progress,
             &cancelled,
@@ -1536,6 +1536,48 @@ async fn library_index(
         jobs.finish(&scan_id);
     }
     res?
+}
+
+#[tauri::command]
+async fn library_cover(
+    app: AppHandle,
+    title_id: String,
+    game_path: String,
+    allow_cover_network: bool,
+) -> Result<Option<String>, String> {
+    let cache = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("library-cache")
+        .join("covers");
+    let game_path = PathBuf::from(game_path);
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(crate::covers::resolve_cover(
+            &game_path,
+            &title_id,
+            &cache,
+            allow_cover_network,
+        )
+        .map(|c| c.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_cover_cached(app: AppHandle, title_id: String) -> Result<Option<String>, String> {
+    let cache = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("library-cache")
+        .join("covers");
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(crate::covers::cached_file(&cache, &title_id).map(|p| p.display().to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1909,6 +1951,8 @@ pub fn run() {
             dlc_scan_drives,
             library_scan,
             library_index,
+            library_cover,
+            library_cover_cached,
             copy_to_usb,
             mod_identify,
             mod_name_key,
