@@ -667,7 +667,8 @@ function paintAllJobBars() {
   }
   if (composer) paintJob(composer);
   if (godPanel?.items) for (const i of godPanel.items) if (i?.id) paintJob(i);
-  if (dlcView?.items) for (const d of dlcView.items) if (d?.id) paintJob(d);
+  for (const h of [...jobs, dlcManual].filter(Boolean))
+    for (const d of h.dlcRows || []) if (d?.id) paintJob(d);
 }
 
 async function addPaths(paths, action = "open") {
@@ -4594,6 +4595,11 @@ async function initDesktop() {
     nativeOk = false;
   }
   await N.initNativeEvents();
+  // Register native drop before other startup IPC so test bridge can call __TEST.drop promptly.
+  await N.onNativeDrop(
+    (paths) => addPaths(paths),
+    (on) => document.querySelector(".drop")?.classList.toggle("dragging", on)
+  );
   await refreshLibraryGrants();
   await N.invoke("discord_set_enabled", { enabled: N.settings.discordPresence }).catch(() => {});
   // One-time notice when the update had to set the older settings profile aside (R19 L5).
@@ -4614,10 +4620,6 @@ async function initDesktop() {
     return draining;
   };
   await window.__TAURI__.event.listen("launch-request", () => drainLaunch());
-  await N.onNativeDrop(
-    (paths) => addPaths(paths),
-    (on) => document.querySelector(".drop")?.classList.toggle("dragging", on)
-  );
   render();
   drainLaunch();
   if (N.settings.releaseCheck) {
