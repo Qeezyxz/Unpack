@@ -740,6 +740,54 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
 }
 
+fn sync_file(p: &Path) -> std::io::Result<()> {
+    fs::OpenOptions::new().write(true).read(true).open(p)?.sync_all()
+}
+
+/// Fsync a file or directory tree so a following rename onto the live name is durable.
+fn sync_tree(p: &Path) -> std::io::Result<()> {
+    let md = fs::symlink_metadata(p)?;
+    if md.is_dir() {
+        for e in fs::read_dir(p)? {
+            sync_tree(&e?.path())?;
+        }
+        #[cfg(unix)]
+        {
+            fs::File::open(p)?.sync_all()?;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers,
+            };
+            let f = fs::OpenOptions::new()
+                .access_mode(0x80)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(p)?;
+            // SAFETY: valid directory handle from OpenOptions.
+            unsafe {
+                FlushFileBuffers(f.as_raw_handle() as _);
+            }
+        }
+        Ok(())
+    } else {
+        sync_file(p)
+    }
+}
+
+fn move_part_path(parent: &Path, leaf: &std::ffi::OsStr) -> std::io::Result<PathBuf> {
+    for n in 0..10_000u32 {
+        let p = parent.join(format!(".unpack-part.{n}.{}", leaf.to_string_lossy()));
+        if fs::symlink_metadata(&p).is_err() {
+            return Ok(p);
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free partial-move name"))
+}
+
 /// Is `p` a symlink, or (on Windows) a junction/reparse point? Never follows it.
 pub(crate) fn is_link(p: &Path) -> bool {
     fs::symlink_metadata(p)
@@ -1824,11 +1872,19 @@ fn handle_id(f: &fs::File) -> Option<(u64, u64)> {
 #[cfg(windows)]
 fn path_id(p: &Path) -> Option<(u64, u64)> {
     use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let md = fs::symlink_metadata(p).ok()?;
+    let flags = if md.is_dir() {
+        FILE_FLAG_BACKUP_SEMANTICS
+    } else {
+        FILE_FLAG_OPEN_REPARSE_POINT
+    };
     let f = fs::OpenOptions::new()
         .access_mode(0x80) // FILE_READ_ATTRIBUTES
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .custom_flags(flags)
         .open(p)
         .ok()?;
     handle_id(&f)
@@ -1893,8 +1949,19 @@ fn move_new(src: &Path, dst: &Path) -> std::io::Result<()> {
     if fs::symlink_metadata(dst).is_ok() {
         return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} already exists", dst.display())));
     }
-    if let Err(e) = copy_recursive(src, dst) {
-        let _ = remove_any(dst);
+    let parent = dst.parent().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    let leaf = dst.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination has no name"))?;
+    let part = move_part_path(parent, leaf)?;
+    if let Err(e) = copy_recursive(src, &part) {
+        let _ = remove_any(&part);
+        return Err(e);
+    }
+    if let Err(e) = sync_tree(&part) {
+        let _ = remove_any(&part);
+        return Err(e);
+    }
+    if let Err(e) = rename_noreplace(&part, dst) {
+        let _ = remove_any(&part);
         return Err(e);
     }
     if src.is_dir() {
@@ -1994,6 +2061,9 @@ struct ReplaceManifest {
     old: Vec<(String, String, bool, String)>,
     /// (live name, set-aside name used if this has to be undone, is .data, fingerprint)
     new: Vec<(String, String, bool, String)>,
+    /// Live names whose cross-volume copy finished (fsync + rename onto the live name).
+    #[serde(default)]
+    moved_live: Vec<String>,
 }
 
 fn write_manifest(path: &Path, m: &ReplaceManifest) -> std::io::Result<()> {
@@ -2010,13 +2080,22 @@ fn is_data_name(n: &str) -> bool {
 /// every aside name, live names of one MediaID (`<id8>` / `<id8>.data`, flagged correctly), at
 /// most one old half of each kind, both new halves, and a known phase. Returns the MediaID.
 fn validate_manifest(m: &ReplaceManifest, tag: &str) -> Result<String, String> {
+    validate_manifest_inner(m, tag, true)
+}
+
+/// Notes from 1.7.3 list old halves as (live, aside, is_data) without a fingerprint.
+fn validate_manifest_legacy(m: &ReplaceManifest, tag: &str) -> Result<String, String> {
+    validate_manifest_inner(m, tag, false)
+}
+
+fn validate_manifest_inner(m: &ReplaceManifest, tag: &str, require_old_fp: bool) -> Result<String, String> {
     if !["replacing", "undoing", "finishing"].contains(&m.phase.as_str()) {
         return Err(format!("its phase \"{}\" is unknown", m.phase));
     }
     let ok_live = |n: &str, data: bool| if data { is_data_name(n) } else { n.len() == 8 && crate::contentdir::is_id8(n) };
     let mut ids = std::collections::BTreeSet::new();
     for (live, aside, data, fp) in &m.old {
-        if !ok_live(live, *data) || *aside != format!("{ASIDE}{tag}.{live}") || fp.is_empty() {
+        if !ok_live(live, *data) || *aside != format!("{ASIDE}{tag}.{live}") || (require_old_fp && fp.is_empty()) {
             return Err(format!("its entry for {live} doesn't match what I write"));
         }
         ids.insert(live[..8].to_ascii_lowercase());
@@ -2036,6 +2115,12 @@ fn validate_manifest(m: &ReplaceManifest, tag: &str) -> Result<String, String> {
         return Err("it doesn't describe exactly one package".into());
     }
     Ok(ids.into_iter().next().unwrap())
+}
+
+fn trust_manifest(m: &ReplaceManifest, tag: &str) -> Result<(String, bool), String> {
+    validate_manifest(m, tag)
+        .map(|id| (id, false))
+        .or_else(|_| validate_manifest_legacy(m, tag).map(|id| (id, true)))
 }
 
 /// A fresh tag n free for the manifest and every aside name of this Replace.
@@ -2085,6 +2170,7 @@ fn replace_unit(ct_dst: &Path, folder: &FolderLock, old: [Option<PathBuf>; 2], n
             .zip(&fps)
             .map(|((_, d), fp)| (name_of(d), format!("{ASIDE_NEW}{tag}.{}", name_of(d)), is_data_name(&name_of(d)), fp.clone()))
             .collect(),
+        moved_live: vec![],
     };
     let mut st = Steps { n: 0, recover: false };
     let ioe = |e: std::io::Error| e.to_string();
@@ -2139,6 +2225,8 @@ fn replace_unit(ct_dst: &Path, folder: &FolderLock, old: [Option<PathBuf>; 2], n
         if let Err(e) = move_new(src, dst) {
             return Err(undo(&aside, &moved, format!("couldn't move {} in ({e})", dst.display())));
         }
+        m.moved_live.push(name_of(dst));
+        write_manifest(&mpath, &m).map_err(|e| format!("couldn't update {} ({e})", mpath.display()))?;
         moved.push((dst, fp));
     }
     st.next().map_err(ioe)?;
@@ -2183,7 +2271,7 @@ fn recover_asides(ct_dst: &Path, folder: &FolderLock, warnings: &mut Vec<String>
         let p = ct_dst.join(tname);
         let tag = &tname[MANIFEST.len()..tname.len() - 4];
         let ours = fs::symlink_metadata(&p).is_ok_and(|m| m.is_file() && m.len() <= MAX_NOTE)
-            && fs::read(&p).ok().and_then(|b| serde_json::from_slice::<ReplaceManifest>(&b).ok()).is_some_and(|m| validate_manifest(&m, tag).is_ok());
+            && fs::read(&p).ok().and_then(|b| serde_json::from_slice::<ReplaceManifest>(&b).ok()).is_some_and(|m| trust_manifest(&m, tag).is_ok());
         if !(ours && fs::remove_file(&p).is_ok()) {
             warnings.push(format!("{} looks left over from an interrupted Replace; it was not touched, delete it if you don't need it.", p.display()));
         }
@@ -2197,15 +2285,16 @@ fn recover_asides(ct_dst: &Path, folder: &FolderLock, warnings: &mut Vec<String>
             warnings.push(format!("{} (a note from an interrupted Replace) couldn't be read; nothing was changed, check that folder.", mpath.display()));
             continue;
         };
-        let id = match validate_manifest(&m, tag) {
-            Ok(id) => id,
+        let (id, legacy) = match trust_manifest(&m, tag) {
+            Ok(pair) => pair,
             Err(why) => {
                 warnings.push(format!("{} (a note from an interrupted Replace) isn't one I can trust ({why}); nothing was changed, check that folder.", mpath.display()));
                 continue;
             }
         };
         known.extend(m.old.iter().map(|(_, a, _, _)| a.clone()));
-        if let Err(e) = recover_one(ct_dst, folder, &mpath, &mut m, &id, &mut st, warnings) {
+        let note = RecoverNote { ct_dst, folder, mpath: &mpath, id: &id, legacy };
+        if let Err(e) = recover_one(&note, &mut m, &mut st, warnings) {
             warnings.push(format!(
                 "Repairing an interrupted Replace in {} stopped ({e}); I'll try again next time, nothing was lost.",
                 ct_dst.display()
@@ -2227,15 +2316,40 @@ fn recover_asides(ct_dst: &Path, folder: &FolderLock, warnings: &mut Vec<String>
     }
 }
 
-fn recover_one(
-    ct_dst: &Path,
-    folder: &FolderLock,
-    mpath: &Path,
-    m: &mut ReplaceManifest,
-    id: &str,
-    st: &mut Steps,
-    warnings: &mut Vec<String>,
-) -> std::io::Result<()> {
+fn move_recorded(m: &ReplaceManifest, live: &str) -> bool {
+    m.moved_live.iter().any(|n| n.eq_ignore_ascii_case(live))
+}
+
+fn all_new_confirmed(ct_dst: &Path, m: &ReplaceManifest) -> bool {
+    m.new.iter().all(|(live, _, data, fp)| {
+        let p = ct_dst.join(live);
+        if fs::symlink_metadata(&p).is_err() {
+            return false;
+        }
+        if move_recorded(m, live) {
+            if *data {
+                return true;
+            }
+            return fingerprint(&p).as_deref() == Some(fp.as_str());
+        }
+        fingerprint(&p).as_deref() == Some(fp.as_str())
+    })
+}
+
+struct RecoverNote<'a> {
+    ct_dst: &'a Path,
+    folder: &'a FolderLock,
+    mpath: &'a Path,
+    id: &'a str,
+    legacy: bool,
+}
+
+fn recover_one(note: &RecoverNote, m: &mut ReplaceManifest, st: &mut Steps, warnings: &mut Vec<String>) -> std::io::Result<()> {
+    let ct_dst = note.ct_dst;
+    let folder = note.folder;
+    let mpath = note.mpath;
+    let id = note.id;
+    let legacy = note.legacy;
     let there = |n: &str| fs::symlink_metadata(ct_dst.join(n)).is_ok();
     let live = |data: bool| -> Option<PathBuf> {
         fs::read_dir(ct_dst).ok()?.flatten().map(|e| e.path()).find(|p| {
@@ -2244,10 +2358,6 @@ fn recover_one(
         })
     };
     let old_aside = |data: bool| m.old.iter().find(|o| o.2 == data).map(|o| there(&o.1));
-    let new_header_fp = m.new.iter().find(|(_, _, d, _)| !*d).map(|(_, _, _, fp)| fp.as_str());
-    let new_header_in_place = || {
-        new_header_fp.is_some_and(|fp| live(false).is_some_and(|p| fingerprint(&p).as_deref() == Some(fp)))
-    };
     // A live half of kind `data` is the NEW one when it matches the fingerprint in the note,
     // its old counterpart is still aside (or there was none), and it isn't set aside already.
     let is_new_live = |data: bool, new_aside: &str, fp: &str| {
@@ -2256,11 +2366,15 @@ fn recover_one(
     let unit = ct_dst.join(id).display().to_string();
     let finish = |m: &ReplaceManifest, st: &mut Steps, warnings: &mut Vec<String>| -> std::io::Result<()> {
         folder.ensure_same_folder().map_err(std::io::Error::other)?;
+        if !all_new_confirmed(ct_dst, m) {
+            return Err(std::io::Error::other("the new copy is not fully in place yet"));
+        }
         let mut removed = 0;
         for (_, a, _, fp) in &m.old {
             if there(a) {
                 let aside = ct_dst.join(a);
-                if fingerprint(&aside).as_deref() != Some(fp) {
+                let fp_ok = (legacy && fp.is_empty()) || fingerprint(&aside).as_deref() == Some(fp);
+                if !fp_ok {
                     warnings.push(format!(
                         "An earlier Replace of {unit} left {} aside, but it no longer matches what I set aside; I left it for you to check.",
                         aside.display()
@@ -2283,13 +2397,7 @@ fn recover_one(
         return finish(m, st, warnings);
     }
     if m.phase == "replacing" {
-        if m.new.iter().all(|(_, na, d, fp)| is_new_live(*d, na, fp)) {
-            st.next()?;
-            m.phase = "finishing".into();
-            write_manifest(mpath, m)?;
-            return finish(m, st, warnings);
-        }
-        if new_header_in_place() && live(true).is_some() {
+        if m.new.iter().all(|(_, na, d, fp)| is_new_live(*d, na, fp)) || all_new_confirmed(ct_dst, m) {
             st.next()?;
             m.phase = "finishing".into();
             write_manifest(mpath, m)?;
@@ -2299,7 +2407,7 @@ fn recover_one(
         m.phase = "undoing".into();
         write_manifest(mpath, m)?;
     }
-    if m.phase == "undoing" && new_header_in_place() && live(true).is_some() {
+    if m.phase == "undoing" && all_new_confirmed(ct_dst, m) {
         st.next()?;
         m.phase = "finishing".into();
         write_manifest(mpath, m)?;
@@ -2320,12 +2428,23 @@ fn recover_one(
             continue;
         }
         if let Some(p) = live(d) {
-            warnings.push(format!(
-                "An earlier Replace of {unit} was interrupted, but {} is taken by something that isn't from that Replace. I left the old copy at {} untouched; check them yourself.",
-                p.display(),
-                ct_dst.join(&a).display()
-            ));
-            return Ok(());
+            let ln = name_of(&p);
+            let from_this_replace = m.new.iter().any(|(live, _, data, fp)| {
+                *data == d
+                    && ln.eq_ignore_ascii_case(live)
+                    && (move_recorded(m, live) || fingerprint(&p).as_deref() == Some(fp.as_str()))
+            });
+            if from_this_replace {
+                warnings.push(format!(
+                    "An earlier Replace of {unit} was interrupted, but {} is taken by something that isn't from that Replace. I left the old copy at {} untouched; check them yourself.",
+                    p.display(),
+                    ct_dst.join(&a).display()
+                ));
+                return Ok(());
+            }
+            folder.ensure_same_folder().map_err(std::io::Error::other)?;
+            st.next()?;
+            remove_any(&p)?;
         }
         folder.ensure_same_folder().map_err(std::io::Error::other)?;
         st.next()?;

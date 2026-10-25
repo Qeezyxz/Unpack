@@ -2754,6 +2754,68 @@ fn k2_rename_during_replace_stops_and_rolls_back() {
     assert!(!away.join("abcd0001").exists());
 }
 
+/// H1: a truncated live `.data` from an interrupted cross-volume copy must not finish the Replace
+/// or delete the only good copy in `.unpack-old.*`.
+#[test]
+fn h1_partial_live_data_restores_old_aside() {
+    let td = crate::testutil::TmpDir::new("arch-h1-partial");
+    let prof = td.path().join("prof");
+    let dst = r27_setup(&prof);
+    let (st, tree) = r27_stage(td.path(), "h1a", b"NEW");
+    REPLACE_KILL_AT.with(|k| k.set(5));
+    assert!(place_title_trees(&st, &[tree], &prof, Collision::Replace, 1, 0, 0, vec![], &Jobs::default(), "t", &mut |_, _| {}).is_err());
+    REPLACE_KILL_AT.with(|k| k.set(0));
+    let note = fs::read_dir(&dst)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().starts_with(".unpack-replace.") && e.file_name().to_string_lossy().ends_with(".json"))
+        .map(|e| e.path())
+        .expect("manifest");
+    let mut m: ReplaceManifest = serde_json::from_slice(&fs::read(&note).unwrap()).unwrap();
+    m.moved_live.retain(|n| n.eq_ignore_ascii_case("abcd0001"));
+    fs::write(&note, serde_json::to_vec(&m).unwrap()).unwrap();
+    fs::create_dir_all(dst.join("abcd0001.data")).unwrap();
+    fs::write(dst.join("abcd0001.data/trunc"), b"partial").unwrap();
+    let mut w = vec![];
+    recover_asides_locked(&dst, &mut w);
+    assert_eq!(r27_check(&dst, "h1-partial"), b"OLD");
+    assert!(w.iter().any(|x| x.contains("put the old package back")), "{w:?}");
+}
+
+/// M1: notes written by 1.7.3 (old halves without fingerprints) still repair after upgrade.
+#[test]
+fn m1_legacy_replace_note_repairs_after_upgrade() {
+    let td = crate::testutil::TmpDir::new("arch-m1-legacy");
+    let prof = td.path().join("prof");
+    let dst = r27_setup(&prof);
+    let (st, _tree) = r27_stage(td.path(), "leg", b"NEW");
+    let hdr = st.join("4D5307E6/00007000/abcd0001");
+    let data = st.join("4D5307E6/00007000/abcd0001.data");
+    let hfp = fingerprint(&hdr).unwrap();
+    let dfp = fingerprint(&data).unwrap();
+    let tag = "3";
+    fs::rename(dst.join("ABCD0001"), dst.join(format!(".unpack-old.{tag}.abcd0001"))).unwrap();
+    fs::rename(dst.join("ABCD0001.data"), dst.join(format!(".unpack-old.{tag}.abcd0001.data"))).unwrap();
+    let m = ReplaceManifest {
+        phase: "replacing".into(),
+        old: vec![
+            ("abcd0001".into(), format!(".unpack-old.{tag}.abcd0001"), false, String::new()),
+            ("abcd0001.data".into(), format!(".unpack-old.{tag}.abcd0001.data"), true, String::new()),
+        ],
+        new: vec![
+            ("abcd0001".into(), format!(".unpack-new.{tag}.abcd0001"), false, hfp),
+            ("abcd0001.data".into(), format!(".unpack-new.{tag}.abcd0001.data"), true, dfp),
+        ],
+        moved_live: vec![],
+    };
+    let note = dst.join(format!(".unpack-replace.{tag}.json"));
+    fs::write(&note, serde_json::to_vec(&m).unwrap()).unwrap();
+    let mut w = vec![];
+    recover_asides_locked(&dst, &mut w);
+    assert_eq!(r27_check(&dst, "m1-legacy"), b"OLD");
+    assert!(w.iter().any(|x| x.contains("put the old package back")), "{w:?}");
+}
+
 /// K2 (logic): folder identity check fails when the path no longer names the locked directory.
 #[test]
 fn k2_folder_identity_mismatch_is_detected() {

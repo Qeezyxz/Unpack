@@ -149,6 +149,7 @@
     .preview-empty { min-height: 10rem; display: grid; place-items: center; color: var(--muted); font-size: 0.86rem; text-align: center; padding: 1.5rem; }
     .toast { position: fixed; bottom: 1.25rem; left: 50%; transform: translate(-50%, 12px); background: var(--elevated); border: 1px solid var(--border-strong); color: var(--fg); padding: 0.7rem 1rem; border-radius: 12px; font-size: 0.86rem; z-index: 40; opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s var(--ease); box-shadow: var(--shadow); max-width: min(34rem, 92vw); }
     .toast.show { opacity: 1; transform: translate(-50%, 0); }
+    .migration-notice { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: 640px; z-index: 9999; padding: 12px 16px; border-radius: 8px; background: var(--panel, #222); color: var(--text, #eee); border: 1px solid var(--accent, #5a8); box-shadow: 0 4px 16px rgba(0,0,0,.4); display: flex; gap: 12px; align-items: flex-start; }
     .overlay { position: fixed; inset: 0; background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(6px); display: grid; place-items: center; z-index: 30; padding: 1rem; animation: fade .2s ease; }
     @keyframes fade { from { opacity: 0; } }
     .dialog { width: min(26rem, 100%); background: var(--card); border: 1px solid var(--border-strong); border-radius: 20px; padding: 1.3rem; box-shadow: 0 30px 80px -30px rgba(0,0,0,.6); animation: pop .28s var(--ease); }

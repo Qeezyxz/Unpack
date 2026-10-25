@@ -89,8 +89,8 @@ function toast(msg) {
 function showMigrationNotice(msg) {
   const el = document.createElement("div");
   el.id = "migration-notice";
+  el.className = "migration-notice";
   el.setAttribute("role", "status");
-  el.style.cssText = "position:fixed;left:50%;bottom:24px;transform:translateX(-50%);max-width:640px;z-index:9999;padding:12px 16px;border-radius:8px;background:var(--panel,#222);color:var(--text,#eee);border:1px solid var(--accent,#5a8);box-shadow:0 4px 16px rgba(0,0,0,.4);display:flex;gap:12px;align-items:flex-start";
   const t = document.createElement("div");
   t.textContent = msg;
   const b = document.createElement("button");
@@ -634,6 +634,25 @@ function paintJob(job) {
   sel("data-job-status").forEach((el) => {
     el.textContent = el.dataset.statusKind === "god" ? godStatusText(job) : job.status || "";
   });
+}
+
+function paintAllJobBars() {
+  for (const job of jobs) {
+    paintJob(job);
+    for (const g of job.gods || []) paintJob(g);
+  }
+  if (libraryView?.copying) {
+    for (const c of Object.values(libraryView.copying)) if (c?.id) paintJob(c);
+  }
+  if (xboxView?.sends) for (const s of xboxView.sends) if (s?.id) paintJob(s);
+  if (modsView?.dl?.job) paintJob(modsView.dl.job);
+  if (modsView?.copy) paintJob(modsView.copy);
+  if (catalogView?.run) {
+    for (const r of Object.values(catalogView.run)) if (r?.id) paintJob(r);
+  }
+  if (composer) paintJob(composer);
+  if (godPanel?.items) for (const i of godPanel.items) if (i?.id) paintJob(i);
+  if (dlcView?.items) for (const d of dlcView.items) if (d?.id) paintJob(d);
 }
 
 async function addPaths(paths, action = "open") {
@@ -1287,7 +1306,7 @@ function renderFolderConfirm() {
   const f = folderConfirm;
   return `<div class="overlay" data-folder-overlay><div class="dialog" role="dialog" aria-modal="true"><h3>Add archives from folder?</h3>
     <p>${f.archives.length} archive${f.archives.length === 1 ? "" : "s"} / ISO found under <code>${escapeHtml(f.folder)}</code>. Add them to the extract queue? (Create archive is still a separate button.)</p>
-    <ul class="sc-list" class="sc-list sc-list-scroll">${f.archives.slice(0, 40).map((p) => `<li><span>${escapeHtml(N.baseName(p))}</span></li>`).join("")}${f.archives.length > 40 ? `<li class="meta">…and ${f.archives.length - 40} more</li>` : ""}</ul>
+    <ul class="sc-list sc-list-scroll">${f.archives.slice(0, 40).map((p) => `<li><span>${escapeHtml(N.baseName(p))}</span></li>`).join("")}${f.archives.length > 40 ? `<li class="meta">…and ${f.archives.length - 40} more</li>` : ""}</ul>
     <div class="actions actions-end"><button class="btn btn-quiet" data-folder-cancel type="button">Cancel</button><button class="btn btn-primary" data-folder-ok type="button">Add ${f.archives.length} to queue</button></div>
   </div></div>`;
 }
@@ -4197,6 +4216,7 @@ function render() {
   `;
   bind();
   updatePresence();
+  paintAllJobBars();
 }
 
 function renderTabs() {
