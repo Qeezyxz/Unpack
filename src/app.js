@@ -1129,9 +1129,19 @@ function filterLibraryGames(games) {
   list = [...list].sort(cmp);
   return list;
 }
-async function openLibrary() {
+const LIB_SCAN_TIMEOUT_MS = 10 * 60 * 1000;
+function libScanTimeout() {
+  return new Promise((_, reject) => {
+    setTimeout(() => reject(new Error("Library scan timed out. Try a narrower folder (e.g. Content\\0000000000000000).")), LIB_SCAN_TIMEOUT_MS);
+  });
+}
+
+async function openLibrary(forceFresh = false) {
+  const scanId = uid();
   libraryView = {
     loading: true,
+    scanId,
+    scanMessage: "",
     games: [],
     allGames: [],
     stale: false,
@@ -1143,15 +1153,26 @@ async function openLibrary() {
     covers: {},
   };
   render();
+  const offProgress = N.onLibraryScanProgress(scanId, (p) => {
+    if (!libraryView || libraryView.scanId !== scanId) return;
+    libraryView.scanMessage = p.message || libraryView.scanMessage;
+    render();
+  });
+  const libs = dlcLibraries();
+  const maxAge = forceFresh ? 0 : 3600;
   try {
-    const idx = await N.invoke("library_index", { libraries: dlcLibraries(), allowCoverNetwork: N.settings.coverArtNetwork, maxAgeSecs: 3600 });
+    const idx = await Promise.race([
+      N.invoke("library_index", { libraries: libs, allowCoverNetwork: N.settings.coverArtNetwork, maxAgeSecs: maxAge, scanId }),
+      libScanTimeout(),
+    ]);
     libraryView.allGames = idx.games || [];
     libraryView.stale = !!idx.stale;
     libraryView.scannedAt = idx.scanned_at || 0;
-    if (idx.cached) {
-      // Cached index shown instantly; refresh in the background so new or removed games appear.
+    if (idx.scan_warnings?.length) toast(idx.scan_warnings.slice(0, 3).join("\n"));
+    if (idx.cached && !forceFresh) {
       const view = libraryView;
-      N.invoke("library_index", { libraries: dlcLibraries(), allowCoverNetwork: N.settings.coverArtNetwork, maxAgeSecs: 0 })
+      const bgId = uid();
+      N.invoke("library_index", { libraries: libs, allowCoverNetwork: N.settings.coverArtNetwork, maxAgeSecs: 0, scanId: bgId })
         .then((fresh) => { if (libraryView === view && fresh?.games) { view.allGames = fresh.games; view.games = filterLibraryGames(view.allGames); view.scannedAt = fresh.scanned_at || 0; render(); } })
         .catch(() => {});
     }
@@ -1161,11 +1182,15 @@ async function openLibrary() {
     }
   } catch (e) {
     toast(String(e));
-    libraryView.allGames = await N.invoke("library_scan", { libraries: dlcLibraries() }).catch(() => []);
+    libraryView.allGames = await N.invoke("library_scan", { libraries: libs }).catch(() => []);
+  } finally {
+    offProgress();
+    if (libraryView?.scanId === scanId) {
+      libraryView.games = filterLibraryGames(libraryView.allGames);
+      libraryView.loading = false;
+      render();
+    }
   }
-  libraryView.games = filterLibraryGames(libraryView.allGames);
-  libraryView.loading = false;
-  render();
 }
 
 function renderFolderConfirm() {
@@ -1187,7 +1212,7 @@ function renderLibrary() {
         <select data-lib-filter aria-label="Filter"><option value="all" ${L.filterKind === "all" ? "selected" : ""}>All</option><option value="god" ${L.filterKind === "god" ? "selected" : ""}>GOD</option><option value="xex" ${L.filterKind === "xex" ? "selected" : ""}>Extracted (XEX)</option><option value="dlc" ${L.filterKind === "dlc" ? "selected" : ""}>Has DLC</option><option value="tu" ${L.filterKind === "tu" ? "selected" : ""}>Has TU</option></select>
         ${L.stale ? `<span class="pill warn-text" title="Showing a fresh scan — cached index was older than an hour">Stale index</span>` : ""}
       </div>`;
-  const body = L.loading ? `<div class="preview-empty"><span class="spin">◌</span> Looking in your library folders…</div>`
+  const body = L.loading ? `<div class="preview-empty"><span class="spin">◌</span> ${escapeHtml(L.scanMessage || "Looking in your library folders…")}${L.scanId ? ` <button class="btn btn-quiet btn-sm" data-lib-cancel type="button">Cancel</button>` : ""}</div>`
     : `${libBar}${!L.games.length ? `<div class="preview-empty lib-empty">${EMPTY_LIB_ART}<div><strong>No games found yet</strong><br>Add the folder with your GOD games (or a USB drive's Content folder) in Settings → Game library folders.</div></div>`
     : `<div class="lib-grid">${L.games.map((g, i) => { const c = L.copying[g.path]; return `<div class="lib-card">
         ${gameTile(g, L.covers?.[g.path])}
@@ -1236,7 +1261,8 @@ function bindLibrary() {
   if (!root) return;
   const close = () => { libraryView = null; render(); };
   root.querySelector("[data-lib-close]")?.addEventListener("click", close);
-  root.querySelector("[data-lib-refresh]")?.addEventListener("click", () => openLibrary());
+  root.querySelector("[data-lib-refresh]")?.addEventListener("click", () => openLibrary(true));
+  root.querySelector("[data-lib-cancel]")?.addEventListener("click", () => { if (libraryView?.scanId) N.invoke("cancel_job", { id: libraryView.scanId }).catch(() => {}); });
   root.querySelector("[data-lib-q]")?.addEventListener("input", (e) => { libraryView.q = e.target.value; N.settings.libQuery = e.target.value; libraryView.games = filterLibraryGames(libraryView.allGames); const pos = e.target.selectionStart; render(); const n = app.querySelector("[data-lib-q]"); n?.focus(); n?.setSelectionRange(pos, pos); });
   root.querySelector("[data-lib-sort]")?.addEventListener("change", (e) => { libraryView.sort = e.target.value; N.settings.libSort = e.target.value; libraryView.games = filterLibraryGames(libraryView.allGames); render(); });
   root.querySelector("[data-lib-filter]")?.addEventListener("change", (e) => { libraryView.filterKind = e.target.value; N.settings.libFilterKind = e.target.value; libraryView.games = filterLibraryGames(libraryView.allGames); render(); });

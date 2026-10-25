@@ -1270,9 +1270,11 @@ async fn god_verify_only(path: String) -> Result<String, String> {
 #[tauri::command]
 async fn library_index(
     app: AppHandle,
+    jobs: State<'_, Jobs>,
     libraries: Vec<String>,
     allow_cover_network: bool,
     max_age_secs: Option<u64>,
+    scan_id: Option<String>,
 ) -> Result<library::LibraryIndex, String> {
     let dir = app
         .path()
@@ -1284,16 +1286,39 @@ async fn library_index(
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
         .collect();
-    tauri::async_runtime::spawn_blocking(move || {
-        library::index_cached(
+    let scan_id = scan_id.unwrap_or_default();
+    if !scan_id.is_empty() {
+        jobs.register(&scan_id);
+    }
+    let registry = jobs.inner().clone();
+    let jid = scan_id.clone();
+    let app_emit = app.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        let mut emit = |prog: library::ScanProgress| {
+            if jid.is_empty() {
+                return;
+            }
+            let mut p = prog;
+            p.id = jid.clone();
+            let _ = app_emit.emit("library-scan-progress", p);
+        };
+        let mut progress: Option<&mut dyn FnMut(library::ScanProgress)> = Some(&mut emit);
+        let cancelled = || !jid.is_empty() && registry.is_cancelled(&jid);
+        library::index_cached_with_progress(
             &libs,
             &dir,
             allow_cover_network,
             max_age_secs.unwrap_or(3600),
+            &mut progress,
+            &cancelled,
         )
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    if !scan_id.is_empty() {
+        jobs.finish(&scan_id);
+    }
+    res
 }
 
 #[tauri::command]
