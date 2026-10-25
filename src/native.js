@@ -139,23 +139,19 @@ export async function saveText(path, text) {
   return await invoke("save_text_file", { path, text });
 }
 
-/** Subscribe to native drag & drop; calls onDrop(paths) and onHover(bool). */
+/** Native drop: hover via webview events; paths arrive on `native-drop-accepted` from Rust. */
 export async function onNativeDrop(onDrop, onHover) {
+  await T.event.listen("native-drop-accepted", (e) => {
+    const paths = Array.isArray(e.payload) ? e.payload : [];
+    if (paths.length) onDrop(paths);
+  });
   const wv = T.webview?.getCurrentWebview?.();
   if (!wv?.onDragDropEvent) return;
   await wv.onDragDropEvent((ev) => {
     const t = ev.payload?.type;
     if (t === "enter" || t === "over") onHover(true);
     else if (t === "leave") onHover(false);
-    else if (t === "drop") {
-      onHover(false);
-      const paths = ev.payload.paths || [];
-      if (!paths.length) return;
-      void (async () => {
-        const allowed = await invoke("session_drop_prepare", { paths });
-        if (allowed?.length) onDrop(allowed);
-      })();
-    }
+    else if (t === "drop") onHover(false);
   });
 }
 

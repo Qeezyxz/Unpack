@@ -117,23 +117,6 @@ fn native_info() -> NativeInfo {
     }
 }
 
-#[tauri::command]
-fn session_drop_prepare(
-    paths: Vec<String>,
-    pending: tauri::State<native_drop::PendingNativeDrop>,
-    app: tauri::AppHandle,
-) -> Vec<String> {
-    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    let (allowed, refused) = native_drop::consume_session_drop_prepare(&pending, &paths);
-    if let Some(msg) = refused {
-        let _ = app.emit("path-grant-refused", msg);
-    }
-    allowed
-        .into_iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect()
-}
-
 #[derive(Serialize)]
 struct FileInfo {
     path: String,
@@ -1970,23 +1953,24 @@ pub fn run() {
             app.manage(grants);
             app.manage(menus);
             app.manage(discord::PresenceHandle::start());
-            app.manage(native_drop::PendingNativeDrop::default());
             Ok(())
         })
         .on_webview_event(|webview, event| {
             if let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
-                let pending = webview.state::<native_drop::PendingNativeDrop>();
                 let grants = webview.state::<safecopy::Grants>();
                 let app = webview.app_handle().clone();
                 let path_refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
-                if let Some(msg) = native_drop::register_native_drop(&pending, &path_refs, &grants) {
+                let outcome = native_drop::process_native_drop(&path_refs, &grants);
+                if let Some(msg) = outcome.refused {
                     let _ = app.emit("path-grant-refused", msg);
+                }
+                if !outcome.accepted.is_empty() {
+                    let _ = app.emit("native-drop-accepted", outcome.accepted);
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
             native_info,
-            session_drop_prepare,
             file_info,
             list_archive,
             read_entry,

@@ -1,48 +1,22 @@
-//! Trusted native drag-and-drop: grants happen only in the webview handler. The page may call
-//! `session_drop_prepare` once to learn which dropped paths are usable — not to widen grants.
+//! Trusted native drag-and-drop: validate, grant, and tell the page which paths to open.
 
-use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::path::Path;
 
 use crate::picked_folders::validate_session_grant;
-use crate::safecopy::{simplify, Grants};
+use crate::safecopy::Grants;
 
-pub const PENDING_DROP_TTL: Duration = Duration::from_secs(8);
-
-#[derive(Default)]
-pub struct PendingNativeDrop {
-    batch: Mutex<Option<DropBatch>>,
+pub struct NativeDropOutcome {
+    pub accepted: Vec<String>,
+    pub refused: Option<String>,
 }
 
-struct DropBatch {
-    at: Instant,
-    dropped: HashSet<String>,
-    granted: HashSet<String>,
-}
-
-fn drop_path_key(p: &Path) -> String {
-    if let Ok(c) = fs::canonicalize(p) {
-        return simplify(c).to_string_lossy().into_owned();
-    }
-    p.to_string_lossy().into_owned()
-}
-
-/// Called from the trusted native drag-drop handler only.
-pub fn register_native_drop(
-    pending: &PendingNativeDrop,
-    paths: &[&Path],
-    grants: &Grants,
-) -> Option<String> {
-    let mut dropped = HashSet::new();
-    let mut granted = HashSet::new();
+/// Called only from the native drag-drop handler (or the test bridge simulator).
+pub fn process_native_drop(paths: &[&Path], grants: &Grants) -> NativeDropOutcome {
+    let mut accepted = Vec::new();
     let mut refused = None;
     for p in paths {
         let p = *p;
-        let key = drop_path_key(p);
-        dropped.insert(key.clone());
         let meta = fs::symlink_metadata(p);
         if let Ok(m) = meta {
             if crate::safecopy::is_link(&m) {
@@ -59,7 +33,7 @@ pub fn register_native_drop(
                 match validate_session_grant(target) {
                     Ok(c) => {
                         grants.grant_session(&c);
-                        granted.insert(key);
+                        accepted.push(p.to_string_lossy().into_owned());
                     }
                     Err(e) if refused.is_none() => refused = Some(e),
                     Err(_) => {}
@@ -67,53 +41,7 @@ pub fn register_native_drop(
             }
         }
     }
-    *pending.batch.lock().unwrap() = Some(DropBatch {
-        at: Instant::now(),
-        dropped,
-        granted,
-    });
-    refused
-}
-
-/// Page may call once per native drop; never grants — only returns paths already granted above.
-pub fn consume_session_drop_prepare(
-    pending: &PendingNativeDrop,
-    requested: &[PathBuf],
-) -> (Vec<PathBuf>, Option<String>) {
-    let batch = pending.batch.lock().unwrap().take();
-    let Some(batch) = batch else {
-        return (
-            Vec::new(),
-            Some("No file or folder was dropped.".into()),
-        );
-    };
-    if batch.at.elapsed() > PENDING_DROP_TTL {
-        return (
-            Vec::new(),
-            Some("The drop session expired. Drop the files again.".into()),
-        );
-    }
-
-    let mut allowed = Vec::new();
-    let mut foreign = false;
-    for p in requested {
-        let key = drop_path_key(p);
-        if !batch.dropped.contains(&key) {
-            foreign = true;
-            continue;
-        }
-        if batch.granted.contains(&key) {
-            allowed.push(p.clone());
-        }
-    }
-    let notify = if foreign {
-        Some(
-            "That path wasn't part of the drop. Drop it again if you meant to use it.".into(),
-        )
-    } else {
-        None
-    };
-    (allowed, notify)
+    NativeDropOutcome { accepted, refused }
 }
 
 #[cfg(test)]
@@ -122,7 +50,7 @@ mod tests {
     use crate::testutil::TmpDir;
 
     #[test]
-    fn session_drop_prepare_without_native_drop_grants_nothing() {
+    fn without_native_drop_handler_nothing_is_granted() {
         let tmp = TmpDir::new("no-native-drop");
         let secret = tmp.path().join("secret");
         fs::create_dir_all(&secret).unwrap();
@@ -130,15 +58,11 @@ mod tests {
         fs::write(&secret_file, b"x").unwrap();
 
         let grants = Grants::default();
-        let pending = PendingNativeDrop::default();
-        let (allowed, refused) = consume_session_drop_prepare(&pending, &[secret]);
-        assert!(allowed.is_empty());
-        assert!(refused.is_some());
         assert!(grants.check(secret_file.to_str().unwrap()).is_err());
     }
 
     #[test]
-    fn native_drop_then_prepare_allows_only_dropped_paths() {
+    fn native_drop_accepts_only_granted_paths() {
         let tmp = TmpDir::new("native-drop-ok");
         let good = tmp.path().join("mods");
         fs::create_dir_all(&good).unwrap();
@@ -146,13 +70,23 @@ mod tests {
         fs::create_dir_all(&other).unwrap();
 
         let grants = Grants::default();
-        let pending = PendingNativeDrop::default();
         let dropped = [good.as_path()];
-        register_native_drop(&pending, &dropped, &grants);
-        let (allowed, _) = consume_session_drop_prepare(&pending, &[good.clone(), other.clone()]);
-        assert_eq!(allowed.len(), 1);
-        assert_eq!(allowed[0], good);
+        let outcome = process_native_drop(&dropped, &grants);
+        assert_eq!(outcome.accepted.len(), 1);
+        assert_eq!(outcome.accepted[0], good.to_string_lossy());
         assert!(grants.check(good.to_str().unwrap()).is_ok());
         assert!(grants.check(other.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn refused_paths_omitted_from_accepted() {
+        if !cfg!(unix) {
+            return;
+        }
+        let grants = Grants::default();
+        let outcome = process_native_drop(&[Path::new("/etc")], &grants);
+        assert!(outcome.accepted.is_empty());
+        assert!(outcome.refused.is_some());
+        assert!(grants.check("/etc").is_err());
     }
 }
