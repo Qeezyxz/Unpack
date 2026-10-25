@@ -703,7 +703,7 @@ async function addPaths(paths, action = "open") {
     const found = [];
     for (const f of folders) {
       try {
-        // Session grant comes from Tauri DragDrop / __test_drop_grant — no page-callable grant_dir.
+        // Session grant comes from native DragDrop (prepare only filters that pending set).
         const list = await N.invoke("list_archives_in_folder", { path: f.path });
         found.push(...list);
       } catch (err) { toast(String(err)); }

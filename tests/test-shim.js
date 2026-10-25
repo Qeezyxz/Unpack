@@ -44,6 +44,7 @@
     },
     webview: { getCurrentWebview: () => ({ onDragDropEvent: async (fn) => {
       window.__TEST.drop = async (paths) => {
+        await fetch("/invoke/__test_simulate_native_drop", { method: "POST", body: JSON.stringify({ paths }) });
         fn({ payload: { type: "drop", paths } });
       };
     } }) },

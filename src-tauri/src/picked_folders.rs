@@ -447,38 +447,6 @@ pub fn validate_session_grant(p: &Path) -> Result<PathBuf, String> {
     Ok(c)
 }
 
-/// Grant session access for dropped paths that pass validation; return paths safe to open in the UI.
-pub fn prepare_session_drop_paths(paths: &[PathBuf], grants: &Grants) -> (Vec<PathBuf>, Option<String>) {
-    let mut allowed = Vec::new();
-    let mut refused = None;
-    for p in paths {
-        let meta = fs::symlink_metadata(p);
-        if let Ok(m) = meta {
-            if crate::safecopy::is_link(&m) {
-                continue;
-            }
-            let grant_target = if m.is_dir() {
-                Some(p.as_path())
-            } else if m.is_file() {
-                p.parent()
-            } else {
-                None
-            };
-            if let Some(target) = grant_target {
-                match validate_session_grant(target) {
-                    Ok(c) => {
-                        grants.grant_session(&c);
-                        allowed.push(p.clone());
-                    }
-                    Err(e) if refused.is_none() => refused = Some(e),
-                    Err(_) => {}
-                }
-            }
-        }
-    }
-    (allowed, refused)
-}
-
 fn regex_hostile(s: String) -> bool {
     if windows_system_folder_on_drive(&s) {
         return true;

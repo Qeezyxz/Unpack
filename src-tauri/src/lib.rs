@@ -18,6 +18,7 @@ pub mod library;
 pub mod migrate;
 pub mod modnames;
 pub mod mods;
+pub mod native_drop;
 pub mod picked_folders;
 pub mod preflight;
 pub mod safecopy;
@@ -119,11 +120,11 @@ fn native_info() -> NativeInfo {
 #[tauri::command]
 fn session_drop_prepare(
     paths: Vec<String>,
-    grants: tauri::State<safecopy::Grants>,
+    pending: tauri::State<native_drop::PendingNativeDrop>,
     app: tauri::AppHandle,
 ) -> Vec<String> {
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    let (allowed, refused) = picked_folders::prepare_session_drop_paths(&paths, &grants);
+    let (allowed, refused) = native_drop::consume_session_drop_prepare(&pending, &paths);
     if let Some(msg) = refused {
         let _ = app.emit("path-grant-refused", msg);
     }
@@ -1969,7 +1970,19 @@ pub fn run() {
             app.manage(grants);
             app.manage(menus);
             app.manage(discord::PresenceHandle::start());
+            app.manage(native_drop::PendingNativeDrop::default());
             Ok(())
+        })
+        .on_webview_event(|webview, event| {
+            if let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let pending = webview.state::<native_drop::PendingNativeDrop>();
+                let grants = webview.state::<safecopy::Grants>();
+                let app = webview.app_handle().clone();
+                let path_refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
+                if let Some(msg) = native_drop::register_native_drop(&pending, &path_refs, &grants) {
+                    let _ = app.emit("path-grant-refused", msg);
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             native_info,

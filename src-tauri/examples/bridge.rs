@@ -138,6 +138,8 @@ static PICKED: std::sync::LazyLock<std::sync::Mutex<unpack_lib::picked_folders::
     });
 static LAST_SCAN: std::sync::LazyLock<unpack_lib::picked_folders::LastScannedRoots> =
     std::sync::LazyLock::new(unpack_lib::picked_folders::LastScannedRoots::default);
+static PENDING_DROP: std::sync::LazyLock<unpack_lib::native_drop::PendingNativeDrop> =
+    std::sync::LazyLock::new(unpack_lib::native_drop::PendingNativeDrop::default);
 // Same as the app's setup: built-in menus from UNPACK_TEST_MENUS (fixtures) or resources/menus.
 static BUILTIN: std::sync::LazyLock<unpack_lib::mods::BuiltinSet> =
     std::sync::LazyLock::new(|| {
@@ -403,7 +405,24 @@ fn extra(
                 .record_dialog_pick(&GRANTS, std::path::Path::new(p))
                 .map(|_| json!(null))
         }
-        "session_drop_prepare" | "__test_drop_grant" => {
+        "__test_simulate_native_drop" => {
+            let paths: Vec<PathBuf> = a["paths"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|x| x.as_str())
+                .map(PathBuf::from)
+                .collect();
+            let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+            if let Some(msg) =
+                unpack_lib::native_drop::register_native_drop(&*PENDING_DROP, &path_refs, &GRANTS)
+            {
+                events.lock().unwrap().push(json!({"event":"path-grant-refused","payload": msg}));
+            }
+            Ok(json!(true))
+        }
+        "session_drop_prepare" => {
             let paths: Vec<PathBuf> = a["paths"]
                 .as_array()
                 .cloned()
@@ -413,7 +432,7 @@ fn extra(
                 .map(PathBuf::from)
                 .collect();
             let (allowed, refused) =
-                unpack_lib::picked_folders::prepare_session_drop_paths(&paths, &GRANTS);
+                unpack_lib::native_drop::consume_session_drop_prepare(&*PENDING_DROP, &paths);
             if let Some(msg) = refused {
                 events.lock().unwrap().push(json!({"event":"path-grant-refused","payload": msg}));
             }
