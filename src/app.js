@@ -822,10 +822,10 @@ async function resolveDest(job, mode) {
 /**
  * Extract a native job. opts.layout: "folder" (default) | "here"; opts.mode: override dest mode.
  */
-async function preflightDest(dest, paths) {
+async function preflightDest(dest, paths, autoIso = "off") {
   if (!N.IS_DESKTOP || !dest || !paths?.length) return true;
   try {
-    const r = await N.invoke("preflight_local", { dest, paths });
+    const r = await N.invoke("preflight_local", { dest, paths, autoIso });
     const blocks = (r.issues || []).filter((i) => i.level === "block");
     if (blocks.length) {
       showError(blocks.map((i) => i.text).join(" "));
@@ -842,7 +842,7 @@ async function extractNative(job, opts = {}) {
   const layout = opts.layout || "folder";
   const dest = opts.dest || (await resolveDest(job, opts.mode));
   if (!dest) return;
-  if (!(await preflightDest(dest, [job.path]))) {
+  if (!(await preflightDest(dest, [job.path], N.settings.autoIsoMode))) {
     job.phase = "failed";
     job.status = "Blocked";
     onJobDone?.(job, layout, opts);
@@ -872,6 +872,7 @@ async function extractNative(job, opts = {}) {
       skipJunk,
       sealIsos: N.settings.autoIsoMode !== "off" && N.settings.deleteIsoAfterGod,
       nested: N.settings.nested,
+      autoIso: N.settings.autoIsoMode,
     });
     job.output = res.output;
     job.warnings = [...(res.warnings || [])];
@@ -1129,9 +1130,35 @@ function filterLibraryGames(games) {
   list = [...list].sort(cmp);
   return list;
 }
-async function openLibrary() {
+const LIB_SCAN_TIMEOUT_MS = 10 * 60 * 1000;
+const LIB_TIMED_OUT = "Library scan timed out. Try a narrower folder (e.g. Content\\0000000000000000).";
+// Every running library_index job I started (the visible scan and a background refresh).
+const libScanIds = new Set();
+// One way to stop library scans: close, Escape, Refresh/Ctrl+L starting a new one, the timeout.
+function cancelLibraryScan(id) {
+  for (const s of id ? [id] : [...libScanIds]) {
+    libScanIds.delete(s);
+    N.invoke("cancel_job", { id: s }).catch(() => {});
+  }
+}
+function closeLibrary() {
+  cancelLibraryScan();
+  libraryView = null;
+  render();
+}
+function libraryIndex(libs, maxAgeSecs, scanId) {
+  libScanIds.add(scanId);
+  return N.invoke("library_index", { libraries: libs, allowCoverNetwork: N.settings.coverArtNetwork, maxAgeSecs, scanId })
+    .finally(() => libScanIds.delete(scanId));
+}
+
+async function openLibrary(forceFresh = false) {
+  cancelLibraryScan(); // a new scan replaces any one still running
+  const scanId = uid();
   libraryView = {
     loading: true,
+    scanId,
+    scanMessage: "",
     games: [],
     allGames: [],
     stale: false,
@@ -1143,15 +1170,31 @@ async function openLibrary() {
     covers: {},
   };
   render();
+  const offProgress = N.onLibraryScanProgress(scanId, (p) => {
+    if (!libraryView || libraryView.scanId !== scanId) return;
+    libraryView.scanMessage = p.message || libraryView.scanMessage;
+    render();
+  });
+  const libs = dlcLibraries();
+  const maxAge = forceFresh ? 0 : 3600;
+  let timedOut = false;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      cancelLibraryScan(scanId); // stop the Rust side too, so it doesn't keep walking the drive
+      reject(new Error(LIB_TIMED_OUT));
+    }, LIB_SCAN_TIMEOUT_MS);
+  });
   try {
-    const idx = await N.invoke("library_index", { libraries: dlcLibraries(), allowCoverNetwork: N.settings.coverArtNetwork, maxAgeSecs: 3600 });
+    const idx = await Promise.race([libraryIndex(libs, maxAge, scanId), timeout]);
     libraryView.allGames = idx.games || [];
     libraryView.stale = !!idx.stale;
     libraryView.scannedAt = idx.scanned_at || 0;
-    if (idx.cached) {
-      // Cached index shown instantly; refresh in the background so new or removed games appear.
+    if (idx.scan_warnings?.length) toast(idx.scan_warnings.slice(0, 3).join("\n"));
+    if (idx.cached && !forceFresh) {
       const view = libraryView;
-      N.invoke("library_index", { libraries: dlcLibraries(), allowCoverNetwork: N.settings.coverArtNetwork, maxAgeSecs: 0 })
+      libraryIndex(libs, 0, uid())
         .then((fresh) => { if (libraryView === view && fresh?.games) { view.allGames = fresh.games; view.games = filterLibraryGames(view.allGames); view.scannedAt = fresh.scanned_at || 0; render(); } })
         .catch(() => {});
     }
@@ -1160,12 +1203,19 @@ async function openLibrary() {
       if (src) libraryView.covers[g.path] = src;
     }
   } catch (e) {
-    toast(String(e));
-    libraryView.allGames = await N.invoke("library_scan", { libraries: dlcLibraries() }).catch(() => []);
+    const cancelled = N.errCode(e) === "CANCELLED";
+    if (libraryView?.scanId === scanId) toast(timedOut ? LIB_TIMED_OUT : cancelled ? "Library scan cancelled." : String(e));
+    // After Cancel or the timeout, don't start an uncancellable full scan as a fallback.
+    if (!timedOut && !cancelled && libraryView?.scanId === scanId) libraryView.allGames = await N.invoke("library_scan", { libraries: libs }).catch(() => []);
+  } finally {
+    clearTimeout(timer);
+    offProgress();
+    if (libraryView?.scanId === scanId) {
+      libraryView.games = filterLibraryGames(libraryView.allGames);
+      libraryView.loading = false;
+      render();
+    }
   }
-  libraryView.games = filterLibraryGames(libraryView.allGames);
-  libraryView.loading = false;
-  render();
 }
 
 function renderFolderConfirm() {
@@ -1187,12 +1237,12 @@ function renderLibrary() {
         <select data-lib-filter aria-label="Filter"><option value="all" ${L.filterKind === "all" ? "selected" : ""}>All</option><option value="god" ${L.filterKind === "god" ? "selected" : ""}>GOD</option><option value="xex" ${L.filterKind === "xex" ? "selected" : ""}>Extracted (XEX)</option><option value="dlc" ${L.filterKind === "dlc" ? "selected" : ""}>Has DLC</option><option value="tu" ${L.filterKind === "tu" ? "selected" : ""}>Has TU</option></select>
         ${L.stale ? `<span class="pill warn-text" title="Showing a fresh scan — cached index was older than an hour">Stale index</span>` : ""}
       </div>`;
-  const body = L.loading ? `<div class="preview-empty"><span class="spin">◌</span> Looking in your library folders…</div>`
+  const body = L.loading ? `<div class="preview-empty"><span class="spin">◌</span> ${escapeHtml(L.scanMessage || "Looking in your library folders…")}${L.scanId ? ` <button class="btn btn-quiet btn-sm" data-lib-cancel type="button">Cancel</button>` : ""}</div>`
     : `${libBar}${!L.games.length ? `<div class="preview-empty lib-empty">${EMPTY_LIB_ART}<div><strong>No games found yet</strong><br>Add the folder with your GOD games (or a USB drive's Content folder) in Settings → Game library folders.</div></div>`
     : `<div class="lib-grid">${L.games.map((g, i) => { const c = L.copying[g.path]; return `<div class="lib-card">
         ${gameTile(g, L.covers?.[g.path])}
         <div class="lib-info"><strong title="${escapeHtml(g.path)}">${escapeHtml(g.name)}</strong>
-          <span>${escapeHtml(g.title_id)} · ${formatBytes(g.game_size)} · ${g.kind === "extracted" ? "XEX" : "GOD"}</span>
+          <span>${escapeHtml(g.title_id)} · ${g.size_approx ? "about " : ""}${formatBytes(g.game_size)} · ${g.kind === "extracted" ? "XEX" : "GOD"}</span>
           <span><span class="pill">${g.dlc_count} DLC</span> ${g.dlc_count ? formatBytes(g.dlc_size) : ""} ${g.tu_count ? `<span class="pill">${g.tu_count} TU</span>` : ""}</span>
           ${c ? `<div class="qbar"><div data-job-bar="${escapeHtml(c.id)}" style="width:${c.progress || 0}%"></div></div><span class="${c.error ? "danger" : ""}" data-job-status="${escapeHtml(c.id)}">${escapeHtml(c.error || c.status)}</span>` : ""}
           <div class="actions"><button class="btn btn-quiet btn-sm" data-lib-show="${i}" type="button" title="Show this game's folder in Explorer">Show</button><button class="btn btn-secondary btn-sm" data-lib-usb="${i}" type="button" title="Copy the game with its DLC and title updates to a USB drive's Content folder" ${c && !c.done && !c.error ? "disabled" : ""}>${icon("out")} Copy to USB…</button>${N.IS_DESKTOP ? `<button class="btn btn-secondary btn-sm" data-lib-xbox="${i}" type="button" title="Send this game to your Xbox over WiFi / LAN (FTP)">${SV(16, 16, ICONS.xbox)} Send to Xbox</button>` : ""}</div>
@@ -1234,9 +1284,10 @@ function bindFolderConfirm() {
 function bindLibrary() {
   const root = app.querySelector("[data-library]");
   if (!root) return;
-  const close = () => { libraryView = null; render(); };
+  const close = closeLibrary;
   root.querySelector("[data-lib-close]")?.addEventListener("click", close);
-  root.querySelector("[data-lib-refresh]")?.addEventListener("click", () => openLibrary());
+  root.querySelector("[data-lib-refresh]")?.addEventListener("click", () => openLibrary(true));
+  root.querySelector("[data-lib-cancel]")?.addEventListener("click", () => { if (libraryView?.scanId) cancelLibraryScan(libraryView.scanId); });
   root.querySelector("[data-lib-q]")?.addEventListener("input", (e) => { libraryView.q = e.target.value; N.settings.libQuery = e.target.value; libraryView.games = filterLibraryGames(libraryView.allGames); const pos = e.target.selectionStart; render(); const n = app.querySelector("[data-lib-q]"); n?.focus(); n?.setSelectionRange(pos, pos); });
   root.querySelector("[data-lib-sort]")?.addEventListener("change", (e) => { libraryView.sort = e.target.value; N.settings.libSort = e.target.value; libraryView.games = filterLibraryGames(libraryView.allGames); render(); });
   root.querySelector("[data-lib-filter]")?.addEventListener("change", (e) => { libraryView.filterKind = e.target.value; N.settings.libFilterKind = e.target.value; libraryView.games = filterLibraryGames(libraryView.allGames); render(); });
@@ -1620,7 +1671,7 @@ function startXboxLockPoll() {
   xboxLockTimer = setInterval(() => refreshXboxLock(), 2500);
 }
 // From Library / Mod Menus: close that window and queue the item in Send to Xbox.
-function sendGameToXbox(g) { libraryView = null; openXbox(); xboxQueue({ src: g.path, name: g.name, kind: g.kind === "god" ? "god" : "xex", tid: g.title_id }); }
+function sendGameToXbox(g) { cancelLibraryScan(); libraryView = null; openXbox(); xboxQueue({ src: g.path, name: g.name, kind: g.kind === "god" ? "god" : "xex", tid: g.title_id }); }
 function sendModToXbox(it) {
   const f = it.info, g = modGame(it);
   const kind = f?.kind === "stfs" && f.content_type === "00000002" ? "dlc" : f?.kind === "stfs" && f.content_type === "000B0000" ? "tu" : f?.kind === "xex" || it.mode === "plugins" ? "plugins" : "custom";
@@ -3240,7 +3291,7 @@ function renderSettings() {
   if (!settingsOpen) return "";
   const t = N.settings.theme;
   const seg = (v, l) => `<button type="button" data-theme-set="${v}" aria-pressed="${t === v}">${l}</button>`;
-  return `<div class="overlay" data-settings-overlay><div class="dialog dialog-wide" data-settings role="dialog" aria-modal="true" aria-labelledby="set-h">
+  return `<div class="overlay" data-settings-overlay><div class="dialog dialog-wide dialog-settings" data-settings role="dialog" aria-modal="true" aria-labelledby="set-h">
     <h3 id="set-h">${icon("gear")} Settings</h3>
     <div class="set-group"><h4>Appearance</h4>
       <div class="set-row"><div class="txt"><strong>Theme</strong><small>System follows your Windows light/dark setting.</small></div>
@@ -3249,8 +3300,8 @@ function renderSettings() {
         <label class="switch"><input type="checkbox" data-setting="notify" aria-label="Notifications" ${N.settings.notify ? "checked" : ""}/><span></span></label></div>
     </div>
     ${N.IS_DESKTOP ? `<div class="set-group"><h4>Xbox</h4>
-      <div class="set-row" style="display:block"><div class="txt"><strong>Auto-convert extracted ISOs</strong><small>After a batch extracts into its own folder, Xbox 360 / original Xbox .isos inside become either GOD or an extracted <code>default.xex</code> folder next to that archive. Existing folders are never overwritten. When the output is a console <code>Content\\0000000000000000</code> folder (or the drive / <code>Content</code> folder holding it), GOD games go in only as <code>&lt;TitleID&gt;\\00007000\\…</code>: no "(GOD)" or archive-name folders, and archives that already hold a GOD game have just its TitleID folder moved in. Non-Xbox ISOs are skipped and kept.</small></div>
-        <div class="seg" role="group" aria-label="Auto-convert ISOs" style="margin-top:.5rem">
+      <div class="set-row set-stack"><div class="txt"><strong>Auto-convert extracted ISOs</strong><small>After a batch extracts into its own folder, Xbox 360 / original Xbox .isos inside become either GOD or an extracted <code>default.xex</code> folder next to that archive. Existing folders are never overwritten. When the output is a console <code>Content\\0000000000000000</code> folder (or the drive / <code>Content</code> folder holding it), GOD games go in only as <code>&lt;TitleID&gt;\\00007000\\…</code>: no "(GOD)" or archive-name folders, and archives that already hold a GOD game have just its TitleID folder moved in. Non-Xbox ISOs are skipped and kept.</small></div>
+        <div role="group" aria-label="Auto-convert ISOs" class="seg set-mt">
           <button type="button" data-auto-iso="off" aria-pressed="${N.settings.autoIsoMode === "off"}">Off</button>
           <button type="button" data-auto-iso="god" aria-pressed="${N.settings.autoIsoMode === "god"}">GOD</button>
           <button type="button" data-auto-iso="xex" aria-pressed="${N.settings.autoIsoMode === "xex"}">Extracted folder (XEX)</button>
@@ -3266,21 +3317,21 @@ function renderSettings() {
         <label class="switch"><input type="checkbox" data-set-autotu aria-label="Install title updates after extracting" ${N.settings.autoTu ? "checked" : ""}/><span></span></label></div>
       <div class="set-row"><div class="txt"><strong>Move DLC instead of copying</strong><small>Deletes the original DLC file only after the copy in the game folder is checked.</small></div>
         <label class="switch"><input type="checkbox" data-set-movedlc aria-label="Move DLC instead of copying" ${N.settings.moveDlc ? "checked" : ""}/><span></span></label></div>
-      <div class="set-row" style="display:block"><div class="txt"><strong>Game library folders</strong><small>Where Unpack looks for your games (GOD folders or <code>Content\\0000000000000000</code>). The chosen output folder is always included.</small></div>
-        <div class="cmp-list" style="margin-top:.5rem">${N.settings.libraries.map((l, i) => `<div class="row"><span class="name" title="${escapeHtml(l)}">${escapeHtml(l)}</span><button class="btn btn-quiet" data-lib-remove="${i}" type="button" aria-label="Remove">${SV(14, 14, ICONS.x)}</button></div>`).join("") || `<div class="preview-empty" style="min-height:3rem">No extra folders yet.</div>`}</div>
-        ${foundRoots ? `<div class="cmp-list" style="margin-top:.5rem">${foundRoots.length ? foundRoots.map((r, i) => `<div class="row"><span class="name">${escapeHtml(r)}</span><button class="btn btn-secondary btn-sm" data-root-add="${i}" type="button" ${N.settings.libraries.includes(r) ? "disabled" : ""}>${N.settings.libraries.includes(r) ? "Added" : "Add"}</button></div>`).join("") : `<div class="preview-empty" style="min-height:3rem">No Content folders found at the top of any drive.</div>`}</div>` : ""}
-        <div class="actions" style="margin-top:.5rem"><button class="btn btn-secondary btn-sm" data-lib-add type="button">Add folder…</button><button class="btn btn-secondary btn-sm" data-lib-scan type="button">Scan drives for Content folders</button></div></div>
+      <div class="set-row set-stack"><div class="txt"><strong>Game library folders</strong><small>Where Unpack looks for your games (GOD folders or <code>Content\\0000000000000000</code>). The chosen output folder is always included.</small></div>
+        <div class="cmp-list set-mt">${N.settings.libraries.map((l, i) => `<div class="row"><span class="name" title="${escapeHtml(l)}">${escapeHtml(l)}</span><button class="btn btn-quiet" data-lib-remove="${i}" type="button" aria-label="Remove">${SV(14, 14, ICONS.x)}</button></div>`).join("") || `<div class="preview-empty set-empty">No extra folders yet.</div>`}</div>
+        ${foundRoots ? `<div class="cmp-list set-mt">${foundRoots.length ? foundRoots.map((r, i) => `<div class="row"><span class="name">${escapeHtml(r)}</span><button class="btn btn-secondary btn-sm" data-root-add="${i}" type="button" ${N.settings.libraries.includes(r) ? "disabled" : ""}>${N.settings.libraries.includes(r) ? "Added" : "Add"}</button></div>`).join("") : `<div class="preview-empty set-empty">No Content folders found at the top of any drive.</div>`}</div>` : ""}
+        <div class="actions set-mt"><button class="btn btn-secondary btn-sm" data-lib-add type="button">Add folder…</button><button class="btn btn-secondary btn-sm" data-lib-scan type="button">Scan drives for Content folders</button></div></div>
       <div class="set-row"><div class="txt"><strong>Multi-disc ISO companions</strong><small>When another disc of the same game sits next to an ISO, choose whether to offer it, always add it to the convert queue, or never prompt. Disc 2 alone is never added without disc 1.</small></div>
         <select data-set-companion aria-label="Companion disc mode"><option value="ask" ${N.settings.companionDiscMode === "ask" ? "selected" : ""}>Ask</option><option value="always" ${N.settings.companionDiscMode === "always" ? "selected" : ""}>Always add</option><option value="never" ${N.settings.companionDiscMode === "never" ? "selected" : ""}>Never</option></select></div>
       <div class="set-row"><div class="txt"><strong>Library cover art from the internet</strong><small>Off by default. When on, Unpack may download cover images by TitleID while building the library index.</small></div>
         <label class="switch"><input type="checkbox" data-set-covernet aria-label="Download cover art" ${N.settings.coverArtNetwork ? "checked" : ""}/><span></span></label></div>
       <div class="set-row"><div class="txt"><strong>USB wizard</strong><small>Create the standard <code>Content</code> folder layout on a USB drive.</small></div>
         <button class="btn btn-secondary btn-sm" data-usb-wizard type="button">Prepare USB…</button></div>
-      ${usbWizardWarn ? `<div class="warn-text" data-usb-warn role="status" style="white-space:pre-line;margin:.2rem 0 .6rem">⚠ ${escapeHtml(usbWizardWarn)}</div>` : ""}
+      ${usbWizardWarn ? `<div class="warn-text set-warn" data-usb-warn role="status">⚠ ${escapeHtml(usbWizardWarn)}</div>` : ""}
     </div>` : ""}
     <div class="set-group"><h4>Downloads</h4>
-      <div class="set-row"><div class="txt"><strong>Max download size (GB)</strong><small>Refuses a transfer larger than this (default 20). Applies to Download from link.</small></div>
-        <input type="number" min="1" max="500" step="1" data-set-dlmax value="${N.settings.dlMaxGb}" style="width:5rem" aria-label="Max download size in GB" /></div>
+      <div class="set-row set-stack"><div class="txt"><strong>Max download size (GB)</strong><small>Refuses a transfer larger than this (default 20). Applies to Download from link.</small></div>
+        <input type="number" min="1" max="500" step="1" data-set-dlmax class="set-mt" value="${N.settings.dlMaxGb}" aria-label="Max download size in GB" /></div>
     </div>
     <div class="set-group"><h4>Extraction</h4>
       <div class="set-row"><div class="txt"><strong>Open zips inside zips</strong><small>An archive found inside an extracted archive is opened too (up to 3 levels deep). One that would unpack to a suspicious size or more than the drive can hold is left closed with a warning. Off leaves inner archives closed; the summary says how many.</small></div>
@@ -3302,7 +3353,7 @@ function renderSettings() {
       <div class="set-row"><div class="txt"><strong>Export / import settings</strong><small>One JSON file. Console FTP passwords are optional — exporting them is warned in the dialog.</small></div>
         <div class="actions"><button class="btn btn-secondary btn-sm" data-set-export type="button">Export…</button><button class="btn btn-secondary btn-sm" data-set-import type="button">Import…</button></div></div>
     </div>
-    <div class="actions" style="justify-content:flex-end"><button class="btn btn-primary" data-settings-close type="button">Done</button></div>
+    <div class="actions set-done"><button class="btn btn-primary" data-settings-close type="button">Done</button></div>
   </div></div>`;
 }
 function bindSettings() {
@@ -4332,7 +4383,7 @@ async function extractAllNative() {
     dest = await N.pickFolder("Extract all into…");
     if (!dest) return;
   } else if (settings().destMode === "folder" && settings().destPath) dest = settings().destPath;
-  if (dest && !(await preflightDest(dest, ready.map((j) => j.path)))) return;
+  if (dest && !(await preflightDest(dest, ready.map((j) => j.path), N.settings.autoIsoMode))) return;
   for (const job of ready) await enqueue(job, dest ? { dest } : {});
 }
 
@@ -4387,7 +4438,7 @@ window.addEventListener("keydown", (e) => {
     else if (folderConfirm) { folderConfirm = null; render(); }
     else if (modsView) { modsView = null; render(); }
     else if (xboxView && !xboxView.sends.some((s) => s.running)) { xboxView = null; render(); }
-    else if (libraryView) { libraryView = null; render(); }
+    else if (libraryView) closeLibrary();
     else if (settingsOpen) { settingsOpen = false; confirmDelIso = false; foundRoots = null; render(); }
   }
 });

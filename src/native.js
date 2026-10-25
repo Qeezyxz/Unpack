@@ -161,10 +161,19 @@ export function onJobProgress(id, fn) {
   progressHandlers.set(id, fn);
   return () => progressHandlers.delete(id);
 }
+const libraryScanHandlers = new Map();
+export function onLibraryScanProgress(id, fn) {
+  libraryScanHandlers.set(id, fn);
+  return () => libraryScanHandlers.delete(id);
+}
 export async function initNativeEvents() {
   await T.event.listen("job-progress", (e) => {
     const p = e.payload;
     progressHandlers.get(p.id)?.(p);
+  });
+  await T.event.listen("library-scan-progress", (e) => {
+    const p = e.payload;
+    libraryScanHandlers.get(p.id)?.(p);
   });
 }
 

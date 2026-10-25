@@ -7,6 +7,7 @@ pub mod discord;
 pub mod discs;
 pub mod dlc;
 pub mod download;
+pub mod fatstage;
 pub mod ftp;
 pub mod gamedb;
 pub mod god;
@@ -183,6 +184,7 @@ async fn extract_archive(
     skip_junk: bool,
     seal_isos: Option<bool>,
     nested: Option<bool>,
+    auto_iso: Option<String>,
 ) -> Result<archive::ExtractResult, String> {
     // Dest must be a picked folder, or (Extract beside) the archive's own parent.
     let dest_path = match grants.check(&dest) {
@@ -210,9 +212,22 @@ async fn extract_archive(
     let jid = id.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let archive_path = PathBuf::from(&path);
+        let here = layout == "here";
+        let stage = fat_stage_for(
+            &exe,
+            &archive_path,
+            opt_pw(&password),
+            &dest_path,
+            auto_iso.as_deref().unwrap_or("off"),
+            here,
+            &jid,
+        )?;
         let opts = ExtractOptions {
             archive: &archive_path,
-            dest_parent: &dest_path,
+            dest_parent: stage
+                .as_ref()
+                .map(|s| s.dir.as_path())
+                .unwrap_or(&dest_path),
             password: opt_pw(&password),
             collision: Collision::parse(&collision),
             layout: if layout == "here" {
@@ -234,6 +249,10 @@ async fn extract_archive(
             );
         };
         let r = archive::extract(&exe, &opts, &jobs, &jid, &mut cb);
+        let r = match stage {
+            Some(st) => finish_fat_stage(r, &st, &dest_path),
+            None => r,
+        };
         if let (Ok(res), Some(true)) = (&r, seal_isos) {
             cb(100, "Fingerprinting extracted ISOs");
             god::seal_tokens(&res.iso_tokens);
@@ -261,6 +280,196 @@ async fn extract_archive(
         grants.grant_session(Path::new(&r.output));
     }
     Ok(r)
+}
+
+struct FatStage {
+    dir: PathBuf,
+    root: PathBuf,
+    isos: Vec<String>,
+}
+
+/// FAT32 destination: refuse only a single output file of 4 GiB or more. An oversized ISO with
+/// Auto ISO → GOD/XEX on is extracted into a staging folder on a non-FAT drive instead.
+fn fat_stage_for(
+    exe: &Path,
+    archive_path: &Path,
+    pw: Option<&str>,
+    dest: &Path,
+    auto_iso: &str,
+    here: bool,
+    job_id: &str,
+) -> Result<Option<FatStage>, String> {
+    let Some(fs) = safecopy::fs_type(dest).filter(|t| safecopy::is_fat(t)) else {
+        return Ok(None);
+    };
+    // Listing fails for encrypted names etc.; then 7-Zip's own error (with the FAT32 hint) decides.
+    let Ok(l) = archive::list(exe, archive_path, pw) else {
+        return Ok(None);
+    };
+    let files: Vec<(String, u64)> = l
+        .entries
+        .iter()
+        .filter(|e| !e.dir)
+        .map(|e| (e.path.clone(), e.size))
+        .collect();
+    let fatstage::Plan::Stage(big) = fatstage::plan(Some(&fs), &files, auto_iso)? else {
+        return Ok(None);
+    };
+    let isos: Vec<String> = big
+        .iter()
+        .map(|(n, _)| n.rsplit(['/', '\\']).next().unwrap_or(n).to_string())
+        .collect();
+    if here {
+        return Err(format!(
+            "{} is over 4 GB and the destination is {fs}. Auto ISO → GOD only runs when the archive gets its own folder, so use Extract (not Extract here).",
+            safecopy::plain(&isos.join(", "))
+        ));
+    }
+    let need: u64 = files.iter().map(|f| f.1).sum();
+    let root = fatstage::pick_stage_root(
+        need,
+        &fatstage::stage_candidates(),
+        &safecopy::plain(&isos.join(", ")),
+    )?;
+    let tag: String = job_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(32)
+        .collect();
+    let dir = fatstage::new_job_dir(&root, &tag).map_err(|e| {
+        format!(
+            "Couldn't create a staging folder in {}: {e}",
+            root.display()
+        )
+    })?;
+    Ok(Some(FatStage { dir, root, isos }))
+}
+
+/// Where a staged extraction's other files go: the same rule as an unstaged extract of an
+/// archive holding ISOs (archive.rs) — never inside a console `Content` / `Content\<profile>`
+/// folder, but next to the `Content` folder; the GOD game itself still goes into the profile.
+fn leftover_parent(dest: &Path) -> PathBuf {
+    let in_profile = contentdir::is_profile_dir(dest)
+        || dest
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("content"));
+    contentdir::resolve(dest)
+        .filter(|_| in_profile)
+        .and_then(|pf| contentdir::outside_content(&pf))
+        .unwrap_or_else(|| dest.to_path_buf())
+}
+
+/// Move everything except the oversized-ISO staging copies into a new folder on the FAT drive and
+/// point the ISO tokens at the real destination. The staging folder is removed on any failure.
+fn finish_fat_stage(
+    r: Result<archive::ExtractResult, String>,
+    st: &FatStage,
+    dest: &Path,
+) -> Result<archive::ExtractResult, String> {
+    let cleanup = || {
+        fatstage::release_job(&st.dir);
+        let _ = std::fs::remove_dir_all(&st.dir);
+    };
+    let mut res = match r {
+        Ok(res) => res,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    let staged_out = PathBuf::from(&res.output);
+    let name = staged_out
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Extracted".into());
+    // Only the ISOs over 4 GB stay in staging; smaller ISOs and other files go to the FAT drive.
+    let keep: Vec<PathBuf> = res
+        .isos
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| {
+            std::fs::metadata(p)
+                .map(|m| m.len() > safecopy::FAT_MAX)
+                .unwrap_or(false)
+        })
+        .collect();
+    // 1.7.3: bound for a Content profile, extras (readme, NFO, links, pictures) are skipped
+    // rather than left in a folder next to Content. Real game files keep the safe placement.
+    if leftover_parent(dest) != dest {
+        if let Some(w) = archive::drop_extras(&staged_out) {
+            res.warnings.push(w);
+        }
+    }
+    let moved = (|| -> std::io::Result<(PathBuf, u64)> {
+        let real = archive::claim_dir(&leftover_parent(dest), &name)?;
+        let n = archive::move_tree_except(&staged_out, &real, &keep)?;
+        Ok((real, n))
+    })();
+    let (real, n) = match moved {
+        Ok(x) => x,
+        Err(e) => {
+            cleanup();
+            return Err(format!(
+                "Couldn't move the extracted files onto the destination: {e}"
+            ));
+        }
+    };
+    let remap = |p: &String| {
+        let pb = PathBuf::from(p);
+        if keep.contains(&pb) {
+            return p.clone();
+        }
+        pb.strip_prefix(&staged_out)
+            .map(|rel| real.join(rel).display().to_string())
+            .unwrap_or_else(|_| p.clone())
+    };
+    // ISOs that fit were moved: register them again at their new place (normal, unstaged).
+    let mut tokens = vec![];
+    let mut isos = vec![];
+    for (i, p) in res.isos.iter().enumerate() {
+        let pb = PathBuf::from(p);
+        if keep.contains(&pb) {
+            isos.push(p.clone());
+            tokens.push(res.iso_tokens.get(i).cloned().unwrap_or_default());
+        } else {
+            let np = remap(p);
+            let t = god::register_extracted(std::slice::from_ref(&np), &real, false);
+            isos.push(np);
+            tokens.push(t.into_iter().next().unwrap_or_default());
+        }
+    }
+    god::mark_staged(
+        &tokens
+            .iter()
+            .zip(&isos)
+            .filter(|(_, p)| keep.contains(&PathBuf::from(p)))
+            .map(|(t, _)| t.clone())
+            .collect::<Vec<_>>(),
+        &st.dir,
+        dest,
+    );
+    res.dlcs = res.dlcs.iter().map(remap).collect();
+    res.isos = isos;
+    res.iso_tokens = tokens;
+    if n == 0 {
+        let _ = std::fs::remove_dir(&real);
+        res.output = dest.display().to_string();
+        res.created = false;
+    } else {
+        res.output = real.display().to_string();
+        res.created = true;
+    }
+    res.warnings.push(format!(
+        "{} is over 4 GB, so it was extracted to a temporary folder in {} and is converted from there onto this FAT32 drive. The temporary copy is deleted afterwards.",
+        safecopy::plain(&st.isos.join(", ")),
+        st.root.display()
+    ));
+    // Registered ISO tokens keep the folder in use from here on.
+    fatstage::release_job(&st.dir);
+    if !god::stage_in_use(&st.dir) {
+        cleanup();
+    }
+    Ok(res)
 }
 
 #[tauri::command]
@@ -705,8 +914,10 @@ async fn mod_identify(
     learned: Option<Vec<modnames::Learned>>,
 ) -> Result<Vec<Result<mods::ModInfo, String>>, String> {
     let hints = hints.unwrap_or_default();
-    let checked: Vec<Result<PathBuf, String>> =
-        paths.iter().map(|p| mods::check_mod_path(&grants, p)).collect();
+    let checked: Vec<Result<PathBuf, String>> = paths
+        .iter()
+        .map(|p| mods::check_mod_path(&grants, p))
+        .collect();
     let learned: Vec<modnames::Learned> = mods::merge_learned(
         mods::merge_learned(
             learned.unwrap_or_default().into_iter().take(1000).collect(),
@@ -1211,13 +1422,19 @@ fn preflight_local(
     dest: String,
     paths: Vec<String>,
     list_cap: Option<u64>,
+    auto_iso: Option<String>,
 ) -> Result<preflight::PreflightReport, String> {
     let dest = PathBuf::from(dest);
     let cap = list_cap.unwrap_or(64 << 20);
     let pbs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
     let need = preflight::estimate_local_need(&pbs).min(cap);
-    let large = preflight::large_files_in(&pbs);
-    Ok(preflight::check_local_dest(&dest, need, &large))
+    let fat_blocks = preflight::fat_blocks(
+        &dest,
+        &pbs,
+        seven_zip().ok().as_deref(),
+        auto_iso.as_deref().unwrap_or("off"),
+    );
+    Ok(preflight::check_local_dest(&dest, need, &fat_blocks))
 }
 
 #[tauri::command]
@@ -1270,9 +1487,11 @@ async fn god_verify_only(path: String) -> Result<String, String> {
 #[tauri::command]
 async fn library_index(
     app: AppHandle,
+    jobs: State<'_, Jobs>,
     libraries: Vec<String>,
     allow_cover_network: bool,
     max_age_secs: Option<u64>,
+    scan_id: Option<String>,
 ) -> Result<library::LibraryIndex, String> {
     let dir = app
         .path()
@@ -1284,16 +1503,39 @@ async fn library_index(
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
         .collect();
-    tauri::async_runtime::spawn_blocking(move || {
-        library::index_cached(
+    let scan_id = scan_id.unwrap_or_default();
+    if !scan_id.is_empty() {
+        jobs.register(&scan_id);
+    }
+    let registry = jobs.inner().clone();
+    let jid = scan_id.clone();
+    let app_emit = app.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        let mut emit = |prog: library::ScanProgress| {
+            if jid.is_empty() {
+                return;
+            }
+            let mut p = prog;
+            p.id = jid.clone();
+            let _ = app_emit.emit("library-scan-progress", p);
+        };
+        let mut progress: Option<&mut dyn FnMut(library::ScanProgress)> = Some(&mut emit);
+        let cancelled = || !jid.is_empty() && registry.is_cancelled(&jid);
+        library::index_cached_with_progress(
             &libs,
             &dir,
             allow_cover_network,
             max_age_secs.unwrap_or(3600),
+            &mut progress,
+            &cancelled,
         )
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string());
+    if !scan_id.is_empty() {
+        jobs.finish(&scan_id);
+    }
+    res?
 }
 
 #[tauri::command]
@@ -1468,11 +1710,15 @@ async fn saves_recover(consoles: Vec<SavesRecoverConsole>) -> Result<Vec<String>
     tauri::async_runtime::spawn_blocking(move || {
         let mut out = vec![];
         for k in consoles.iter().take(10) {
-            let Ok(con) = ftp_console(&k.host, k.port, &k.user, &k.pass) else { continue };
+            let Ok(con) = ftp_console(&k.host, k.port, &k.user, &k.pass) else {
+                continue;
+            };
             if !saves::has_pending(&con) {
                 continue;
             }
-            let Ok(_g) = ftp_lock("Send to Xbox", "save restore repair") else { continue };
+            let Ok(_g) = ftp_lock("Send to Xbox", "save restore repair") else {
+                continue;
+            };
             if let Ok(m) = saves::recover_pending(&con) {
                 out.extend(m);
             }
@@ -1726,6 +1972,139 @@ fn discord_set_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
 #[cfg(test)]
 mod launch_tests {
     use super::*;
+
+    /// Bully case: a 7 GB ISO + a small .txt bound for a FAT32 drive with Auto ISO → GOD.
+    /// The .txt lands on the destination, the ISO waits in staging and points its output at the
+    /// destination, and the staging folder is gone once the ISO has been taken for conversion.
+    #[test]
+    fn fat_stage_moves_small_files_and_cleans_up_staging() {
+        let t = crate::testutil::TmpDir::new("cs31-fat-stage");
+        let dest = t.path().join("Content").join("0000000000000000");
+        let root = t.path().join("tmp").join(fatstage::STAGE_DIR);
+        std::fs::create_dir_all(&dest).unwrap();
+        let dir = archive::claim_dir(
+            &{
+                std::fs::create_dir_all(&root).unwrap();
+                root.clone()
+            },
+            "job-1",
+        )
+        .unwrap();
+        let out = dir.join("Bully (USA)");
+        std::fs::create_dir_all(&out).unwrap();
+        let iso = out.join("Bully (USA).iso");
+        std::fs::File::create(&iso)
+            .unwrap()
+            .set_len(7_000_000_000)
+            .unwrap(); // sparse
+        std::fs::write(out.join("readme.txt"), b"hi").unwrap();
+        let isos = vec![iso.display().to_string()];
+        let tokens = god::register_extracted(&isos, &out, true);
+        let res = archive::ExtractResult {
+            output: out.display().to_string(),
+            skipped: false,
+            warnings: vec![],
+            files: 2,
+            isos,
+            merged: false,
+            iso_tokens: tokens.clone(),
+            dlcs: vec![],
+            created: true,
+            nested: 0,
+            inner_left: 0,
+        };
+        let st = FatStage {
+            dir: dir.clone(),
+            root: root.clone(),
+            isos: vec!["Bully (USA).iso".into()],
+        };
+        let r = finish_fat_stage(Ok(res), &st, &dest).unwrap();
+        // 1.7.3: bound for a Content profile, the readme is skipped (no stray folder next to
+        // Content) and the summary says so.
+        let outside = t.path().join("Bully (USA)");
+        assert!(!outside.exists(), "no leftover folder next to Content");
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "profile stays clean");
+        assert_eq!(PathBuf::from(&r.output), dest);
+        assert!(r.warnings.iter().any(|w| w.contains("Skipped 1 extra file") && w.contains("readme.txt")), "{:?}", r.warnings);
+        assert!(iso.exists() && god::stage_in_use(&dir));
+        assert!(
+            r.warnings.iter().any(|w| w.contains("temporary")),
+            "{:?}",
+            r.warnings
+        );
+        let (_, root2, del, _, _, guard) = god::take_extracted_token(&r.iso_tokens[0]).unwrap();
+        assert!(!del);
+        assert_eq!(god::out_parent_for(&root2, &guard), dest);
+        drop(guard); // conversion finished, failed or was cancelled
+        assert!(!iso.exists() && !dir.exists(), "staging must be removed");
+    }
+
+    /// 1.7.3: a real game file next to the big ISO keeps the safe placement (next to Content);
+    /// only the extras are dropped.
+    #[test]
+    fn fat_stage_keeps_game_files_drops_extras() {
+        let t = crate::testutil::TmpDir::new("cs32-fat-extras");
+        let dest = t.path().join("Content").join("0000000000000000");
+        std::fs::create_dir_all(&dest).unwrap();
+        let root = t.path().join("tmp").join(fatstage::STAGE_DIR);
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = archive::claim_dir(&root, "job-9").unwrap();
+        let out = dir.join("Game");
+        std::fs::create_dir_all(out.join("art")).unwrap();
+        std::fs::create_dir_all(out.join("Tools")).unwrap();
+        let iso = out.join("Game.iso");
+        std::fs::File::create(&iso).unwrap().set_len(5_000_000_000).unwrap();
+        std::fs::write(out.join("Tools").join("default.xex"), b"XEX2").unwrap();
+        std::fs::write(out.join("Tools").join("readme.txt"), b"keep").unwrap();
+        std::fs::write(out.join("Vimm's Lair.txt"), b"x").unwrap();
+        std::fs::write(out.join("art").join("cover.JPG"), b"x").unwrap();
+        let isos = vec![iso.display().to_string()];
+        let tokens = god::register_extracted(&isos, &out, true);
+        let res = archive::ExtractResult {
+            output: out.display().to_string(),
+            skipped: false,
+            warnings: vec![],
+            files: 4,
+            isos,
+            merged: false,
+            iso_tokens: tokens.clone(),
+            dlcs: vec![],
+            created: true,
+            nested: 0,
+            inner_left: 0,
+        };
+        let st = FatStage { dir: dir.clone(), root, isos: vec!["Game.iso".into()] };
+        let r = finish_fat_stage(Ok(res), &st, &dest).unwrap();
+        let outside = t.path().join("Game");
+        assert_eq!(std::fs::read(outside.join("Tools").join("default.xex")).unwrap(), b"XEX2");
+        assert_eq!(std::fs::read(outside.join("Tools").join("readme.txt")).unwrap(), b"keep", "R33: inside a game folder nothing goes");
+        assert!(!outside.join("Vimm's Lair.txt").exists() && !outside.join("art").exists());
+        assert!(r.warnings.iter().any(|w| w.contains("Skipped 2 extra files")), "{:?}", r.warnings);
+        let (_, _, _, _, _, guard) = god::take_extracted_token(&tokens[0]).unwrap();
+        drop(guard);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn fat_stage_plain_folder_dest_keeps_files_in_dest() {
+        assert_eq!(leftover_parent(Path::new("/x/Games")), PathBuf::from("/x/Games"));
+        assert_eq!(leftover_parent(Path::new("/usb/Content/0000000000000000")), PathBuf::from("/usb"));
+        assert_eq!(leftover_parent(Path::new("/usb/Content")), PathBuf::from("/usb"));
+    }
+
+    #[test]
+    fn fat_stage_failure_removes_staging() {
+        let t = crate::testutil::TmpDir::new("cs31-fat-stage-fail");
+        let dir = t.path().join("job-2");
+        std::fs::create_dir_all(dir.join("x")).unwrap();
+        let st = FatStage {
+            dir: dir.clone(),
+            root: t.path().into(),
+            isos: vec![],
+        };
+        assert!(finish_fat_stage(Err("CANCELLED".into()), &st, t.path()).is_err());
+        assert!(!dir.exists());
+    }
     #[test]
     fn parses_explorer_args() {
         // Own folder per process: parallel test runs shared fixed names in the temp dir (R18 flake).

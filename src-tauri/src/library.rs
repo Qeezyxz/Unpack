@@ -19,19 +19,41 @@ pub struct Game {
     pub dlc_count: usize,
     pub dlc_size: u64,
     pub tu_count: usize,
+    /// True when `game_size` stopped counting at the file cap (shown as "about").
+    #[serde(default)]
+    pub size_approx: bool,
 }
 
-fn dir_size(p: &Path) -> (u64, usize) {
+/// On-disk library index format generation (bump when scan semantics change).
+pub const INDEX_CACHE_VERSION: u32 = 3;
+
+/// Hard cap so a mis-pointed library root cannot walk forever.
+const SCAN_MAX_FOLDERS: usize = 50_000;
+
+/// An extracted game's size stops counting after this many files (then shown as approximate).
+const EXTRACTED_SIZE_MAX_FILES: usize = 20_000;
+
+fn dir_size_bounded(p: &Path, max_entries: usize) -> (u64, usize) {
     let (mut size, mut files) = (0, 0);
     let mut st = vec![p.to_path_buf()];
     while let Some(d) = st.pop() {
+        if files >= max_entries {
+            break;
+        }
         let Ok(rd) = fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
-            let Ok(m) = fs::symlink_metadata(e.path()) else {
+            if files >= max_entries {
+                break;
+            }
+            let path = e.path();
+            if is_reparse_point(&path) {
+                continue;
+            }
+            let Ok(m) = fs::symlink_metadata(&path) else {
                 continue;
             };
             if m.is_dir() {
-                st.push(e.path());
+                st.push(path);
             } else if m.is_file() {
                 size += m.len();
                 files += 1;
@@ -39,6 +61,327 @@ fn dir_size(p: &Path) -> (u64, usize) {
         }
     }
     (size, files)
+}
+
+/// GOD `00007000` / `00004000`: headers plus one level inside sibling `*.data` folders only.
+fn god_content_size(ct_dir: &Path) -> u64 {
+    let Ok(rd) = fs::read_dir(ct_dir) else {
+        return 0;
+    };
+    let mut size = 0u64;
+    for e in rd.flatten() {
+        let path = e.path();
+        if is_reparse_point(&path) {
+            continue;
+        }
+        let Ok(m) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if m.is_file() {
+            size += m.len();
+        } else if m.is_dir() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".data") {
+                size += count_files(&path).0;
+            }
+        }
+    }
+    size
+}
+
+fn god_game_size(tid_dir: &Path) -> u64 {
+    god_content_size(&tid_dir.join("00007000")) + god_content_size(&tid_dir.join("00004000"))
+}
+
+fn is_reparse_point(path: &Path) -> bool {
+    match (fs::symlink_metadata(path), fs::metadata(path)) {
+        (Ok(a), Ok(b)) => a.file_type() != b.file_type() || a.file_type().is_symlink(),
+        _ => false,
+    }
+}
+
+/// `fs::canonicalize` without Windows' `\\?\` prefix (so paths still look like `D:\Content`).
+pub(crate) fn canonical_root(p: &Path) -> PathBuf {
+    let Ok(c) = fs::canonicalize(p) else {
+        return p.to_path_buf();
+    };
+    strip_verbatim(c)
+}
+
+fn strip_verbatim(c: PathBuf) -> PathBuf {
+    let s = c.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        c
+    }
+}
+
+fn is_profile_name(name: &str) -> bool {
+    name.len() == 16 && name.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_listable_dir(path: &Path) -> bool {
+    let Ok(m) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    m.is_dir() && !m.file_type().is_symlink() && !is_reparse_point(path)
+}
+
+fn has_game_packages(tid_dir: &Path) -> bool {
+    ["00007000", "00004000"]
+        .iter()
+        .any(|c| is_listable_dir(&tid_dir.join(c)))
+}
+
+fn dedupe_key(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ScanProgress {
+    #[serde(default)]
+    pub id: String,
+    pub folders_scanned: usize,
+    pub games_found: usize,
+    pub message: String,
+    pub warnings: Vec<String>,
+    pub done: bool,
+    pub error: Option<String>,
+}
+
+struct ScanCtx {
+    out: Vec<Game>,
+    seen: std::collections::HashSet<PathBuf>,
+    folders_scanned: usize,
+    warnings: Vec<String>,
+    cancelled: bool,
+}
+
+fn emit_scan_progress(
+    ctx: &ScanCtx,
+    on_progress: &mut Option<&mut dyn FnMut(ScanProgress)>,
+    message: &str,
+    done: bool,
+    error: Option<String>,
+) {
+    if let Some(cb) = on_progress.as_mut() {
+        cb(ScanProgress {
+            id: String::new(),
+            folders_scanned: ctx.folders_scanned,
+            games_found: ctx.out.len(),
+            message: message.into(),
+            warnings: ctx.warnings.clone(),
+            done,
+            error,
+        });
+    }
+}
+
+impl ScanCtx {
+    fn tick(&self, on_progress: &mut Option<&mut dyn FnMut(ScanProgress)>, message: &str) {
+        emit_scan_progress(self, on_progress, message, false, None);
+    }
+
+    fn note_warn(&mut self, msg: String) {
+        if self.warnings.len() < 32 {
+            self.warnings.push(msg);
+        }
+    }
+
+    fn push_god(
+        &mut self,
+        tid_dir: &Path,
+        tid: &str,
+        on_progress: &mut Option<&mut dyn FnMut(ScanProgress)>,
+    ) {
+        let key = dedupe_key(tid_dir);
+        if !self.seen.insert(key) {
+            return;
+        }
+        let tid = tid.to_ascii_uppercase();
+        let (dlc_size, dlc_count) = count_files(&tid_dir.join("00000002"));
+        let (_, tu_count) = count_files(&tid_dir.join("000B0000"));
+        self.out.push(Game {
+            name: game_name(tid_dir, &tid),
+            title_id: tid,
+            path: tid_dir.display().to_string(),
+            kind: "god".into(),
+            game_size: god_game_size(tid_dir),
+            dlc_count,
+            dlc_size,
+            tu_count,
+            size_approx: false,
+        });
+        self.tick(on_progress, "Found games");
+    }
+
+    fn push_extracted(
+        &mut self,
+        dir: &Path,
+        tid: String,
+        name: String,
+        on_progress: &mut Option<&mut dyn FnMut(ScanProgress)>,
+    ) {
+        let key = dedupe_key(dir);
+        if !self.seen.insert(key) {
+            return;
+        }
+        let (game_size, files) = dir_size_bounded(dir, EXTRACTED_SIZE_MAX_FILES);
+        self.out.push(Game {
+            name,
+            title_id: tid,
+            path: dir.display().to_string(),
+            kind: "extracted".into(),
+            game_size,
+            dlc_count: 0,
+            dlc_size: 0,
+            tu_count: 0,
+            size_approx: files >= EXTRACTED_SIZE_MAX_FILES,
+        });
+        self.tick(on_progress, "Found games");
+    }
+
+    fn scan_profile(
+        &mut self,
+        profile: &Path,
+        cancelled: &dyn Fn() -> bool,
+        on_progress: &mut Option<&mut dyn FnMut(ScanProgress)>,
+    ) -> bool {
+        if !is_listable_dir(profile) {
+            return true;
+        }
+        self.folders_scanned += 1;
+        if self.folders_scanned.is_multiple_of(8) {
+            self.tick(on_progress, "Scanning library folders");
+        }
+        if self.folders_scanned > SCAN_MAX_FOLDERS {
+            self.note_warn(format!(
+                "Stopped after scanning {} folders (limit reached).",
+                SCAN_MAX_FOLDERS
+            ));
+            return false;
+        }
+        let rd = match fs::read_dir(profile) {
+            Ok(r) => r,
+            Err(e) => {
+                self.note_warn(format!("{}: {}", profile.display(), e));
+                return true;
+            }
+        };
+        for e in rd.flatten() {
+            if cancelled() {
+                self.cancelled = true;
+                return false;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let p = e.path();
+            if !is_listable_dir(&p) {
+                continue;
+            }
+            if is_tid(&name) && has_game_packages(&p) {
+                self.push_god(&p, &name, on_progress);
+            } else if let Some((tid, gname)) = crate::iso_extract::folder_title_id(&p) {
+                self.push_extracted(&p, tid, gname.unwrap_or(name), on_progress);
+            }
+        }
+        true
+    }
+
+    fn scan_unpack_wrappers(
+        &mut self,
+        lib: &Path,
+        cancelled: &dyn Fn() -> bool,
+        on_progress: &mut Option<&mut dyn FnMut(ScanProgress)>,
+    ) -> bool {
+        let rd = match fs::read_dir(lib) {
+            Ok(r) => r,
+            Err(_) => return true,
+        };
+        for e in rd.flatten() {
+            if cancelled() {
+                self.cancelled = true;
+                return false;
+            }
+            let wrap = e.path();
+            if !is_listable_dir(&wrap) {
+                continue;
+            }
+            let wname = e.file_name().to_string_lossy().into_owned();
+            if is_tid(&wname) || is_profile_name(&wname) || wname.eq_ignore_ascii_case("Content") {
+                continue;
+            }
+            self.folders_scanned += 1;
+            if self.folders_scanned > SCAN_MAX_FOLDERS {
+                self.note_warn(format!(
+                    "Stopped after scanning {} folders (limit reached).",
+                    SCAN_MAX_FOLDERS
+                ));
+                return false;
+            }
+            let inner = match fs::read_dir(&wrap) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.note_warn(format!("{}: {}", wrap.display(), e));
+                    continue;
+                }
+            };
+            for e2 in inner.flatten() {
+                if cancelled() {
+                    self.cancelled = true;
+                    return false;
+                }
+                let n2 = e2.file_name().to_string_lossy().into_owned();
+                let p2 = e2.path();
+                if !is_listable_dir(&p2) {
+                    continue;
+                }
+                if is_tid(&n2) && has_game_packages(&p2) {
+                    self.push_god(&p2, &n2, on_progress);
+                } else if let Some((tid, gname)) = crate::iso_extract::folder_title_id(&p2) {
+                    self.push_extracted(&p2, tid, gname.unwrap_or(n2), on_progress);
+                }
+            }
+        }
+        true
+    }
+}
+
+fn push_profile_candidate(profiles: &mut Vec<PathBuf>, p: PathBuf) {
+    if is_listable_dir(&p) {
+        profiles.push(p);
+    }
+}
+
+fn profile_dirs_for_lib(lib: &Path) -> Vec<PathBuf> {
+    let mut profiles = Vec::new();
+    // 1.7.0 also listed TitleID folders straight under the library folder and under
+    // <lib>\Games (a plain "GOD games" folder without a profile name); keep doing that.
+    push_profile_candidate(&mut profiles, lib.to_path_buf());
+    push_profile_candidate(&mut profiles, lib.join("Games"));
+    // Every profile folder (16 hex digits), not just the shared 0000000000000000 one,
+    // directly under the root and under <root>\Content. One read_dir each, no deeper.
+    for parent in [lib.to_path_buf(), lib.join("Content")] {
+        push_profile_candidate(&mut profiles, parent.join("0000000000000000"));
+        if let Ok(rd) = fs::read_dir(&parent) {
+            let mut others: Vec<PathBuf> = rd
+                .flatten()
+                .filter(|e| is_profile_name(&e.file_name().to_string_lossy()))
+                .map(|e| e.path())
+                .collect();
+            others.sort();
+            for p in others {
+                push_profile_candidate(&mut profiles, p);
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    profiles
+        .into_iter()
+        .filter(|p| seen.insert(p.display().to_string().to_ascii_lowercase()))
+        .collect()
 }
 
 fn count_files(p: &Path) -> (u64, usize) {
@@ -78,80 +421,93 @@ fn game_name(tid_dir: &Path, tid: &str) -> String {
 
 /// Games in the library folders (same places `dlc::find_game` looks), de-duplicated by path.
 pub fn scan(libraries: &[PathBuf]) -> Vec<Game> {
-    let mut out: Vec<Game> = vec![];
-    let mut seen = std::collections::HashSet::new();
+    let mut progress = None;
+    scan_with(libraries, &mut progress, &|| false).games
+}
+
+/// Scan with optional progress callbacks and cancellation.
+pub fn scan_with(
+    libraries: &[PathBuf],
+    on_progress: &mut Option<&mut dyn FnMut(ScanProgress)>,
+    cancelled: &dyn Fn() -> bool,
+) -> ScanResult {
+    let mut ctx = ScanCtx {
+        out: vec![],
+        seen: std::collections::HashSet::new(),
+        folders_scanned: 0,
+        warnings: vec![],
+        cancelled: false,
+    };
     for lib in libraries {
-        let mut parents = vec![
-            lib.clone(),
-            lib.join("Games"),
-            lib.join("0000000000000000"),
-            lib.join("Content").join("0000000000000000"),
-        ];
-        if let Ok(rd) = fs::read_dir(lib) {
-            parents.extend(
-                rd.flatten()
-                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                    .map(|e| e.path()),
-            );
+        if cancelled() {
+            ctx.cancelled = true;
+            break;
         }
-        for parent in parents {
-            let Ok(rd) = fs::read_dir(&parent) else {
+        // The root itself may be a symlink/junction the user picked on purpose: resolve it once,
+        // and keep refusing links below it.
+        let lib = canonical_root(lib);
+        let lib = &lib;
+        if let Some(name) = lib.file_name() {
+            let n = name.to_string_lossy();
+            if is_tid(&n) && has_game_packages(lib) {
+                ctx.push_god(lib, &n, on_progress);
                 continue;
-            };
-            for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                let p = e.path();
-                if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    continue;
-                }
-                if is_tid(&name) {
-                    let has_game = ["00007000", "00004000"].iter().any(|c| p.join(c).is_dir());
-                    if has_game && seen.insert(fs::canonicalize(&p).unwrap_or(p.clone())) {
-                        let tid = name.to_ascii_uppercase();
-                        let game_size =
-                            dir_size(&p.join("00007000")).0 + dir_size(&p.join("00004000")).0;
-                        let (dlc_size, dlc_count) = count_files(&p.join("00000002"));
-                        let (_, tu_count) = count_files(&p.join("000B0000"));
-                        out.push(Game {
-                            name: game_name(&p, &tid),
-                            title_id: tid,
-                            path: p.display().to_string(),
-                            kind: "god".into(),
-                            game_size,
-                            dlc_count,
-                            dlc_size,
-                            tu_count,
-                        });
-                    }
-                    continue;
-                }
-                // Extracted XEX folders: default.xex / default.xbe at the top of the folder.
-                if let Some((tid, gname)) = crate::iso_extract::folder_title_id(&p) {
-                    if seen.insert(fs::canonicalize(&p).unwrap_or(p.clone())) {
-                        let (game_size, _) = dir_size(&p);
-                        let disp = gname.unwrap_or(name);
-                        out.push(Game {
-                            name: disp,
-                            title_id: tid,
-                            path: p.display().to_string(),
-                            kind: "extracted".into(),
-                            game_size,
-                            dlc_count: 0,
-                            dlc_size: 0,
-                            tu_count: 0,
-                        });
-                    }
-                }
             }
         }
+        for profile in profile_dirs_for_lib(lib) {
+            if !ctx.scan_profile(&profile, cancelled, on_progress) {
+                break;
+            }
+        }
+        if ctx.cancelled {
+            break;
+        }
+        // Profile folders (incl. the root and <root>\Games) already listed GOD and extracted
+        // games in one pass each; wrappers do the same one level down.
+        if !ctx.scan_unpack_wrappers(lib, cancelled, on_progress) {
+            break;
+        }
     }
-    out.sort_by(|a, b| {
+    ctx.out.sort_by(|a, b| {
         a.name
             .to_lowercase()
             .cmp(&b.name.to_lowercase())
             .then(a.path.cmp(&b.path))
     });
-    out
+    let msg = if ctx.cancelled {
+        "Scan cancelled".into()
+    } else {
+        format!(
+            "Scanned {} folders, found {} games",
+            ctx.folders_scanned,
+            ctx.out.len()
+        )
+    };
+    emit_scan_progress(
+        &ctx,
+        on_progress,
+        &msg,
+        true,
+        if ctx.cancelled {
+            Some("cancelled".into())
+        } else {
+            None
+        },
+    );
+    ScanResult {
+        games: ctx.out,
+        folders_scanned: ctx.folders_scanned,
+        warnings: ctx.warnings,
+        cancelled: ctx.cancelled,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    pub games: Vec<Game>,
+    pub folders_scanned: usize,
+    pub warnings: Vec<String>,
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Serialize, Clone, serde::Deserialize)]
@@ -165,6 +521,34 @@ pub struct LibraryIndex {
     /// True when served from the on-disk cache (the UI then refreshes in the background).
     #[serde(default)]
     pub cached: bool,
+    #[serde(default)]
+    pub cache_version: u32,
+    #[serde(default)]
+    pub scan_warnings: Vec<String>,
+}
+
+fn index_cache_valid(idx: &LibraryIndex, keys: &[String], now: u64, max_age_secs: u64) -> bool {
+    if idx.cache_version != INDEX_CACHE_VERSION {
+        return false;
+    }
+    if idx.libraries != keys {
+        return false;
+    }
+    // A scanned_at in the future (clock change or a hand-edited file) forces a rescan.
+    if idx.scanned_at > now || now - idx.scanned_at > max_age_secs {
+        return false;
+    }
+    // Every cached game must live under one of the library roots (as typed or resolved).
+    let roots: Vec<PathBuf> = keys
+        .iter()
+        .flat_map(|k| [PathBuf::from(k), canonical_root(Path::new(k))])
+        .collect();
+    idx.games.iter().all(|g| {
+        g.title_id.len() == 8
+            && g.title_id.chars().all(|c| c.is_ascii_hexdigit())
+            && !g.path.is_empty()
+            && roots.iter().any(|r| Path::new(&g.path).starts_with(r))
+    })
 }
 
 /// Scan libraries, optionally reuse a recent on-disk cache, and warm cover art cache.
@@ -173,6 +557,25 @@ pub fn index_cached(
     cache_dir: &Path,
     allow_cover_network: bool,
     max_age_secs: u64,
+) -> Result<LibraryIndex, String> {
+    let mut progress = None;
+    index_cached_with_progress(
+        libraries,
+        cache_dir,
+        allow_cover_network,
+        max_age_secs,
+        &mut progress,
+        &|| false,
+    )
+}
+
+pub fn index_cached_with_progress(
+    libraries: &[PathBuf],
+    cache_dir: &Path,
+    allow_cover_network: bool,
+    max_age_secs: u64,
+    on_progress: &mut Option<&mut dyn FnMut(ScanProgress)>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<LibraryIndex, String> {
     let cache_file = cache_dir.join("index.json");
     let now = std::time::SystemTime::now()
@@ -185,7 +588,7 @@ pub fn index_cached(
             .ok()
             .and_then(|b| serde_json::from_slice::<LibraryIndex>(&b).ok())
         {
-            if idx.libraries == keys && now.saturating_sub(idx.scanned_at) <= max_age_secs {
+            if index_cache_valid(&idx, &keys, now, max_age_secs) {
                 return Ok(LibraryIndex {
                     stale: false,
                     cached: true,
@@ -194,9 +597,16 @@ pub fn index_cached(
             }
         }
     }
-    let games = scan(libraries);
+    let scan = scan_with(libraries, on_progress, cancelled);
+    if scan.cancelled {
+        return Err(crate::archive::ERR_CANCELLED.into());
+    }
+    let games = scan.games;
     let covers = cache_dir.join("covers");
     for g in &games {
+        if cancelled() {
+            return Err(crate::archive::ERR_CANCELLED.into());
+        }
         if crate::covers::cache_local(Path::new(&g.path), &g.title_id, &covers).is_none() {
             crate::covers::fetch_opt_in(&g.title_id, &covers, allow_cover_network);
         }
@@ -207,9 +617,21 @@ pub fn index_cached(
         games,
         libraries: keys,
         cached: false,
+        cache_version: INDEX_CACHE_VERSION,
+        scan_warnings: scan.warnings,
     };
     fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
-    let _ = fs::write(&cache_file, serde_json::to_vec(&idx).unwrap_or_default());
+    // Write next to it and rename, so a reader never sees a half-written index.json.
+    let tmp = cache_dir.join(format!(
+        "index.json.{}-{:?}.tmp",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    if fs::write(&tmp, serde_json::to_vec(&idx).unwrap_or_default()).is_err()
+        || fs::rename(&tmp, &cache_file).is_err()
+    {
+        let _ = fs::remove_file(&tmp);
+    }
     Ok(idx)
 }
 
@@ -466,6 +888,7 @@ mod tests {
         fs::create_dir_all(&b).unwrap();
         let first = index_cached(std::slice::from_ref(&a), &cache, false, 3600).unwrap();
         assert!(!first.cached);
+        assert_eq!(first.cache_version, INDEX_CACHE_VERSION);
         assert!(
             index_cached(std::slice::from_ref(&a), &cache, false, 3600)
                 .unwrap()
@@ -625,3 +1048,224 @@ mod tests {
         fs::remove_dir_all(&d).unwrap();
     }
 }
+
+#[cfg(test)]
+mod justin_drive_tests {
+    use super::*;
+    use crate::dlc::tests::make_stfs;
+
+    /// D:\ like Justin's: Content\0000000000000000\5454081A\00007000\<hdr> + <hdr>.data\, plus junk.
+    fn justin_drive(n: &str) -> crate::testutil::TmpDir {
+        let d = crate::testutil::TmpDir::new(&format!("lib-justin-{n}"));
+        let g = d.join("Content/0000000000000000/5454081A/00007000");
+        fs::create_dir_all(g.join("0867AD86.data")).unwrap();
+        make_stfs(&g.join("0867AD86"), b"LIVE", 0x7000, 0x5454_081A, "Bully", b"");
+        for i in 0..3 {
+            fs::write(g.join(format!("0867AD86.data/Data000{i}")), vec![0u8; 4096]).unwrap();
+        }
+        fs::create_dir_all(d.join(".Ignore")).unwrap();
+        fs::create_dir_all(d.join("Emulators/RetroArch/cores")).unwrap();
+        fs::write(d.join("name.txt"), b"x").unwrap();
+        d
+    }
+    #[test]
+    fn finds_game_from_drive_content_and_profile_roots() {
+        let d = justin_drive("roots");
+        for root in [
+            d.to_path_buf(),
+            d.join("Content"),
+            d.join("Content/0000000000000000"),
+            d.join("Content/0000000000000000/5454081A"),
+        ] {
+            let v = scan(std::slice::from_ref(&root));
+            assert_eq!(v.len(), 1, "{root:?}: {v:?}");
+            assert_eq!((v[0].title_id.as_str(), v[0].name.as_str()), ("5454081A", "Bully"));
+        }
+    }
+
+    #[test]
+    fn finds_games_in_other_profile_folders() {
+        let d = justin_drive("profiles");
+        let g = d.join("Content/E00001234ABCDEF0/4D5307E6/00007000");
+        fs::create_dir_all(&g).unwrap();
+        make_stfs(&g.join("ABCDEF01"), b"LIVE", 0x7000, 0x4D53_07E6, "Halo 3", b"");
+        for root in [d.to_path_buf(), d.join("Content")] {
+            let v = scan(std::slice::from_ref(&root));
+            assert_eq!(v.len(), 2, "{root:?}: {v:?}");
+        }
+    }
+
+    #[test]
+    fn finds_god_games_in_plain_folder_and_games_subfolder() {
+        let d = crate::testutil::TmpDir::new("lib-plain");
+        for g in [d.join("4D5307E6/00007000"), d.join("Games/5454081A/00007000")] {
+            fs::create_dir_all(&g).unwrap();
+        }
+        let v = scan(std::slice::from_ref(&d.to_path_buf()));
+        let mut t: Vec<_> = v.iter().map(|g| g.title_id.as_str()).collect();
+        t.sort();
+        assert_eq!(t, ["4D5307E6", "5454081A"], "{v:?}");
+    }
+
+    #[test]
+    fn god_size_ignores_deep_data_tree() {
+        let d = justin_drive("deepdata");
+        let data = d.join("Content/0000000000000000/5454081A/00007000/0867AD86.data");
+        for i in 0..200 {
+            let sub = data.join(format!("nested/{i}"));
+            fs::create_dir_all(&sub).unwrap();
+            fs::write(sub.join("chunk"), vec![0u8; 8192]).unwrap();
+        }
+        let start = std::time::Instant::now();
+        let v = scan(std::slice::from_ref(&d.join("Content")));
+        assert_eq!(v.len(), 1);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "scan took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn ignores_corrupt_and_legacy_cache() {
+        let t = crate::testutil::TmpDir::new("lib-badcache");
+        let cache = t.join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("index.json"), b"{not json").unwrap();
+        let a = index_cached(std::slice::from_ref(&t.join("x")), &cache, false, 3600).unwrap();
+        assert!(!a.cached);
+        let legacy = LibraryIndex {
+            scanned_at: 9_999_999_999,
+            stale: false,
+            games: vec![],
+            libraries: vec![t.join("x").display().to_string()],
+            cached: false,
+            cache_version: 0,
+            scan_warnings: vec![],
+        };
+        fs::write(
+            cache.join("index.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let b = index_cached(std::slice::from_ref(&t.join("x")), &cache, false, 3600).unwrap();
+        assert!(!b.cached, "legacy empty cache must not hide a rescan");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_finishes_with_symlink_loop() {
+        let d = justin_drive("loop");
+        let loopdir = d.join("Emulators/loop");
+        fs::create_dir_all(&loopdir).unwrap();
+        std::os::unix::fs::symlink(&loopdir, loopdir.join("self")).unwrap();
+        let start = std::time::Instant::now();
+        let v = scan(std::slice::from_ref(&d));
+        assert_eq!(v.len(), 1);
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn cancelled_scan_returns_error() {
+        let d = justin_drive("cancel");
+        let flag = std::sync::atomic::AtomicBool::new(true);
+        let err = index_cached_with_progress(
+            std::slice::from_ref(&d),
+            &d.join("cache"),
+            false,
+            0,
+            &mut None,
+            &|| flag.load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .unwrap_err();
+        assert!(err.to_lowercase().contains("cancel"));
+    }
+
+    fn xex_game(dir: &Path, tid: u32) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("default.xex"), crate::iso_extract::tests::minimal_xex(tid)).unwrap();
+    }
+
+    /// R35 M1 (Overseer's tree): extracted games in wrappers and profile folders are listed again.
+    #[test]
+    fn r35_m1_extracted_games_everywhere_8efb381_found_them() {
+        let d = crate::testutil::TmpDir::new("lib-r35-m1");
+        for (i, rel) in ["Wrap/G", "Content/0000000000000000/G", "0000000000000000/G", "Games/G", "G"]
+            .iter()
+            .enumerate()
+        {
+            xex_game(&d.join(rel), 0x4156_0810 + i as u32);
+        }
+        fs::create_dir_all(d.join("Wrap/4D5307E6/00007000")).unwrap();
+        let v = scan(std::slice::from_ref(&d.to_path_buf()));
+        assert_eq!(v.len(), 6, "{v:?}");
+        assert_eq!(v.iter().filter(|g| g.kind == "god").count(), 1);
+    }
+
+    /// R35 M2: a library root that is itself a symlink still lists what's under it.
+    #[cfg(unix)]
+    #[test]
+    fn r35_m2_symlinked_root_is_followed() {
+        let d = crate::testutil::TmpDir::new("lib-r35-m2");
+        let real = d.join("real");
+        fs::create_dir_all(real.join("4D5307E6/00007000")).unwrap();
+        xex_game(&real.join("XexGame"), 0x4156_0817);
+        let link = d.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(scan(std::slice::from_ref(&real)).len(), 2);
+        assert_eq!(scan(std::slice::from_ref(&link)).len(), 2);
+        // and the cache built from the link root is reused (its games resolve under the root)
+        let cache = d.join("cache");
+        assert!(!index_cached(std::slice::from_ref(&link), &cache, false, 3600).unwrap().cached);
+        assert!(index_cached(std::slice::from_ref(&link), &cache, false, 3600).unwrap().cached);
+    }
+
+    #[test]
+    fn r35_strip_verbatim_prefix() {
+        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\D:\Content")), PathBuf::from(r"D:\Content"));
+        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\UNC\nas\share")), PathBuf::from(r"\\nas\share"));
+        assert_eq!(strip_verbatim(PathBuf::from("/mnt/x")), PathBuf::from("/mnt/x"));
+    }
+
+    /// R35 L4: a cache naming a game outside the roots, or scanned in the future, is rescanned.
+    #[test]
+    fn r35_l4_cache_outside_roots_or_future_is_rejected() {
+        let d = justin_drive("r35-l4");
+        let cache = d.join("cache");
+        let root = d.join("Content");
+        let first = index_cached(std::slice::from_ref(&root), &cache, false, 3600).unwrap();
+        assert_eq!(first.games.len(), 1);
+        let write = |idx: &LibraryIndex| fs::write(cache.join("index.json"), serde_json::to_vec(idx).unwrap()).unwrap();
+        let mut bad = first.clone();
+        bad.games[0].path = "/etc".into();
+        write(&bad);
+        let r = index_cached(std::slice::from_ref(&root), &cache, false, 3600).unwrap();
+        assert!(!r.cached && r.games[0].path != "/etc");
+        let mut future = first.clone();
+        future.scanned_at = u64::MAX / 2;
+        write(&future);
+        assert!(!index_cached(std::slice::from_ref(&root), &cache, false, 3600).unwrap().cached);
+        // L3: the atomic write leaves no temp files behind
+        let left: Vec<_> = fs::read_dir(&cache).unwrap().flatten().map(|e| e.file_name()).filter(|n| n.to_string_lossy().ends_with(".tmp")).collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// R35 L6: an extracted game over the file cap is marked approximate.
+    #[test]
+    fn r35_l6_capped_size_is_marked_approximate() {
+        let d = crate::testutil::TmpDir::new("lib-r35-l6");
+        let g = d.join("Big");
+        xex_game(&g, 0x4156_0817);
+        fs::create_dir_all(g.join("f")).unwrap();
+        for i in 0..EXTRACTED_SIZE_MAX_FILES {
+            fs::write(g.join(format!("f/{i}")), b"").unwrap();
+        }
+        let small = d.join("Small");
+        xex_game(&small, 0x4156_0818);
+        let v = scan(std::slice::from_ref(&d.to_path_buf()));
+        let big = v.iter().find(|x| x.path.ends_with("Big")).unwrap();
+        let sm = v.iter().find(|x| x.path.ends_with("Small")).unwrap();
+        assert!(big.size_approx && !sm.size_approx);
+    }
+}
+
