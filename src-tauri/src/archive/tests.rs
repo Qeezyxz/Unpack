@@ -2415,3 +2415,224 @@ fn r29_fingerprint_sees_tail_change() {
     fs::write(d.join("Data0000"), &body).unwrap();
     assert_ne!(a, fingerprint(&d).unwrap());
 }
+
+/// 1.7.3: extras are recognised by type; game files never are.
+#[test]
+fn extras_are_only_non_game_types() {
+    for n in ["Vimm's Lair.txt", "x.NFO", "site.url", "cover.jpg", "Thumbs.db", "a.sfv"] {
+        assert!(is_extra(n), "{n}");
+    }
+    for n in ["game.iso", "default.xex", "4D5307E6", "Data0000", "a.ini", "x.bin", "readme"] {
+        assert!(!is_extra(n), "{n}");
+    }
+}
+
+/// 1.7.3: the lock file is gone once the job is done (Windows), a stale one from a dead job is
+/// taken over and removed, and a waiter still gets in after the holder deleted it.
+#[test]
+fn lock_file_removed_after_work_and_stale_one_cleaned() {
+    let td = crate::testutil::TmpDir::new("cs32-lockfile");
+    let ct = td.path().join("4D5307E6").join("00007000");
+    let lp = ct.join(FOLDER_LOCK);
+    let l = lock_type_folder(&ct, &|| false, &mut || {}).unwrap();
+    assert_eq!(lp.exists(), cfg!(windows));
+    drop(l);
+    assert!(!lp.exists(), "no lock file left after the work");
+    // Stale lock from a crashed run (pid 7296): tolerated, then removed.
+    fs::write(&lp, b"unpack-folder-lock v1 pid=7296\n").unwrap();
+    let l = lock_type_folder(&ct, &|| false, &mut || {}).unwrap();
+    drop(l);
+    assert!(!lp.exists() || cfg!(unix), "stale lock removed");
+    let _ = fs::remove_file(&lp);
+    // Holder deletes while a waiter is queued: the waiter still gets exactly one lock.
+    let held = lock_type_folder(&ct, &|| false, &mut || {}).unwrap();
+    let c = ct.clone();
+    let b = std::thread::spawn(move || drop(lock_type_folder(&c, &|| false, &mut || {}).unwrap()));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!b.is_finished(), "waiter waits");
+    drop(held);
+    b.join().unwrap();
+    assert!(!lp.exists());
+    assert_eq!(names_in_dir(&ct), Vec::<String>::new(), "nothing of ours left in the type folder");
+}
+
+/// 1.7.3: a normal (unstaged) extract aimed at a Content profile drops readme/NFO/picture
+/// extras and says so; the ISO and other game files are placed as before.
+#[test]
+fn content_profile_extract_skips_extras() {
+    let d = tmp("cs32-content-extras");
+    let usb = d.join("usb");
+    let prof = usb.join("Content").join("0000000000000000");
+    fs::create_dir_all(&prof).unwrap();
+    let zip = d.join("Bully.zip");
+    write_zip(
+        &zip,
+        &[("Bully/game.iso", b"not really an iso", 0o644), ("Bully/Vimm's Lair.txt", b"x", 0o644), ("Bully/Game/default.xex", b"XEX2", 0o644), ("Bully/Game/notes.txt", b"n", 0o644)],
+    );
+    let o = ExtractOptions {
+        archive: &zip,
+        dest_parent: &prof,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: false,
+    };
+    let r = extract(&exe(), &o, &Jobs::default(), "ci", &mut |_, _| {}).unwrap();
+    let out = Path::new(&r.output);
+    assert_eq!(names_in_dir(out), vec!["Game", "game.iso"]);
+    assert_eq!(names_in_dir(&out.join("Game")), vec!["default.xex", "notes.txt"], "R33: a game folder is left whole");
+    assert!(r.warnings.iter().any(|w| w.contains("Skipped 1 extra file") && w.contains("Vimm's Lair.txt")), "{:?}", r.warnings);
+    assert!(names_in_dir(&prof).is_empty());
+}
+
+/// R33 M1 (Overseer's repro): only extras beside the ISO go; game and app folders keep every
+/// file, including pictures, text files, web UI and an empty folder from the archive.
+#[test]
+fn r33_extras_never_touch_game_or_app_folders() {
+    let d = tmp("cs33-extras");
+    let usb = d.join("usb");
+    let prof = usb.join("Content").join("0000000000000000");
+    fs::create_dir_all(&prof).unwrap();
+    let zip = d.join("Bully.zip");
+    write_zip(
+        &zip,
+        &[
+            ("Bully/Bully (USA).iso", b"not really an iso", 0o644),
+            ("Bully/Vimm's Lair.TXT", b"x", 0o644),
+            ("Bully/XexGame/default.xex", b"XEX2", 0o644),
+            ("Bully/XexGame/media/ui.png", b"png", 0o644),
+            ("Bully/XexGame/data/strings.txt", b"str", 0o644),
+            ("Bully/XexGame/config.xml", b"<x/>", 0o644),
+            ("Bully/XexGame/cache/", b"", 0o40755),
+            ("Bully/Aurora/Aurora.xex", b"XEX2", 0o644),
+            ("Bully/Aurora/Skins/Default/bg.png", b"png", 0o644),
+            ("Bully/Aurora/web/index.html", b"<html>", 0o644),
+            ("Bully/Scans/cover.jpg", b"jpg", 0o644),
+            ("Bully/Empty/", b"", 0o40755),
+        ],
+    );
+    let o = ExtractOptions {
+        archive: &zip,
+        dest_parent: &prof,
+        password: None,
+        collision: Collision::Number,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: false,
+    };
+    let r = extract(&exe(), &o, &Jobs::default(), "ci", &mut |_, _| {}).unwrap();
+    let out = Path::new(&r.output);
+    for f in ["XexGame/default.xex", "XexGame/media/ui.png", "XexGame/data/strings.txt", "XexGame/config.xml", "Aurora/Aurora.xex", "Aurora/Skins/Default/bg.png", "Aurora/web/index.html"] {
+        assert!(out.join(f).is_file(), "{f} must survive");
+    }
+    assert!(out.join("XexGame/cache").is_dir(), "empty folder from the archive stays");
+    assert!(out.join("Empty").is_dir(), "empty folder from the archive stays");
+    assert!(!out.join("Vimm's Lair.TXT").exists() && !out.join("Scans").exists(), "extras beside the ISO go");
+    assert!(out.join("Bully (USA).iso").is_file());
+    let w: Vec<_> = r.warnings.iter().filter(|w| w.contains("extra file")).collect();
+    assert!(w.len() == 1 && w[0].contains("Skipped 2 extra files") && w[0].contains("Vimm's Lair.TXT") && w[0].contains("cover.jpg"), "{:?}", r.warnings);
+}
+
+/// R33 L4: Skip with the folder already there says only "skipped", not also "Skipped N extras".
+#[test]
+fn r33_skip_does_not_mention_extras() {
+    let d = tmp("cs33-skip");
+    let usb = d.join("usb");
+    let prof = usb.join("Content").join("0000000000000000");
+    fs::create_dir_all(&prof).unwrap();
+    fs::create_dir_all(usb.join("Bully")).unwrap();
+    let zip = d.join("Bully.zip");
+    write_zip(&zip, &[("Bully/game.iso", b"iso", 0o644), ("Bully/readme.txt", b"x", 0o644)]);
+    let o = ExtractOptions {
+        archive: &zip,
+        dest_parent: &prof,
+        password: None,
+        collision: Collision::Skip,
+        layout: Layout::Folder,
+        skip_junk: true,
+        nested: false,
+    };
+    let r = extract(&exe(), &o, &Jobs::default(), "ci", &mut |_, _| {}).unwrap();
+    assert!(r.skipped);
+    assert!(r.warnings.iter().any(|w| w.contains("nothing was extracted")), "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.contains("extra file")), "{:?}", r.warnings);
+}
+
+/// R33 L2: a read-only lock file is a real error, reported at once, not "waiting for another job".
+#[test]
+#[cfg(windows)]
+fn r33_read_only_lock_file_is_an_error_not_a_wait() {
+    let td = crate::testutil::TmpDir::new("cs33-ro");
+    let ct = td.path().join("00007000");
+    fs::create_dir_all(&ct).unwrap();
+    let lp = ct.join(FOLDER_LOCK);
+    fs::write(&lp, b"").unwrap();
+    let mut perm = fs::metadata(&lp).unwrap().permissions();
+    perm.set_readonly(true);
+    fs::set_permissions(&lp, perm.clone()).unwrap();
+    let t = std::time::Instant::now();
+    let mut waited = false;
+    let r = lock_type_folder(&ct, &|| false, &mut || waited = true);
+    assert!(r.is_err() && !waited && t.elapsed() < Duration::from_secs(3), "{:?}", r.err());
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(false);
+    fs::set_permissions(&lp, perm).unwrap();
+}
+
+/// R34 L5: a folder is judged by its whole subtree, so Game/readme.txt and Game/Art/box.png
+/// stay when Game/Disc1/default.xex sits below them; extras beside the ISO still go.
+#[test]
+fn r34_l5_drop_extras_keeps_folder_with_xex_deeper_down() {
+    let td = crate::testutil::TmpDir::new("arch-r34-l5");
+    let root = td.join("iso");
+    fs::create_dir_all(root.join("Game/Art")).unwrap();
+    fs::create_dir_all(root.join("Game/Disc1")).unwrap();
+    fs::write(root.join("Game/readme.txt"), b"r").unwrap();
+    fs::write(root.join("Game/Art/box.png"), b"p").unwrap();
+    fs::write(root.join("Game/Disc1/default.xex"), b"x").unwrap();
+    fs::write(root.join("game.iso"), b"i").unwrap();
+    fs::write(root.join("info.nfo"), b"n").unwrap();
+    let only = td.join("only");
+    fs::create_dir_all(only.join("Scans")).unwrap();
+    fs::write(only.join("info.nfo"), b"n").unwrap();
+    fs::write(only.join("Scans/cover.jpg"), b"j").unwrap();
+    let note = drop_extras(&root).unwrap();
+    assert!(note.contains("Skipped 1 extra file") && note.contains("info.nfo"), "{note}");
+    assert!(root.join("game.iso").is_file());
+    assert!(root.join("Game/readme.txt").is_file());
+    assert!(root.join("Game/Art/box.png").is_file());
+    assert!(root.join("Game/Disc1/default.xex").is_file());
+    assert!(drop_extras(&only).is_some());
+    assert!(!only.join("info.nfo").exists() && !only.join("Scans").exists());
+}
+
+/// R35 L5 (perf): drop_extras does one bottom-up pass, so a deep extras-only tree is quick, and a
+/// deep chain with a .xex at the bottom is still kept whole. (30 s bound: Wine and busy boxes are slow.)
+#[test]
+fn r35_l5_drop_extras_deep_tree_single_pass() {
+    let td = crate::testutil::TmpDir::new("arch-r35-l5");
+    let root = td.join("iso");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("game.iso"), b"i").unwrap();
+    let mut d = root.join("Scans");
+    let mut keep = root.join("Game");
+    for lvl in 0..50 {
+        fs::create_dir_all(&d).unwrap();
+        fs::create_dir_all(&keep).unwrap();
+        for i in 0..40 {
+            fs::write(d.join(format!("p{lvl}_{i}.jpg")), b"j").unwrap();
+        }
+        fs::write(keep.join("notes.txt"), b"n").unwrap();
+        d = d.join("d");
+        keep = keep.join("d");
+    }
+    fs::create_dir_all(&keep).unwrap();
+    fs::write(keep.join("default.xex"), b"x").unwrap();
+    let t = std::time::Instant::now();
+    let note = drop_extras(&root).unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_secs(30), "{:?}", t.elapsed());
+    assert!(note.contains("Skipped 2000 extra files"), "{}", &note[..80]);
+    assert!(!root.join("Scans").exists());
+    assert!(keep.join("default.xex").is_file() && root.join("Game/notes.txt").is_file());
+}

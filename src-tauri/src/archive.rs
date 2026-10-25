@@ -648,6 +648,28 @@ fn move_children(src_dir: &Path, dst_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Move everything under `src` into the existing folder `dst` except the paths in `keep` (and
+/// the folders that lead to them). Returns how many files/folders were moved.
+pub fn move_tree_except(src: &Path, dst: &Path, keep: &[PathBuf]) -> std::io::Result<u64> {
+    let mut n = 0;
+    for e in fs::read_dir(src)? {
+        let p = e?.path();
+        let Some(name) = p.file_name() else { continue };
+        if keep.contains(&p) {
+            continue;
+        }
+        let to = dst.join(name);
+        if keep.iter().any(|k| k.starts_with(&p)) {
+            fs::create_dir_all(&to)?;
+            n += move_tree_except(&p, &to, keep)?;
+        } else {
+            move_path(&p, &to)?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 /// Move a file or folder to a free name next to `name` without ever overwriting:
 /// folders are claimed with `create_dir`, files with `create_new`.
 fn place_numbered(src: &Path, parent: &Path, name: &str) -> std::io::Result<PathBuf> {
@@ -1201,6 +1223,10 @@ pub fn extract(
         .as_ref()
         .filter(|_| in_profile && !iso_rel_paths(&staging).is_empty())
         .and_then(|pf| crate::contentdir::outside_content(pf));
+    // 1.7.3: a Content destination gets the game only; readme/NFO/link/picture extras are
+    // dropped instead of leaving a stray folder next to Content.
+    let extras_note = if outside_parent.is_some() { drop_extras(&staging) } else { None };
+    warnings.extend(extras_note.clone());
     // R23 L6: the note says what actually happened (new folder, merged, skipped).
     let outside = outside_parent.is_some();
     let outside_note = |what: &str, at: &Path| -> Option<String> {
@@ -1280,6 +1306,8 @@ pub fn extract(
                     });
                 }
                 (true, Collision::Skip) => {
+                    // R33 L4: nothing was placed, so "skipped N extras" would contradict the note.
+                    warnings.retain(|w| Some(w) != extras_note.as_ref());
                     warnings.extend(outside_note("skip", &target));
                     return Ok(ExtractResult {
                         output: target.display().to_string(),
@@ -1386,6 +1414,110 @@ pub fn extract(
     })
 }
 
+/// Extras that come with game downloads but are never needed on the console. Anything else
+/// (ISOs, XEX/STFS files, unknown types) is kept.
+const EXTRA_EXTS: &[&str] = &[
+    "txt", "nfo", "diz", "url", "website", "lnk", "jpg", "jpeg", "png", "gif", "bmp", "webp", "htm", "html", "sfv", "md5", "sha1", "pdf", "rtf",
+];
+
+pub(crate) fn is_extra(name: &str) -> bool {
+    let l = name.to_ascii_lowercase();
+    l == "thumbs.db" || l == "desktop.ini" || Path::new(&l).extension().is_some_and(|e| EXTRA_EXTS.iter().any(|x| e == *x))
+}
+
+/// Remove download extras (see `is_extra`) that sit beside the ISOs, never inside a game or app.
+/// R33 M1: a folder is only looked at if its files are all ISOs and extras; a folder holding a
+/// `.xex` or any other file (or a link) is left whole, and so is everything below it. Only
+/// folders this emptied are removed; folders that were already empty in the archive stay.
+/// Returns the note for the summary, or None if nothing was skipped.
+pub(crate) fn drop_extras(root: &Path) -> Option<String> {
+    /// Per folder: (everything anywhere below is an ISO, an extra or a plain folder; the folder
+    /// holds an ISO itself). One bottom-up pass over the tree. Any other file, a link/reparse
+    /// point, or an unreadable folder makes "only extras" false for it and every folder above.
+    type Info = std::collections::HashMap<PathBuf, (bool, bool)>;
+    fn analyze(d: &Path, info: &mut Info) -> bool {
+        let mut only = true;
+        let mut iso = false;
+        match fs::read_dir(d) {
+            Err(_) => only = false,
+            Ok(rd) => {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let Ok(m) = fs::symlink_metadata(&p) else {
+                        only = false;
+                        continue;
+                    };
+                    if is_link(&p) {
+                        only = false;
+                    } else if m.is_dir() {
+                        if !analyze(&p, info) {
+                            only = false;
+                        }
+                    } else if m.is_file() && crate::fatstage::is_iso(&name) {
+                        iso = true;
+                    } else if !(m.is_file() && is_extra(&name)) {
+                        only = false;
+                    }
+                }
+            }
+        }
+        info.insert(d.to_path_buf(), (only, iso));
+        only
+    }
+    fn walk(d: &Path, info: &Info, out: &mut Vec<String>) {
+        let Ok(rd) = fs::read_dir(d) else { return };
+        let entries: Vec<_> = rd.flatten().collect();
+        let mut dirs = vec![];
+        let mut extras = vec![];
+        for e in &entries {
+            let p = e.path();
+            let Ok(m) = fs::symlink_metadata(&p) else { return };
+            let name = e.file_name().to_string_lossy().into_owned();
+            if m.is_dir() && !is_link(&p) {
+                dirs.push(p);
+            } else if m.is_file() && is_extra(&name) {
+                extras.push((p, name));
+            } else if !(m.is_file() && crate::fatstage::is_iso(&name)) {
+                return; // a game/app file or a link: leave this folder alone
+            }
+        }
+        for (p, name) in extras {
+            if fs::remove_file(&p).is_ok() {
+                out.push(name);
+            }
+        }
+        for sub in dirs {
+            // Go into a folder only if it holds an ISO itself (its extras sit beside the ISO) or
+            // everything below it is extras. A game/app file or a link anywhere below a folder
+            // without an ISO means it's a game folder: leave the whole thing alone.
+            let (only, iso) = info.get(&sub).copied().unwrap_or((false, false));
+            if !iso && !only {
+                continue;
+            }
+            let had = fs::read_dir(&sub).map(|mut r| r.next().is_some()).unwrap_or(false);
+            walk(&sub, info, out);
+            if had {
+                let _ = fs::remove_dir(&sub); // only succeeds if this emptied it
+            }
+        }
+    }
+    let mut info = Info::new();
+    analyze(root, &mut info);
+    let mut out = vec![];
+    walk(root, &info, &mut out);
+    if out.is_empty() {
+        return None;
+    }
+    out.sort();
+    Some(format!(
+        "Skipped {} extra file{} not needed on the console ({}).",
+        out.len(),
+        if out.len() == 1 { "" } else { "s" },
+        out.join(", ")
+    ))
+}
+
 fn remove_any(p: &Path) -> std::io::Result<()> {
     if is_link(p) {
         remove_link(p)
@@ -1448,25 +1580,53 @@ const FOLDER_SIG: &str = "unpack-folder-lock v1";
 /// recovery and placement there (archive Replace and GOD conversion alike). It is an OS lock,
 /// so it holds across processes, Windows sessions and PCs sharing the drive, and the OS drops
 /// it if the holder dies.
-/// - Windows: a lock on `<type folder>\.unpack-replace.lock`, opened without delete sharing so
-///   nobody can delete or rename over it while any job has it open; signed, never deleted.
+/// - Windows: `<type folder>\.unpack-replace.lock`, opened with DELETE access and without delete
+///   sharing, so while one job has it open nobody else can open it for delete, delete it, rename
+///   it or rename over it, and other jobs' opens fail with a sharing violation (they wait). It is
+///   also byte-range locked. 1.7.3: when the job is done, `FolderLock`'s drop marks it for
+///   deletion through the held handle (FileDispositionInfo) and then closes it, so it never
+///   outlives the work. A crash leaves a stale file (the OS drops the handle without deleting);
+///   the next job opens, locks and re-signs it like any other and deletes it when done.
 /// - Unix: a lock on the type folder itself (a folder can't be swapped for a file with the same
 ///   name while it holds packages, and there's no lock file anyone could unlink).
 ///
 /// R29 M: after the lock is taken, the locked object must still be the one at the path (same
 /// volume + file index / dev + inode); otherwise it is reopened and locked again.
-pub(crate) fn lock_type_folder(ct_dst: &Path, cancelled: &dyn Fn() -> bool, waiting: &mut dyn FnMut()) -> Result<fs::File, String> {
+pub(crate) fn lock_type_folder(ct_dst: &Path, cancelled: &dyn Fn() -> bool, waiting: &mut dyn FnMut()) -> Result<FolderLock, String> {
     if is_link(ct_dst) {
         return Err(format!("{} is a link; nothing was written through it.", ct_dst.display()));
     }
     fs::create_dir_all(ct_dst).map_err(|e| format!("Could not create {} ({e})", ct_dst.display()))?;
     let target = lock_target(ct_dst);
     let mut told = false;
-    for _ in 0..1000 {
+    let mut denied = 0u32;
+    let mut swaps = 0u32;
+    loop {
+        if swaps >= 1000 {
+            break;
+        }
         if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink() || (m.is_dir() != cfg!(unix))) {
             return Err(format!("{} isn't what I expect (a link?); I didn't touch that folder. Check it.", target.display()));
         }
-        let f = open_lock(&target).map_err(|e| format!("Could not open the lock {} ({e})", target.display()))?;
+        let f = match open_lock(&target) {
+            Ok(f) => f,
+            // Windows: another job holds the lock file open (sharing violation), or the last
+            // holder just deleted it and a waiter still has it open (delete pending): wait.
+            // R33 L1: waiting for another job doesn't use up the swap retries below and has no
+            // time limit (like try_lock); it ends on cancel.
+            Err(e) if lock_busy(&e, &target, &mut denied) => {
+                if !told {
+                    waiting();
+                    told = true;
+                }
+                if cancelled() {
+                    return Err("Cancelled".into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Err(e) => return Err(format!("Could not open the lock {} ({e})", target.display())),
+        };
         #[cfg(test)]
         LOCK_RACE.with(|h| {
             if let Some(h) = h.borrow_mut().take() {
@@ -1489,6 +1649,16 @@ pub(crate) fn lock_type_folder(ct_dst: &Path, cancelled: &dyn Fn() -> bool, wait
                 Err(fs::TryLockError::Error(e)) => return Err(format!("Could not lock {} ({e})", target.display())),
             }
         }
+        // R33 L3: a file already marked for deletion (kept alive by someone else's handle) is
+        // not the lock; drop it and wait for the real one.
+        if delete_pending(&f) {
+            drop(f);
+            if cancelled() {
+                return Err("Cancelled".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
         if handle_id(&f).is_some() && handle_id(&f) == path_id(&target) {
             #[cfg(windows)]
             {
@@ -1498,11 +1668,90 @@ pub(crate) fn lock_type_folder(ct_dst: &Path, cancelled: &dyn Fn() -> bool, wait
                 let _ = writeln!(f, "{FOLDER_SIG} pid={}", std::process::id());
                 let _ = f.set_len(f.stream_position().unwrap_or(0));
             }
-            return Ok(f);
+            return Ok(FolderLock { f });
         }
         // What we locked is no longer what the path names: drop it and lock the current one.
+        swaps += 1;
     }
     Err(format!("Could not lock {}: it keeps being replaced.", target.display()))
+}
+
+/// The held type-folder lock. Dropping it releases the lock; on Windows it first deletes the
+/// lock file through the same handle, so nothing is left in the Content folder.
+pub(crate) struct FolderLock {
+    f: fs::File,
+}
+impl std::ops::Deref for FolderLock {
+    type Target = fs::File;
+    fn deref(&self) -> &fs::File {
+        &self.f
+    }
+}
+impl Drop for FolderLock {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO};
+            let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+            // SAFETY: a valid handle opened with DELETE access and a properly sized struct.
+            // Still locked here: the file goes when this handle closes, and no other handle can
+            // exist (no delete sharing), so nobody can be holding or waiting on this very file.
+            unsafe {
+                SetFileInformationByHandle(self.f.as_raw_handle() as _, FileDispositionInfo, &info as *const _ as _, std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32);
+            }
+        }
+    }
+}
+
+/// Is this open error "another job has the lock file" (wait) rather than a real failure?
+/// 32 = sharing violation (held), 303 = delete pending. R33 L2: 5 (access denied) is also what
+/// a delete-pending file gives, but it's a real permission/read-only error too, so it only
+/// counts as busy while the file is pending deletion, and at most ~10 s without that proof.
+#[cfg(windows)]
+fn lock_busy(e: &std::io::Error, target: &Path, denied: &mut u32) -> bool {
+    match e.raw_os_error() {
+        Some(32) | Some(303) => true,
+        Some(5) => {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
+            // Reading attributes works on a read-only or permission-locked file, so there the
+            // answer is exact. Windows refuses even that on a delete-pending file: treat that
+            // as busy, but only for ~10 s in total, then report the real error.
+            match fs::OpenOptions::new()
+                .access_mode(0x80) // FILE_READ_ATTRIBUTES
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(target)
+            {
+                Ok(f) => delete_pending(&f),
+                Err(_) => {
+                    *denied += 1;
+                    *denied <= 100
+                }
+            }
+        }
+        _ => false,
+    }
+}
+#[cfg(not(windows))]
+fn lock_busy(_: &std::io::Error, _: &Path, _: &mut u32) -> bool {
+    false
+}
+
+/// FileStandardInfo.DeletePending through the handle (Windows); never on other systems.
+#[cfg(windows)]
+fn delete_pending(f: &fs::File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{FileStandardInfo, GetFileInformationByHandleEx, FILE_STANDARD_INFO};
+    let mut i: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid open handle and a properly sized out struct.
+    let ok = unsafe { GetFileInformationByHandleEx(f.as_raw_handle() as _, FileStandardInfo, &mut i as *mut _ as _, std::mem::size_of::<FILE_STANDARD_INFO>() as u32) };
+    ok != 0 && i.DeletePending
+}
+#[cfg(not(windows))]
+fn delete_pending(_: &fs::File) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -1537,7 +1786,8 @@ fn open_lock(p: &Path) -> std::io::Result<fs::File> {
     use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE};
     fs::OpenOptions::new()
         .read(true)
-        .write(true)
+        .write(true) // std only allows create() with write; access_mode below sets the real rights
+        .access_mode(0x0001_0000 | 0x8000_0000 | 0x4000_0000) // DELETE | GENERIC_READ | GENERIC_WRITE
         .create(true)
         .truncate(false)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
