@@ -23,7 +23,7 @@
 - I fixed the Library. In 1.7.0, pointing it at a profile folder like `D:\Content\0000000000000000` could show "No games found yet" (an old empty index was reused for up to an hour, and Refresh didn't rescan), and pointing it at `D:\Content` or a whole drive could spin forever. The scan is now bounded (it no longer walks every file inside each game's `.data` folders or every folder on a drive), Refresh always rescans, and the spinner shows progress with a Cancel button and gives up after 10 minutes. The drive root (`D:\`), `D:\Content`, any profile folder and a single TitleID folder all work as a library folder.
 - I fixed Library cover art. The index no longer downloads covers during a scan (so the list shows right away and a cached index still works). With “Library cover art from the internet” on, covers load in the background a few at a time from XboxUnity’s CoverInfo/Cover.php API, are cached under app data, and failed lookups are not retried for several hours. Turning the setting off stops new downloads.
 - I fixed Library game counts and types. The scan now lists GOD (`00007000`), installed disc (`00004000`), XBLA (`000D0000`, name from the STFS header), original Xbox (`00005000`), and optional apps (`00040000`), and it skips save-only profiles, avatar-only folders, DLC-only and TU-only TitleIDs. DLC and TU badges use `00000002` and `000B0000` respectively (empty `000B0000` means no TU).
-- The two Replace files edge cases from 1.7.0 are fixed in 1.7.4 (see that release).
+- The two Replace files edge cases from 1.7.0 are still open (see Known issues in the release notes).
 
 ## 1.7.0
 

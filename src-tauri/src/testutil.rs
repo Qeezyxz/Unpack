@@ -4,21 +4,24 @@ use std::path::{Path, PathBuf};
 
 pub struct TmpDir(PathBuf);
 
+#[cfg(windows)]
 fn test_temp_base() -> PathBuf {
-    #[cfg(windows)]
+    let base = std::env::temp_dir();
+    let disp = base.to_string_lossy().to_lowercase();
+    // Wine on Linux CI: POSIX temp. Real Windows / Wine %TEMP% under Users is treated as a
+    // system path by picked_folders and cannot be auto-restored in tests.
+    if disp.starts_with('/')
+        || disp.starts_with(r"c:\users\")
+        || disp.starts_with(r"c:\windows\")
     {
-        let base = std::env::temp_dir();
-        let disp = base.to_string_lossy().to_lowercase();
-        // Wine on Linux CI: POSIX temp. Real Windows / Wine %TEMP% under Users is treated as a
-        // system path by picked_folders and cannot be auto-restored in tests.
-        if disp.starts_with('/')
-            || disp.starts_with(r"c:\users\")
-            || disp.starts_with(r"c:\windows\")
-        {
-            return PathBuf::from(format!(r"C:\unpack-test-{}", std::process::id()));
-        }
-        return base;
+        PathBuf::from(format!(r"C:\unpack-test-{}", std::process::id()))
+    } else {
+        base
     }
+}
+
+#[cfg(not(windows))]
+fn test_temp_base() -> PathBuf {
     std::env::temp_dir()
 }
 

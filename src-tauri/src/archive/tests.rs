@@ -2659,6 +2659,53 @@ fn r35_l5_drop_extras_deep_tree_single_pass() {
     assert!(keep.join("default.xex").is_file() && root.join("Game/notes.txt").is_file());
 }
 
+/// A-1: after both halves are live, corrupt live `.data` before repair must not delete `.unpack-old.*`.
+#[test]
+fn a1_corrupt_live_data_after_step6_kill_keeps_old_aside() {
+    let td = crate::testutil::TmpDir::new("arch-a1-corrupt");
+    let prof = td.path().join("prof");
+    let dst = r27_setup(&prof);
+    let (st, tree) = r27_stage(td.path(), "a1", b"NEW");
+    REPLACE_KILL_AT.with(|k| k.set(6));
+    assert!(place_title_trees(&st, &[tree], &prof, Collision::Replace, 1, 0, 0, vec![], &Jobs::default(), "t", &mut |_, _| {}).is_err());
+    REPLACE_KILL_AT.with(|k| k.set(0));
+    let data_live = fs::read_dir(&dst)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("abcd0001.data"))
+        .map(|e| e.path().join("Data0000"))
+        .expect("live .data");
+    fs::write(&data_live, b"CORRUPT").unwrap();
+    let mut w = vec![];
+    recover_asides_locked(&dst, &mut w);
+    assert!(
+        w.iter().any(|x| x.contains("no longer matches what finished moving")),
+        "{w:?}"
+    );
+    assert!(
+        names_in_dir(&dst).iter().any(|n| n.starts_with(".unpack-old.")),
+        "old aside kept: {:?}",
+        names_in_dir(&dst)
+    );
+    assert!(
+        !names_in_dir(&dst).iter().any(|n| n.starts_with(".unpack-replace.")),
+        "manifest cleared: {:?}",
+        names_in_dir(&dst)
+    );
+    let hdr = fs::read_dir(&dst)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("abcd0001"))
+        .map(|e| fs::read(e.path()).unwrap());
+    assert_eq!(hdr.as_deref(), Some(b"NEW" as &[u8]));
+    assert_eq!(fs::read(&data_live).unwrap(), b"CORRUPT");
+    let aside_old = names_in_dir(&dst)
+        .iter()
+        .find(|n| n.starts_with(".unpack-old.") && !n.contains(".data"))
+        .map(|n| fs::read(dst.join(n)).unwrap());
+    assert_eq!(aside_old.as_deref(), Some(b"OLD" as &[u8]), "OLD header still in aside");
+}
+
 /// K1: killed Replace, user edits the new .data before repair — never pair the old header with edited data.
 #[test]
 fn k1_edited_data_after_kill_never_mixes_package() {

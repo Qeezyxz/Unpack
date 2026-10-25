@@ -2369,6 +2369,19 @@ fn recover_one(note: &RecoverNote, m: &mut ReplaceManifest, st: &mut Steps, warn
         if !all_new_confirmed(ct_dst, m) {
             return Err(std::io::Error::other("the new copy is not fully in place yet"));
         }
+        let live_data_changed_after_move = m.new.iter().any(|(live, _, is_data, fp)| {
+            *is_data
+                && move_recorded(m, live)
+                && fingerprint(&ct_dst.join(live)).as_deref() != Some(fp.as_str())
+        });
+        if live_data_changed_after_move {
+            warnings.push(format!(
+                "An earlier Replace of {unit} had both halves in place, but the live .data folder no longer matches what finished moving; I left the set-aside copy for you to check."
+            ));
+            st.next()?;
+            fs::remove_file(mpath)?;
+            return Ok(());
+        }
         let mut removed = 0;
         for (_, a, _, fp) in &m.old {
             if there(a) {
