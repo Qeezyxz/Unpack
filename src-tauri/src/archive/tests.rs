@@ -1,7 +1,23 @@
 //! Integration-style tests against real archives made on the build box.
 //! Set UNPACK_TESTDATA to the folder holding plain.zip, pw.7z, evil.zip, big.7z, ...
 use super::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+fn with_type_lock<F, R>(ct: &Path, f: F) -> R
+where
+    F: FnOnce(&FolderLock) -> R,
+{
+    let lock = lock_type_folder(ct, &|| false, &mut || {}).unwrap();
+    f(&lock)
+}
+
+fn recover_asides_locked(ct: &Path, w: &mut Vec<String>) {
+    with_type_lock(ct, |lock| recover_asides(ct, lock, w));
+}
+
+fn replace_unit_locked(ct: &Path, old: [Option<PathBuf>; 2], new: [(&PathBuf, &PathBuf); 2]) -> Result<Vec<String>, String> {
+    with_type_lock(ct, |lock| replace_unit(ct, lock, old, new))
+}
 
 fn data(name: &str) -> PathBuf {
     match name {
@@ -1830,7 +1846,10 @@ fn r25_replace_all_or_nothing_and_leftover_asides() {
     let (d2, sh2, dh2, sd2, dd2) = (d.clone(), sh.clone(), dh.clone(), sd0.clone(), dd.clone());
     let e = std::thread::Builder::new()
         .name("r25-undo".into())
-        .spawn(move || replace_unit(&d2, [Some(d2.join("ABCD0001")), Some(d2.join("ABCD0001.data"))], [(&sh2, &dh2), (&sd2, &dd2)]))
+        .spawn(move || {
+            let lock = lock_type_folder(&d2, &|| false, &mut || {}).unwrap();
+            replace_unit(&d2, &lock, [Some(d2.join("ABCD0001")), Some(d2.join("ABCD0001.data"))], [(&sh2, &dh2), (&sd2, &dd2)])
+        })
         .unwrap()
         .join()
         .unwrap()
@@ -1843,14 +1862,14 @@ fn r25_replace_all_or_nothing_and_leftover_asides() {
     // One stray aside: reported in the singular, untouched.
     fs::write(d.join(".unpack-old.0.ABCD0001"), b"PRECIOUS").unwrap();
     let mut w = vec![];
-    recover_asides(&d, &mut w);
+    recover_asides_locked(&d, &mut w);
     assert_eq!(w.len(), 1, "{w:?}");
     assert!(w[0].contains(" is left over") && w[0].contains("it was not touched"), "{w:?}");
     assert_eq!(fs::read(d.join(".unpack-old.0.ABCD0001")).unwrap(), b"PRECIOUS");
     // Two: plural.
     fs::create_dir_all(d.join(".unpack-old.1.ABCD0001.data")).unwrap();
     let mut w = vec![];
-    recover_asides(&d, &mut w);
+    recover_asides_locked(&d, &mut w);
     assert!(w[0].contains(" are left over") && w[0].contains("they were not touched"), "{w:?}");
     fs::remove_dir(d.join(".unpack-old.1.ABCD0001.data")).unwrap();
     // A successful Replace with a stale aside present uses a fresh tag and keeps the stale one.
@@ -1858,14 +1877,14 @@ fn r25_replace_all_or_nothing_and_leftover_asides() {
     let sd = td.path().join("abcd0001.data");
     fs::create_dir_all(&sd).unwrap();
     fs::write(sd.join("Data0000"), b"NEW").unwrap();
-    replace_unit(&d, [Some(d.join("ABCD0001")), Some(d.join("ABCD0001.data"))], [(&sh, &dh), (&sd, &dd)]).unwrap();
+    replace_unit_locked(&d, [Some(d.join("ABCD0001")), Some(d.join("ABCD0001.data"))], [(&sh, &dh), (&sd, &dd)]).unwrap();
     assert_eq!(fs::read(d.join(".unpack-old.0.ABCD0001")).unwrap(), b"PRECIOUS");
     assert_eq!(fs::read(dd.join("Data0000")).unwrap(), b"NEW");
     assert_eq!(names_in_dir(&d), [".unpack-old.0.ABCD0001", "abcd0001", "abcd0001.data"]);
     // A damaged manifest is reported, nothing moved.
     fs::write(d.join(".unpack-replace.7.json"), b"{not json").unwrap();
     let mut w = vec![];
-    recover_asides(&d, &mut w);
+    recover_asides_locked(&d, &mut w);
     assert!(w.iter().any(|x| x.contains("couldn't be read")), "{w:?}");
     assert!(d.join(".unpack-replace.7.json").exists());
 }
@@ -1972,17 +1991,17 @@ fn r27_double_crash_every_case() {
             REPLACE_KILL_AT.with(|x| x.set(0));
             RECOVER_KILL_AT.with(|x| x.set(j));
             let mut w1 = vec![];
-            recover_asides(&dst, &mut w1);
+            recover_asides_locked(&dst, &mut w1);
             RECOVER_KILL_AT.with(|x| x.set(0));
             let mut w2 = vec![];
-            recover_asides(&dst, &mut w2);
+            recover_asides_locked(&dst, &mut w2);
             let ctx = format!("k={k} j={j}: {w1:?} / {w2:?} {:?}", names_in_dir(&dst));
             let h = r27_check(&dst, &ctx);
             assert_eq!(h, if k >= 6 { b"NEW" } else { b"OLD" }, "{ctx}");
             assert!(!names_in_dir(&dst).iter().any(|n| n.starts_with(".unpack-old.")), "{ctx}");
             // A third pass has nothing to do.
             let mut w3 = vec![];
-            recover_asides(&dst, &mut w3);
+            recover_asides_locked(&dst, &mut w3);
             assert!(w3.is_empty(), "{ctx}: {w3:?}");
             cases += 1;
         }
@@ -2135,7 +2154,7 @@ fn r28_hostile_notes_are_reported_not_acted_on() {
         fs::write(d.join(".unpack-replace.0.json"), note).unwrap();
         let before = names_in_dir(&d);
         let mut w = vec![];
-        recover_asides(&d, &mut w);
+        recover_asides_locked(&d, &mut w);
         assert!(w.iter().any(|x| x.contains("isn't one I can trust")), "note {i}: {w:?}");
         assert!(!w.iter().any(|x| x.contains("removed the old copy") || x.contains("put the old package back")), "note {i}: {w:?}");
         assert_eq!(names_in_dir(&d), before, "note {i}: nothing moved");
@@ -2174,7 +2193,10 @@ fn r28_undo_leaves_what_it_cannot_prove() {
     }));
     let e = std::thread::Builder::new()
         .name("r28-undo".into())
-        .spawn(move || replace_unit(&d.clone(), [Some(d.join("ABCD0001")), Some(d.join("ABCD0001.data"))], [(&sh, &dh), (&sd, &dd)]))
+        .spawn(move || {
+            let lock = lock_type_folder(&d, &|| false, &mut || {}).unwrap();
+            replace_unit(&d, &lock, [Some(d.join("ABCD0001")), Some(d.join("ABCD0001.data"))], [(&sh, &dh), (&sd, &dd)])
+        })
         .unwrap()
         .join()
         .unwrap()
@@ -2198,11 +2220,11 @@ fn r28_undo_leaves_what_it_cannot_prove() {
 fn r28_stale_temp_notes() {
     let td = crate::testutil::TmpDir::new("arch-r28-tmp");
     let d = td.path();
-    let ours = r#"{"phase":"replacing","old":[["ABCD0001",".unpack-old.3.ABCD0001",false]],"new":[["abcd0001",".unpack-new.3.abcd0001",false,"x"],["abcd0001.data",".unpack-new.3.abcd0001.data",true,"y"]]}"#;
+    let ours = r#"{"phase":"replacing","old":[["ABCD0001",".unpack-old.3.ABCD0001",false,"o"]],"new":[["abcd0001",".unpack-new.3.abcd0001",false,"x"],["abcd0001.data",".unpack-new.3.abcd0001.data",true,"y"]]}"#;
     fs::write(d.join(".unpack-replace.3.tmp"), ours).unwrap();
     fs::write(d.join(".unpack-replace.4.tmp"), b"{half wr").unwrap();
     let mut w = vec![];
-    recover_asides(d, &mut w);
+    recover_asides_locked(d, &mut w);
     assert!(!d.join(".unpack-replace.3.tmp").exists());
     assert!(d.join(".unpack-replace.4.tmp").exists());
     assert_eq!(w.len(), 1, "{w:?}");
@@ -2396,7 +2418,7 @@ fn r29_oversized_note_is_refused() {
     fs::write(d.join(".unpack-replace.0.json"), &big).unwrap();
     fs::write(d.join(".unpack-replace.1.tmp"), &big).unwrap();
     let mut w = vec![];
-    recover_asides(d, &mut w);
+    recover_asides_locked(d, &mut w);
     assert_eq!(w.len(), 2, "{w:?}");
     assert!(d.join(".unpack-replace.0.json").exists() && d.join(".unpack-replace.1.tmp").exists());
 }
@@ -2635,4 +2657,114 @@ fn r35_l5_drop_extras_deep_tree_single_pass() {
     assert!(note.contains("Skipped 2000 extra files"), "{}", &note[..80]);
     assert!(!root.join("Scans").exists());
     assert!(keep.join("default.xex").is_file() && root.join("Game/notes.txt").is_file());
+}
+
+/// K1: killed Replace, user edits the new .data before repair — never pair the old header with edited data.
+#[test]
+fn k1_edited_data_after_kill_never_mixes_package() {
+    let td = crate::testutil::TmpDir::new("arch-k1-edit");
+    for step in 1..=9 {
+        let prof = td.path().join(format!("p{step}"));
+        let dst = r27_setup(&prof);
+        let (st, tree) = r27_stage(td.path(), &format!("k1{step}a"), b"NEW");
+        REPLACE_KILL_AT.with(|k| k.set(step));
+        assert!(place_title_trees(&st, &[tree], &prof, Collision::Replace, 1, 0, 0, vec![], &Jobs::default(), "t", &mut |_, _| {}).is_err());
+        REPLACE_KILL_AT.with(|k| k.set(0));
+        let (st2, tree2) = r27_stage(td.path(), &format!("k1{step}b"), b"NEW");
+        if step >= 6 {
+            let data_live = fs::read_dir(&dst)
+                .unwrap()
+                .flatten()
+                .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("abcd0001.data"))
+                .map(|e| e.path().join("Data0000"));
+            if let Some(p) = data_live {
+                fs::write(&p, b"USER-EDIT").unwrap();
+            }
+        }
+        let r = place_title_trees(&st2, &[tree2], &prof, Collision::Skip, 1, 0, 0, vec![], &Jobs::default(), "t", &mut |_, _| {}).unwrap();
+        let _ = r;
+        let live_hdr = fs::read_dir(&dst)
+            .unwrap()
+            .flatten()
+            .find(|e| {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                n.len() == 8 && n.eq_ignore_ascii_case("abcd0001")
+            })
+            .map(|e| fs::read(e.path()).unwrap());
+        let live_data = fs::read_dir(&dst)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("abcd0001.data"))
+            .map(|e| fs::read(e.path().join("Data0000")).unwrap());
+        let ctx = format!("step {step}: {:?} {:?}", live_hdr, live_data);
+        if step >= 6 {
+            assert_eq!(live_hdr.as_deref(), Some(b"NEW" as &[u8]), "{ctx}: new header kept, not the old one");
+            assert_eq!(live_data.as_deref(), Some(b"USER-EDIT" as &[u8]), "{ctx}: user's edit kept");
+            assert_ne!(live_hdr.as_deref(), Some(b"OLD" as &[u8]), "{ctx}: never the old header beside edited data");
+        }
+    }
+}
+
+/// K2: renaming the type folder during Replace stops the job and rolls back what is provably ours.
+#[test]
+#[cfg(unix)]
+fn k2_rename_during_replace_stops_and_rolls_back() {
+    let _serial = R27_PAUSE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let td = crate::testutil::TmpDir::new("arch-k2-rename");
+    let prof = td.path().join("prof");
+    let dst = r27_setup(&prof);
+    let sh = td.path().join("abcd0001");
+    fs::write(&sh, b"NEW").unwrap();
+    let sd = td.path().join("abcd0001.data");
+    fs::create_dir_all(&sd).unwrap();
+    fs::write(sd.join("Data0000"), b"NEW").unwrap();
+    let (dh, dd) = (dst.join("abcd0001"), dst.join("abcd0001.data"));
+    let dst_c = dst.clone();
+    let away = td.path().join("away");
+    let away_c = away.clone();
+    *REPLACE_PAUSE.lock().unwrap() = Some(Box::new(move |n| {
+        if n == 4 {
+            fs::rename(&dst_c, &away_c).unwrap();
+            fs::create_dir_all(&dst_c).unwrap();
+        }
+    }));
+    let e = std::thread::Builder::new()
+        .name("k2-rename".into())
+        .spawn(move || replace_unit_locked(&dst, [Some(dst.join("ABCD0001")), Some(dst.join("ABCD0001.data"))], [(&sh, &dh), (&sd, &dd)]))
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap_err();
+    *REPLACE_PAUSE.lock().unwrap() = None;
+    assert!(e.contains("moved or renamed"), "{e}");
+    let old_hdr = fs::read_dir(&away)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("ABCD0001"))
+        .map(|e| e.path());
+    let old_hdr = old_hdr.or_else(|| {
+        fs::read_dir(&away)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().starts_with(".unpack-old.") && e.file_name().to_string_lossy().ends_with("ABCD0001"))
+            .map(|e| e.path())
+    });
+    assert_eq!(fs::read(old_hdr.expect("old header in away")).unwrap(), b"OLD");
+    assert!(!away.join("abcd0001").exists());
+}
+
+/// K2 (logic): folder identity check fails when the path no longer names the locked directory.
+#[test]
+fn k2_folder_identity_mismatch_is_detected() {
+    let td = crate::testutil::TmpDir::new("arch-k2-ident");
+    let ct = td.path().join("00007000");
+    fs::create_dir_all(&ct).unwrap();
+    let lock = lock_type_folder(&ct, &|| false, &mut || {}).unwrap();
+    assert!(lock.ensure_same_folder().is_ok());
+    let old = td.path().join("old");
+    fs::rename(&ct, &old).unwrap();
+    fs::create_dir_all(&ct).unwrap();
+    let err = lock.ensure_same_folder().unwrap_err();
+    assert!(err.contains("moved or renamed"), "{err}");
 }
