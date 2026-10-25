@@ -2314,6 +2314,26 @@ fn recover_asides(ct_dst: &Path, folder: &FolderLock, warnings: &mut Vec<String>
             plural(stray.len(), "it", "them"),
         ));
     }
+    if let Ok(rd2) = fs::read_dir(ct_dst) {
+        for e in rd2.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if !n.starts_with(".unpack-part.") {
+                continue;
+            }
+            let p = e.path();
+            if remove_any(&p).is_ok() {
+                warnings.push(format!(
+                    "Removed {} left over from an interrupted copy during Replace.",
+                    p.display()
+                ));
+            } else {
+                warnings.push(format!(
+                    "{} looks left over from an interrupted copy during Replace; it was not touched, delete it if you don't need it.",
+                    p.display()
+                ));
+            }
+        }
+    }
 }
 
 fn move_recorded(m: &ReplaceManifest, live: &str) -> bool {
@@ -2375,9 +2395,40 @@ fn recover_one(note: &RecoverNote, m: &mut ReplaceManifest, st: &mut Steps, warn
                 && fingerprint(&ct_dst.join(live)).as_deref() != Some(fp.as_str())
         });
         if live_data_changed_after_move {
-            warnings.push(format!(
-                "An earlier Replace of {unit} had both halves in place, but the live .data folder no longer matches what finished moving; I left the set-aside copy for you to check."
-            ));
+            let aside_left = m
+                .old
+                .iter()
+                .any(|(_, a, is_data, _)| *is_data && there(a));
+            let new_aside_left = m
+                .new
+                .iter()
+                .any(|(_, na, is_data, _)| *is_data && there(na));
+            let live_data = m
+                .new
+                .iter()
+                .find(|(_, _, is_data, _)| *is_data)
+                .map(|(live, _, _, _)| ct_dst.join(live).display().to_string());
+            let msg = if aside_left {
+                let p = m
+                    .old
+                    .iter()
+                    .find(|(_, _, is_data, _)| *is_data)
+                    .map(|(_, a, _, _)| ct_dst.join(a).display().to_string())
+                    .unwrap_or_default();
+                format!(
+                    "An earlier Replace of {unit} had both halves in place, but the live .data folder no longer matches what finished moving; I left the set-aside copy at {p} for you to check."
+                )
+            } else if new_aside_left {
+                format!(
+                    "An earlier Replace of {unit} had both halves in place, but the live .data folder no longer matches what finished moving; I left the interrupted new copy aside for you to check."
+                )
+            } else {
+                format!(
+                    "An earlier Replace of {unit} had both halves in place, but the live .data folder no longer matches what finished moving; check {live} yourself.",
+                    live = live_data.unwrap_or_else(|| ct_dst.display().to_string())
+                )
+            };
+            warnings.push(msg);
             st.next()?;
             fs::remove_file(mpath)?;
             return Ok(());
@@ -2448,16 +2499,32 @@ fn recover_one(note: &RecoverNote, m: &mut ReplaceManifest, st: &mut Steps, warn
                     && (move_recorded(m, live) || fingerprint(&p).as_deref() == Some(fp.as_str()))
             });
             if from_this_replace {
-                warnings.push(format!(
-                    "An earlier Replace of {unit} was interrupted, but {} is taken by something that isn't from that Replace. I left the old copy at {} untouched; check them yourself.",
-                    p.display(),
-                    ct_dst.join(&a).display()
-                ));
-                return Ok(());
+                folder.ensure_same_folder().map_err(std::io::Error::other)?;
+                let aside_name = m
+                    .new
+                    .iter()
+                    .find(|(_, _, data, _)| *data == d)
+                    .map(|(_, na, _, _)| na.clone())
+                    .unwrap_or_else(|| format!("{ASIDE_NEW}recover.{}", ln));
+                let dest = free_name(ct_dst, &aside_name);
+                st.next()?;
+                fs::rename(&p, &dest)?;
+            } else {
+                let entry_count = fs::read_dir(&p).map(|rd| rd.flatten().count()).unwrap_or(0);
+                if d && there(&a) && entry_count <= 1 {
+                    folder.ensure_same_folder().map_err(std::io::Error::other)?;
+                    let quarantine = free_name(ct_dst, &format!("{ASIDE_NEW}conflict.{ln}"));
+                    st.next()?;
+                    fs::rename(&p, &quarantine)?;
+                } else {
+                    warnings.push(format!(
+                        "An earlier Replace of {unit} was interrupted, but {} is taken by something that isn't from that Replace. I left the old copy at {} untouched; check them yourself.",
+                        p.display(),
+                        ct_dst.join(&a).display()
+                    ));
+                    continue;
+                }
             }
-            folder.ensure_same_folder().map_err(std::io::Error::other)?;
-            st.next()?;
-            remove_any(&p)?;
         }
         folder.ensure_same_folder().map_err(std::io::Error::other)?;
         st.next()?;

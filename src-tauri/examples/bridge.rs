@@ -131,6 +131,11 @@ static LAUNCH: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 // which calls __test_grant with what it "picked".
 static GRANTS: std::sync::LazyLock<unpack_lib::safecopy::Grants> =
     std::sync::LazyLock::new(Default::default);
+static PICKED: std::sync::LazyLock<std::sync::Mutex<unpack_lib::picked_folders::PickedFolders>> =
+    std::sync::LazyLock::new(|| {
+        let d = std::env::temp_dir().join("unpack-bridge-picked");
+        std::sync::Mutex::new(unpack_lib::picked_folders::PickedFolders::load(d))
+    });
 // Same as the app's setup: built-in menus from UNPACK_TEST_MENUS (fixtures) or resources/menus.
 static BUILTIN: std::sync::LazyLock<unpack_lib::mods::BuiltinSet> =
     std::sync::LazyLock::new(|| {
@@ -368,14 +373,33 @@ fn extra(
         }
         "__test_grant" => {
             // Persist grants (dialog picks). Dropped folders use __test_drop_grant (session-only).
-            a["paths"]
+            for p in a["paths"]
                 .as_array()
                 .cloned()
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|x| x.as_str())
-                .for_each(|p| GRANTS.grant(std::path::Path::new(p)));
+            {
+                let path = std::path::PathBuf::from(p);
+                if path.is_dir() {
+                    let _ = PICKED
+                        .lock()
+                        .unwrap()
+                        .record_dialog_pick(&GRANTS, &path);
+                } else if let Some(parent) = path.parent() {
+                    let _ = PICKED.lock().unwrap().record_dialog_pick(&GRANTS, parent);
+                    GRANTS.grant(&path);
+                }
+            }
             Ok(json!(true))
+        }
+        "record_user_folder" => {
+            let p = a["path"].as_str().unwrap_or("");
+            PICKED
+                .lock()
+                .unwrap()
+                .record_dialog_pick(&GRANTS, std::path::Path::new(p))
+                .map(|_| json!(null))
         }
         "__test_drop_grant" => {
             // Mirrors Tauri DragDrop: session-only grants for dropped dirs / file parents.
@@ -813,7 +837,6 @@ fn extra(
             let r = std::env::var("UNPACK_TEST_DRIVES")
                 .map(|d| unpack_lib::dlc::scan_roots(&[PathBuf::from(d)]))
                 .unwrap_or_default();
-            r.iter().for_each(|p| GRANTS.grant(std::path::Path::new(p)));
             Ok(json!(r))
         }
         "god_extracted" => {

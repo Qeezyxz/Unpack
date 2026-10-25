@@ -6,7 +6,8 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -36,6 +37,34 @@ pub fn is_image(b: &[u8]) -> bool {
     b.starts_with(b"\x89PNG\r\n\x1a\n") || b.starts_with(&[0xFF, 0xD8, 0xFF])
 }
 
+fn rename_denied_retryable(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(5)
+}
+
+fn dest_already_valid_image(dest: &Path) -> bool {
+    let mut head = [0u8; 8];
+    fs::File::open(dest)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|_| is_image(&head))
+}
+
+fn rename_with_retry(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..5 {
+        match fs::rename(tmp, dest) {
+            Ok(()) => return Ok(()),
+            Err(e) if rename_denied_retryable(&e) && attempt < 4 => {
+                last = Some(e);
+                thread::sleep(Duration::from_millis(20 * (attempt as u64 + 1)));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "rename failed after retries")
+    }))
+}
+
 /// Write via a temp file in the same folder, then rename, so readers never see a torn file.
 fn write_atomic(dest: &Path, data: &[u8]) -> std::io::Result<()> {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -50,9 +79,18 @@ fn write_atomic(dest: &Path, data: &[u8]) -> std::io::Result<()> {
         N.fetch_add(1, Ordering::SeqCst)
     ));
     fs::write(&tmp, data)?;
-    fs::rename(&tmp, dest).inspect_err(|_| {
-        let _ = fs::remove_file(&tmp);
-    })
+    match rename_with_retry(&tmp, dest) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if dest_already_valid_image(dest) {
+                let _ = fs::remove_file(&tmp);
+                Ok(())
+            } else {
+                let _ = fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Downscale to at most 300×420 and re-encode as JPEG (~quality 80). Rejects decompression bombs.

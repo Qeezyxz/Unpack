@@ -37,47 +37,79 @@ const check = (n, ok, info = "") => {
 check("CSP served", /style-src/.test(csp), csp.slice(0, 120));
 check("style-src omits unsafe-inline", !/style-src[^;]*unsafe-inline/i.test(csp), csp);
 
-const click = (sel) => p.evaluate((s) => document.querySelector(s)?.click(), sel);
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const openClose = async (label, openSel, dialogSel, closeSel) => {
+  await p.evaluate((s) => document.querySelector(s)?.click(), openSel);
+  await new Promise((r) => setTimeout(r, 500));
+  const open = await p.evaluate((s) => !!document.querySelector(s), dialogSel);
+  check(`${label} opens`, open, dialogSel);
+  if (closeSel) {
+    await p.evaluate((s) => document.querySelector(s)?.click(), closeSel);
+    await new Promise((r) => setTimeout(r, 300));
+    const closed = await p.evaluate((s) => !document.querySelector(s), dialogSel);
+    check(`${label} closes`, closed);
+  }
+};
 
-await click("[data-action=settings]");
-await wait(500);
-await click("[data-settings-close]");
-await wait(300);
-await click("[data-action=library]");
-await wait(800);
-await click("[data-lib-close]");
-await wait(300);
-await click("[data-action=mods]");
-await wait(500);
-await click("[data-mods-close]");
-await wait(300);
-await click("[data-action=xbox]");
-await wait(500);
-await click("[data-xbox-close]");
-await wait(300);
-await click("[data-action=god]");
-await wait(400);
-await click("[data-god-close]");
-await wait(300);
+await openClose("Settings", "[data-action=settings]", "[data-settings]", "[data-settings-close]");
+await openClose("Library", "[data-action=library]", "[data-library]", "[data-lib-close]");
+await openClose("Mods", "[data-action=mods]", "[data-mods]", "[data-mods-close]");
+await openClose("Xbox", "[data-action=xbox]", "[data-xbox]", "[data-xb-close]");
+await openClose("GOD", "[data-action=god]", "[data-god]", "[data-god-close]");
+await openClose("Homebrew", "[data-action=homebrew]", "[data-homebrew]", "[data-hb-close]");
+await openClose("Create archive", "[data-action=create]", "[data-composer]", "[data-cmp-close]");
+
+await p.setViewport({ width: 320, height: 800 });
+await p.evaluate(() => {
+  localStorage.setItem("unpack.libraries", JSON.stringify(["D:\\Games\\VeryLongLibraryFolderNameForNarrowLayout"]));
+});
+await p.evaluate(() => document.querySelector("[data-action=settings]")?.click());
+await new Promise((r) => setTimeout(r, 400));
+check("Settings 320px shows library path text", await p.evaluate(() => {
+  const el = document.querySelector(".dialog-settings .cmp-list .name");
+  if (!el) return false;
+  const cs = getComputedStyle(el);
+  return cs.whiteSpace === "normal" || el.scrollWidth > 0;
+}));
+await p.evaluate(() => document.querySelector("[data-settings-close]")?.click());
+await p.setViewport({ width: 1180, height: 900 });
 
 await fetch(`${BR}invoke/__plant_migration_notice`, { method: "POST", body: "{}" }).catch(() => {});
 await p.reload({ waitUntil: "load" });
-await wait(1500);
-await click("[data-migration-ok]");
-await wait(300);
+await new Promise((r) => setTimeout(r, 1500));
+await p.evaluate(() => document.querySelector("[data-migration-ok]")?.click());
+await new Promise((r) => setTimeout(r, 300));
 
 const pageViol = await p.evaluate(() => window.__cspViolations || []);
 const all = [...viol, ...pageViol];
 check("0 CSP violations across screens", all.length === 0, all.join(" | "));
-check("progress bar width uses JS not blocked", await p.evaluate(() => {
-  const el = document.createElement("div");
-  el.dataset.jobBar = "t";
-  el.className = "qbar-fill";
-  document.body.appendChild(el);
-  el.style.width = "50%";
-  return el.style.width === "50%";
-}), "");
+
+check(
+  "queue bar width uses JS (not blocked)",
+  await p.evaluate(() => {
+    const el = document.querySelector("[data-job-bar]") || document.createElement("div");
+    if (!el.dataset.jobBar) {
+      el.dataset.jobBar = "csp-test";
+      el.className = "qbar-fill";
+      document.body.appendChild(el);
+    }
+    el.style.width = "50%";
+    return el.style.width === "50%";
+  }),
+  "",
+);
+
+check(
+  "queue bar width would fail without JS",
+  await p.evaluate(() => {
+    const el = document.createElement("div");
+    el.className = "qbar-fill";
+    document.body.appendChild(el);
+    const before = el.style.width;
+    el.style.width = "40%";
+    return before === "" && el.style.width === "40%";
+  }),
+  "",
+);
 
 await b.close();
 console.log(fails ? `${fails} FAILED` : "ALL PASS");

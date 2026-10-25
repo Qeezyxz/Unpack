@@ -340,13 +340,15 @@ impl Grants {
             match serde_json::from_str::<Vec<PathBuf>>(&s) {
                 Ok(v) => g.persist.lock().unwrap().extend(v.into_iter().take(5000)),
                 Err(_) => {
+                    static CORRUPT_BAK: AtomicU64 = AtomicU64::new(0);
                     let first = file.with_extension("json.bak");
                     let bak = if first.exists() {
                         let ts = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
-                            .map(|d| d.as_secs())
+                            .map(|d| d.as_millis())
                             .unwrap_or(0);
-                        file.with_file_name(format!("grants.corrupt-{ts}.json.bak"))
+                        let n = CORRUPT_BAK.fetch_add(1, Ordering::SeqCst);
+                        file.with_file_name(format!("grants.corrupt-{ts}-{n}.json.bak"))
                     } else {
                         first
                     };

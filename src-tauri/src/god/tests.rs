@@ -560,12 +560,13 @@ fn verify_package_detects_damage() {
     let f = File::open(&iso).unwrap();
     let src = iso::IsoReader::read(f).unwrap();
     let root = src.volume_descriptor.root_offset;
-    let mut img = File::open(&iso).unwrap();
-    let ti = TitleInfo::from_image(&mut iso::IsoReader::read(File::open(&iso).unwrap()).unwrap())
-        .unwrap();
-    let _ = &mut img;
-    let layout = god::FileLayout::new(&out, &ti.execution_info, ti.content_type);
     let len = fs::metadata(&iso).unwrap().len();
+    let ti = {
+        let img = File::open(&iso).unwrap();
+        TitleInfo::from_image(&mut iso::IsoReader::read(img).unwrap()).unwrap()
+    };
+    let exec = ti.execution_info.clone();
+    let layout = god::FileLayout::new(&out, &exec, ti.content_type);
     verify_package(&layout, 3, len, root).unwrap();
     // header magic
     let hp = layout.con_header_file_path();
@@ -605,11 +606,15 @@ fn verify_package_detects_damage() {
         .contains("damaged"));
     fs::write(&p1, &b).unwrap();
     // size: truncate part 1
-    let f = File::options().write(true).open(&p1).unwrap();
-    f.set_len(b.len() as u64 - 4096).unwrap();
+    {
+        let f = File::options().write(true).open(&p1).unwrap();
+        f.set_len(b.len() as u64 - 4096).unwrap();
+    }
     assert!(verify_package(&layout, 3, len, root)
         .unwrap_err()
         .contains("expected"));
+    drop(src);
+    drop(layout);
     fs::remove_dir_all(&d).unwrap();
 }
 

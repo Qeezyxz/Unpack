@@ -21,11 +21,16 @@ const JSON_OBJECT = ["xboxLastDest", "xboxDrives"];
 // Local PC folders are never taken from a file: pick them again on this PC.
 const LOCAL_PATHS = ["destPath", "libraries"];
 
-/** A Windows or Unix system folder (or anything inside one). */
+/** A Windows or Unix system folder (or anything inside one). Rust `is_system_path` is authoritative in the app. */
 export function isSystemPath(p) {
-  const s = String(p || "").replace(/^\\\\\?\\/, "").replace(/\//g, "\\").toLowerCase();
+  const raw = String(p || "");
+  if (/^\\\\\.\\|^\\\\\?\\/i.test(raw) || /^[\\/]{2}(?![\\/])/.test(raw)) return true;
+  const s = raw.replace(/^\\\\\?\\/, "").replace(/\//g, "\\").toLowerCase();
   if (/^[a-z]:\\(windows|program files|program files \(x86\)|programdata|\$recycle\.bin|system volume information)(\\|$)/.test(s)) return true;
+  if (/^[a-z]:\\users\\(default|all users)(\\|$)/.test(s)) return true;
+  if (/^[a-z]:\\users\\[^\\]+\\appdata(\\|$)/.test(s)) return true;
   if (/\\(system32|syswow64)(\\|$)/.test(s)) return true;
+  if (/^\/etc(\/|$)/.test(raw.toLowerCase()) || /^\/(usr|bin|sbin|boot|dev|proc|sys|system|library|windows)(\/|$)/.test(raw.toLowerCase())) return true;
   if (/^\\(etc|usr|bin|sbin|boot|dev|proc|sys|system|library|windows)(\\|$)/.test(s)) return true;
   return false;
 }

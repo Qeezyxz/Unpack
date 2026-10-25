@@ -22,7 +22,7 @@ check("L2: out-of-range / bad values dropped", !("maxJobs" in r.apply) && !("the
 check("L2: good values kept", r.apply.dlMaxGb === "50" && r.apply.notify === "0" && r.apply.libQuery === "halo");
 check("L2: unknown keys ignored", !("unknownKey" in r.apply));
 check("L2: opt-in off is fine", planImport({ coverNet: "0" }, () => null).apply.coverNet === "0");
-check("isSystemPath", isSystemPath("C:\\Windows") && isSystemPath("c:/program files (x86)/x") && isSystemPath("D:\\x\\System32") && !isSystemPath("C:\\Users\\me\\Games"));
+check("isSystemPath", isSystemPath("C:\\Windows") && isSystemPath("c:/program files (x86)/x") && isSystemPath("D:\\x\\System32") && isSystemPath("D:\\Windows\\System32") && !isSystemPath("C:\\Users\\me\\Games") && isSystemPath("C:\\Users\\me\\AppData\\Local"));
 // R22 M2: network shares, device paths, "..", 8.3 short names and trailing space/dot are refused.
 for (const bad of ["\\\\server\\share\\m.xex", "//server/share/m.xex", "\\\\?\\C:\\m.xex", "\\\\.\\C:\\m.xex",
   "C:\\Mods\\..\\Windows\\m.xex", "/home/me/../../etc/x", "C:\\PROGRA~1\\m.xex", "C:\\Mods \\m.xex", "C:\\Mods.\\m.xex", "D:\\Mods\\m.xex."])

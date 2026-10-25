@@ -115,7 +115,8 @@ Handlers: `xex` (Games/ or Apps/), `plugin` (Plugins/), `tu` and `dlc` (the game
 - **DLC / title updates:**
   - After an archive extracts into its own folder, any Xbox 360 DLC inside is copied into its game automatically. Turn this off in Settings → Xbox 360 DLC.
   - Unpack finds the game by TitleID in the **Game library folders**: the chosen output folder, plus any folders you add in Settings. It understands both Unpack's `Game (GOD)/<TitleID>` layout and a console's `Content/0000000000000000/<TitleID>`.
-  - **Scan drives for Content folders** only looks at `<drive>:\Content` and a few common top-level paths, and lists what it finds for you to **Add** one by one. It never crawls a whole drive.
+  - **Scan drives for Content folders** only looks at `<drive>:\Content` and a few common top-level paths, and lists what it finds for you to **Add** one by one (that click grants access the same way as picking the folder in the dialog). It never crawls a whole drive.
+  - **Folder access:** paths you pick in a native dialog are remembered and restored on startup (USB roots included; the system drive root is not). I refuse system folders (`Windows`, `Program Files`, `AppData`, `/etc`, UNC shares, device paths, and `C:\` or `/`). Downloads, Documents, Desktop and Public are fine. Importing settings cannot grant folders. The first 1.7.4 launch asks once to confirm saved library folders.
   - If the game isn't found, the row says *Game not found (TitleID …)* and the file stays where it is. If a DLC file with the same name already exists, an identical copy is skipped and a different one is saved as `name-2`.
   - **Move DLC instead of copying** is off by default. When on, it deletes the original only after the copy is checked.
   - **Install DLC** (Ctrl+D) does the same for files you pick.

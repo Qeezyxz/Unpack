@@ -209,7 +209,12 @@
     .set-done { justify-content: flex-end; }
     .set-warn { white-space: pre-line; margin: .2rem 0 .6rem; }
     .dialog .set-row input[type=number] { width: 6rem; flex: none; margin: 0; }
-    .dialog-settings .cmp-list .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .dialog-settings .cmp-list .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    @media (max-width: 320px) {
+      .dialog-settings .cmp-list .row { flex-wrap: wrap; align-items: flex-start; }
+      .dialog-settings .cmp-list .name { flex: 1 1 100%; white-space: normal; overflow: visible; text-overflow: unset; word-break: break-all; }
+      .dialog-settings .cmp-list .set-grant-hint { flex: 1 1 auto; }
+    }
     .cmp-list .row-warn { background: color-mix(in srgb, var(--warn, #c90) 12%, transparent); }
     .set-grant-hint { font-size: 0.76rem; margin-right: 0.35rem; }
     .set-row strong { display: block; font-weight: 500; font-size: 0.9rem; }

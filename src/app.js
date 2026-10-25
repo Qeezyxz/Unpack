@@ -3537,7 +3537,17 @@ function bindSettings() {
   root.querySelectorAll("[data-lib-remove]").forEach((b) => b.addEventListener("click", () => { const l = N.settings.libraries; l.splice(Number(b.dataset.libRemove), 1); N.settings.libraries = l; refreshLibraryGrants().then(() => render()); }));
   root.querySelector("[data-lib-add]")?.addEventListener("click", async () => { const p = await N.pickFolder("Add a game library folder"); if (p) { N.settings.libraries = [...N.settings.libraries, p]; await refreshLibraryGrants(); retryDlcNotFound(true); render(); } });
   root.querySelector("[data-lib-scan]")?.addEventListener("click", async () => { foundRoots = await N.invoke("dlc_scan_drives").catch(() => []); render(); });
-  root.querySelectorAll("[data-root-add]").forEach((b) => b.addEventListener("click", async () => { const r = foundRoots[Number(b.dataset.rootAdd)]; if (r) { N.settings.libraries = [...N.settings.libraries, r]; await refreshLibraryGrants(); retryDlcNotFound(true); render(); } }));
+  root.querySelectorAll("[data-root-add]").forEach((b) => b.addEventListener("click", async () => {
+    const r = foundRoots[Number(b.dataset.rootAdd)];
+    if (!r) return;
+    try {
+      await N.invoke("record_user_folder", { path: r });
+      N.settings.libraries = [...N.settings.libraries, r];
+      await refreshLibraryGrants();
+      retryDlcNotFound(true);
+      render();
+    } catch (e) { toast(String(e?.message || e)); }
+  }));
   root.querySelectorAll("[data-lib-grant]").forEach((b) => b.addEventListener("click", async () => { const l = N.settings.libraries[Number(b.dataset.libGrant)]; if (l) await grantLibraryAccess(l); }));
   root.querySelector("[data-deliso-yes]")?.addEventListener("click", () => { N.settings.deleteIsoAfterGod = true; confirmDelIso = false; render(); });
   root.querySelector("[data-deliso-no]")?.addEventListener("click", () => { confirmDelIso = false; render(); });

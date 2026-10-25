@@ -75,27 +75,34 @@ impl PickedFolders {
     }
 
     /// A path the user chose in a native dialog: grant now; remember for auto-restore when safe.
-    pub fn record_dialog_pick(&self, grants: &Grants, p: &Path) {
+    pub fn record_dialog_pick(&self, grants: &Grants, p: &Path) -> Result<(), String> {
         let Ok(c) = fs::canonicalize(p) else {
-            return;
+            return Err("That folder doesn't exist or can't be accessed.".into());
         };
         let c = simplify(c);
+        if is_system_drive_root(&c) {
+            return Err(
+                "Unpack can't use the whole system drive as a folder. Pick a folder on your PC or a USB drive root like E:\\.".into(),
+            );
+        }
         let disp = c.display().to_string();
         if is_system_path(&disp) {
-            return;
+            return Err(
+                "That folder is a Windows or Unix system location. Pick a normal folder instead.".into(),
+            );
         }
-        if allow_auto_restore(&c) {
-            grants.grant(&c);
-            {
-                let mut paths = self.paths.lock().unwrap();
-                if !paths.iter().any(|x| x == &c) {
-                    paths.push(c.clone());
-                }
+        if !allow_auto_restore(&c) {
+            return Err("That folder can't be remembered for automatic access.".into());
+        }
+        grants.grant(&c);
+        {
+            let mut paths = self.paths.lock().unwrap();
+            if !paths.iter().any(|x| x == &c) {
+                paths.push(c.clone());
             }
-            self.save();
-        } else {
-            grants.grant_session(&c);
         }
+        self.save();
+        Ok(())
     }
 
     /// Approved paths (migration confirm) that pass bulk safety rules.
@@ -130,12 +137,25 @@ impl PickedFolders {
     pub fn restore_grants(&self, grants: &Grants) {
         grants.clear_persist();
         let paths = self.paths.lock().unwrap().clone();
+        let mut kept = Vec::new();
         for p in paths {
-            if !allow_auto_restore(&p) {
+            if !p.exists() {
                 continue;
             }
-            grants.grant(&p);
+            let Ok(c) = fs::canonicalize(&p) else {
+                continue;
+            };
+            let c = simplify(c);
+            if !allow_auto_restore(&c) {
+                continue;
+            }
+            grants.grant(&c);
+            if !kept.iter().any(|x| x == &c) {
+                kept.push(c);
+            }
         }
+        *self.paths.lock().unwrap() = kept;
+        self.save();
     }
 
     pub fn run_library_migration_if_needed(
@@ -183,15 +203,15 @@ impl PickedFolders {
 }
 
 fn backup_corrupt(file: &Path) {
+    static N: AtomicU64 = AtomicU64::new(0);
     let first = file.with_extension("json.bak");
     let bak = if first.exists() {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
+            .map(|d| d.as_millis())
             .unwrap_or(0);
-        file.with_file_name(format!(
-            "picked-folders.corrupt-{ts}.json.bak"
-        ))
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        file.with_file_name(format!("picked-folders.corrupt-{ts}-{n}.json.bak"))
     } else {
         first
     };
@@ -277,38 +297,87 @@ pub fn is_bare_drive_root(p: &Path) -> bool {
     false
 }
 
+/// Normalize a path string for system-folder checks (string only; use `fs::canonicalize` at pick/restore time).
+pub fn normalize_path_for_check(p: &str) -> String {
+    let mut s = p.trim().to_string();
+    while let Some(rest) = s.strip_prefix(r"\\?\") {
+        s = rest.to_string();
+    }
+    while let Some(rest) = s.strip_prefix(r"\\.\\") {
+        s = rest.to_string();
+    }
+    if s.starts_with("//") {
+        return s.replace('/', "\\").to_ascii_lowercase();
+    }
+    if s.starts_with('/') {
+        return s.to_ascii_lowercase();
+    }
+    s.replace('/', "\\").to_ascii_lowercase()
+}
+
+fn raw_path_is_device_or_unc(p: &str) -> bool {
+    let t = p.trim();
+    t.starts_with(r"\\.\") || t.starts_with(r"\\?\") || t.starts_with("//") || (t.starts_with("\\\\") && !t.starts_with(r"\\?\"))
+}
+
 /// Windows / Unix system folders (mirrors importcheck.js `isSystemPath`).
 pub fn is_system_path(p: &str) -> bool {
-    let s = p
-        .trim()
-        .strip_prefix(r"\\?\")
-        .unwrap_or(p)
-        .replace('/', "\\")
-        .to_ascii_lowercase();
-    if regex_hostile(s) {
+    if raw_path_is_device_or_unc(p) {
         return true;
     }
-    false
+    regex_hostile(normalize_path_for_check(p))
+}
+
+fn windows_system_folder_on_drive(s: &str) -> bool {
+    s.len() >= 3
+        && s.as_bytes()[1] == b':'
+        && s.as_bytes()[2] == b'\\'
+        && (s[3..].starts_with("windows")
+            || s[3..].starts_with("program files")
+            || s[3..].starts_with("program files (x86)")
+            || s[3..].starts_with("programdata")
+            || s[3..].starts_with("$recycle.bin")
+            || s[3..].starts_with("system volume information"))
+}
+
+fn windows_users_blocked(s: &str) -> bool {
+    if !s.starts_with("c:\\users\\") {
+        return false;
+    }
+    let rest = &s["c:\\users\\".len()..];
+    let first = rest.split('\\').next().unwrap_or("");
+    if first.eq_ignore_ascii_case("default") || first.eq_ignore_ascii_case("all users") {
+        return true;
+    }
+    rest.contains("\\appdata\\") || rest.ends_with("\\appdata")
 }
 
 fn regex_hostile(s: String) -> bool {
-    if s.len() >= 3
-        && s.as_bytes()[1] == b':'
-        && s.as_bytes()[2] == b'\\'
-        && (s.starts_with("c:\\windows")
-            || s.starts_with("c:\\program files")
-            || s.starts_with("c:\\program files (x86)")
-            || s.starts_with("c:\\programdata")
-            || s.starts_with("c:\\users\\")
-            || s.starts_with("c:\\$recycle.bin")
-            || s.starts_with("c:\\system volume information"))
-    {
+    if windows_system_folder_on_drive(&s) {
+        return true;
+    }
+    if windows_users_blocked(&s) {
         return true;
     }
     if s.contains("\\system32\\") || s.contains("\\syswow64\\") {
         return true;
     }
-    s.starts_with("\\etc\\")
+    if s.starts_with("\\\\") && s.len() > 2 {
+        return true;
+    }
+    s.starts_with("/etc/")
+        || s == "/etc"
+        || s.starts_with("/usr/")
+        || s.starts_with("/bin/")
+        || s.starts_with("/sbin/")
+        || s.starts_with("/boot/")
+        || s.starts_with("/dev/")
+        || s.starts_with("/proc/")
+        || s.starts_with("/sys/")
+        || s.starts_with("/system/")
+        || s.starts_with("/library/")
+        || s.starts_with("/windows/")
+        || s.starts_with("\\etc\\")
         || s.starts_with("\\usr\\")
         || s.starts_with("\\bin\\")
         || s.starts_with("\\sbin\\")
@@ -447,9 +516,51 @@ mod tests {
         assert!(reject_for_bulk_add("/"));
         assert!(reject_for_bulk_add(r"C:\Windows\System32"));
         assert!(reject_for_bulk_add("/etc/passwd"));
+        assert!(reject_for_bulk_add(r"D:\Windows\System32"));
         assert!(!reject_for_bulk_add(r"D:\Games\Content"));
         assert!(!reject_for_bulk_add(r"E:\"));
         assert!(reject_for_bulk_add(r"C:\"));
+        assert!(!reject_for_bulk_add(r"C:\Users\Justin\Downloads\x"));
+        assert!(reject_for_bulk_add(r"C:\Users\Justin\AppData\Roaming"));
+        assert!(reject_for_bulk_add(r"\\server\share\games"));
+    }
+
+    #[test]
+    fn users_downloads_allowed_appdata_refused() {
+        assert!(!is_system_path(r"C:\Users\Justin\Downloads\x"));
+        assert!(is_system_path(r"C:\Users\Justin\AppData\Roaming"));
+        assert!(is_system_path("/etc/passwd"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_skips_symlink_to_root() {
+        let d = crate::testutil::TmpDir::new("picked-sym");
+        let link = d.join("link");
+        std::os::unix::fs::symlink("/", &link).unwrap();
+        fs::write(
+            d.join("picked-folders.json"),
+            serde_json::to_string(&vec![link]).unwrap(),
+        )
+        .unwrap();
+        let grants = Grants::with_file(d.join("grants.json"));
+        let picked = PickedFolders::load(d.path().to_path_buf());
+        picked.restore_grants(&grants);
+        assert!(grants.check("/etc/passwd").is_err());
+        assert!(picked.paths.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dialog_pick_refuses_system_drive_root() {
+        let d = crate::testutil::TmpDir::new("picked-root");
+        let grants = Grants::with_file(d.join("grants.json"));
+        let picked = PickedFolders::load(d.path().to_path_buf());
+        let root = if cfg!(windows) {
+            Path::new(r"C:\")
+        } else {
+            Path::new("/")
+        };
+        assert!(picked.record_dialog_pick(&grants, root).is_err());
     }
 
     #[test]
@@ -495,7 +606,7 @@ mod tests {
         fs::create_dir_all(d.join("lib/game")).unwrap();
         fs::write(d.join("lib/game/x"), b"x").unwrap();
         let lib = d.join("lib");
-        picked.record_dialog_pick(&grants, &lib);
+        picked.record_dialog_pick(&grants, &lib).unwrap();
         grants.clear_persist();
         picked.restore_grants(&grants);
         assert!(grants.check(d.join("lib/game/x").to_str().unwrap()).is_ok());
@@ -531,7 +642,9 @@ mod tests {
         let d = crate::testutil::TmpDir::new("picked-atomic");
         let picked = PickedFolders::load(d.path().to_path_buf());
         fs::create_dir_all(d.join("a")).unwrap();
-        picked.record_dialog_pick(&Grants::with_file(d.join("grants.json")), &d.join("a"));
+        picked
+            .record_dialog_pick(&Grants::with_file(d.join("grants.json")), &d.join("a"))
+            .unwrap();
         let raw = fs::read_to_string(d.join("picked-folders.json")).unwrap();
         let v: Vec<PathBuf> = serde_json::from_str(&raw).unwrap();
         assert_eq!(v.len(), 1);

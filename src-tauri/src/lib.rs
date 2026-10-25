@@ -1096,9 +1096,19 @@ async fn pick_path(
     .await
     .map_err(|e| e.to_string())?;
     for p in &chosen {
-        picked_store.record_dialog_pick(&grants, p);
+        picked_store.record_dialog_pick(&grants, p)?;
     }
     Ok(chosen.iter().map(|p| p.display().to_string()).collect())
+}
+
+/// Record explicit user consent for a folder (scan results, etc.) the same way as a native pick.
+#[tauri::command]
+fn record_user_folder(
+    grants: State<'_, safecopy::Grants>,
+    picked_store: State<'_, picked_folders::PickedFolders>,
+    path: String,
+) -> Result<(), String> {
+    picked_store.record_dialog_pick(&grants, Path::new(&path))
 }
 
 #[allow(clippy::too_many_arguments)] // Tauri command surface: one arg per invoke parameter
@@ -1238,7 +1248,7 @@ async fn pick_save(
     .map_err(|e| e.to_string())?;
     if let Some(ref p) = picked {
         if let Some(parent) = p.parent() {
-            picked_store.record_dialog_pick(&grants, parent);
+            picked_store.record_dialog_pick(&grants, parent)?;
         }
     }
     Ok(picked.map(|p| p.display().to_string()))
@@ -2016,6 +2026,7 @@ pub fn run() {
             discord_set_enabled,
             migration_notices,
             paths_are_granted,
+            record_user_folder,
             error_help,
             preflight_local,
             lan_discover,

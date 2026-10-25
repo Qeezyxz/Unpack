@@ -2753,9 +2753,30 @@ fn k1_edited_data_after_kill_never_mixes_package() {
     }
 }
 
+/// B41-H1: recovery must not delete a foreign live `.data` folder when undoing a Replace.
+#[test]
+fn b41_recovery_keeps_foreign_live_data() {
+    let td = crate::testutil::TmpDir::new("arch-b41-foreign");
+    for step in [4usize, 5] {
+        let prof = td.path().join(format!("prof{step}"));
+        let dst = r27_setup(&prof);
+        let (st, tree) = r27_stage(td.path(), &format!("{step}a"), b"NEW");
+        REPLACE_KILL_AT.with(|k| k.set(step));
+        assert!(place_title_trees(&st, &[tree], &prof, Collision::Replace, 1, 0, 0, vec![], &Jobs::default(), "t", &mut |_, _| {}).is_err());
+        REPLACE_KILL_AT.with(|k| k.set(0));
+        let data_dir = dst.join("abcd0001.data");
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(data_dir.join("user1"), b"U1").unwrap();
+        fs::write(data_dir.join("user2"), b"U2").unwrap();
+        let mut w = vec![];
+        recover_asides_locked(&dst, &mut w);
+        assert!(data_dir.join("user1").exists(), "step {step}: {w:?}");
+        assert!(data_dir.join("user2").exists(), "step {step}: {w:?}");
+    }
+}
+
 /// K2: renaming the type folder during Replace stops the job and rolls back what is provably ours.
 #[test]
-#[cfg(unix)]
 fn k2_rename_during_replace_stops_and_rolls_back() {
     let _serial = R27_PAUSE_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let td = crate::testutil::TmpDir::new("arch-k2-rename");
