@@ -1,0 +1,389 @@
+//! Folders the user chose in a native file dialog. Persisted separately from settings and used
+//! to restore path grants on startup (the webview cannot add to this list).
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use crate::safecopy::{plain, simplify, Grants};
+
+const FILE: &str = "picked-folders.json";
+const MIGRATION_MARKER: &str = ".picked-folders-library-migration-v1";
+
+#[derive(Default)]
+pub struct PickedFolders {
+    paths: Mutex<Vec<PathBuf>>,
+    file: Mutex<Option<PathBuf>>,
+    app_data: Mutex<Option<PathBuf>>,
+}
+
+impl PickedFolders {
+    pub fn load(app_data: PathBuf) -> Self {
+        let file = app_data.join(FILE);
+        let mut paths = Vec::new();
+        if let Ok(s) = fs::read_to_string(&file) {
+            if let Ok(v) = serde_json::from_str::<Vec<PathBuf>>(&s) {
+                paths = v.into_iter().take(5000).collect();
+            }
+        }
+        PickedFolders {
+            paths: Mutex::new(paths),
+            file: Mutex::new(Some(file)),
+            app_data: Mutex::new(Some(app_data)),
+        }
+    }
+
+    fn save(&self) {
+        let paths = self.paths.lock().unwrap();
+        if let Some(f) = self.file.lock().unwrap().as_ref() {
+            if let Some(d) = f.parent() {
+                let _ = fs::create_dir_all(d);
+            }
+            let body = serde_json::to_string(&*paths).unwrap_or_default();
+            let _ = fs::write(f, body);
+        }
+    }
+
+    /// A path the user chose in a native dialog: remember for auto-restore and grant now.
+    pub fn record_dialog_pick(&self, grants: &Grants, p: &Path) {
+        let Ok(c) = fs::canonicalize(p) else {
+            return;
+        };
+        let c = simplify(c);
+        {
+            let mut paths = self.paths.lock().unwrap();
+            if !paths.iter().any(|x| x == &c) {
+                paths.push(c.clone());
+            }
+        }
+        self.save();
+        grants.grant(&c);
+    }
+
+    /// Approved paths (migration confirm) that pass bulk safety rules.
+    pub fn remember_approved(&self, grants: &Grants, paths: &[String]) {
+        for p in paths {
+            if p.trim().is_empty() {
+                continue;
+            }
+            if reject_for_bulk_add(p) {
+                continue;
+            }
+            let pb = PathBuf::from(p);
+            if !pb.exists() {
+                continue;
+            }
+            let Ok(c) = fs::canonicalize(&pb) else {
+                continue;
+            };
+            let c = simplify(c);
+            {
+                let mut list = self.paths.lock().unwrap();
+                if !list.iter().any(|x| x == &c) {
+                    list.push(c.clone());
+                }
+            }
+            grants.grant(&c);
+        }
+        self.save();
+    }
+
+    /// Rebuild persisted grants from this list (ignores old grants.json entries).
+    pub fn restore_grants(&self, grants: &Grants) {
+        grants.clear_persist();
+        let paths = self.paths.lock().unwrap().clone();
+        for p in paths {
+            if !p.exists() {
+                continue;
+            }
+            if !allow_auto_restore(&p) {
+                continue;
+            }
+            grants.grant(&p);
+        }
+    }
+
+    pub fn run_library_migration_if_needed(
+        &self,
+        app: &tauri::AppHandle,
+        grants: &Grants,
+    ) {
+        let app_data = self.app_data.lock().unwrap().clone();
+        let Some(app_data) = app_data else {
+            return;
+        };
+        let marker = app_data.join(MIGRATION_MARKER);
+        if marker.is_file() {
+            return;
+        }
+        let libraries = read_libraries_from_web_storage(&app_data);
+        let candidates: Vec<String> = libraries
+            .into_iter()
+            .filter(|p| !p.trim().is_empty() && !reject_for_bulk_add(p))
+            .filter(|p| Path::new(p).exists())
+            .collect();
+        if !candidates.is_empty() {
+            let body = candidates
+                .iter()
+                .map(|p| format!("• {}", plain(p)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let msg = format!(
+                "Unpack 1.7.4 needs your OK to access these game library folders again (saved in your settings):\n\n{body}\n\nAllow access? You can change library folders anytime in Settings."
+            );
+            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+            let yes = app
+                .dialog()
+                .message(msg)
+                .title("Game library folder access")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::YesNo)
+                .blocking_show();
+            if yes {
+                self.remember_approved(grants, &candidates);
+            }
+        }
+        let _ = fs::write(marker, b"1");
+    }
+}
+
+/// Hostile roots we never auto-restore (whole OS volumes).
+pub fn is_hostile_root(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    if s == "/" {
+        return true;
+    }
+    let lower = s.trim_end_matches(['\\', '/']).to_ascii_lowercase();
+    lower == "c:" || lower == "c:\\"
+}
+
+/// Bare drive / filesystem root (`D:\`, `E:/`, `/mnt/usb`).
+pub fn is_bare_drive_root(p: &Path) -> bool {
+    let s = p.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
+    if s == "/" {
+        return true;
+    }
+    if s.len() == 2 && s.as_bytes()[1] == b':' {
+        return s.as_bytes()[0].is_ascii_alphabetic();
+    }
+    #[cfg(windows)]
+    if s.len() == 3 && s.as_bytes()[1] == b':' && s.as_bytes()[2] == b'\\' {
+        return s.as_bytes()[0].is_ascii_alphabetic();
+    }
+    false
+}
+
+/// Windows / Unix system folders (mirrors importcheck.js `isSystemPath`).
+pub fn is_system_path(p: &str) -> bool {
+    let s = p
+        .trim()
+        .strip_prefix(r"\\?\")
+        .unwrap_or(p)
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    if regex_hostile(s) {
+        return true;
+    }
+    false
+}
+
+fn regex_hostile(s: String) -> bool {
+    if s.len() >= 3
+        && s.as_bytes()[1] == b':'
+        && s.as_bytes()[2] == b'\\'
+        && (s.starts_with("c:\\windows")
+            || s.starts_with("c:\\program files")
+            || s.starts_with("c:\\program files (x86)")
+            || s.starts_with("c:\\programdata")
+            || s.starts_with("c:\\$recycle.bin")
+            || s.starts_with("c:\\system volume information"))
+    {
+        return true;
+    }
+    if s.contains("\\system32\\") || s.contains("\\syswow64\\") {
+        return true;
+    }
+    s.starts_with("\\etc\\")
+        || s.starts_with("\\usr\\")
+        || s.starts_with("\\bin\\")
+        || s.starts_with("\\sbin\\")
+        || s.starts_with("\\boot\\")
+        || s.starts_with("\\dev\\")
+        || s.starts_with("\\proc\\")
+        || s.starts_with("\\sys\\")
+        || s.starts_with("\\system\\")
+        || s.starts_with("\\library\\")
+        || s.starts_with("\\windows\\")
+}
+
+/// Paths we refuse when seeding from settings / import (never from dialog session grant).
+pub fn reject_for_bulk_add(p: &str) -> bool {
+    is_system_path(p) || is_bare_drive_root(Path::new(p)) || is_hostile_root(Path::new(p))
+}
+
+/// Whether a remembered path may be re-granted on startup.
+pub fn allow_auto_restore(p: &Path) -> bool {
+    if !p.exists() {
+        return false;
+    }
+    let disp = p.display().to_string();
+    if is_system_path(&disp) || is_hostile_root(p) {
+        return false;
+    }
+    true
+}
+
+/// Read `unpack.libraries` from WebView leveldb under app data (best-effort).
+pub fn read_libraries_from_web_storage(app_data: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let ebw = app_data.join("EBWebView");
+    if !ebw.is_dir() {
+        return out;
+    }
+    let mut scan = |bytes: &[u8]| {
+        if let Some(v) = extract_local_storage_string(bytes, "unpack.libraries") {
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(&v) {
+                for s in arr {
+                    if !out.contains(&s) {
+                        out.push(s);
+                    }
+                }
+            }
+        }
+    };
+    walk_leveldb(&ebw, &mut scan);
+    out
+}
+
+fn walk_leveldb(dir: &Path, f: &mut dyn FnMut(&[u8])) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            walk_leveldb(&p, f);
+            continue;
+        }
+        if let Ok(b) = fs::read(&p) {
+            f(&b);
+        }
+    }
+}
+
+fn extract_local_storage_string(blob: &[u8], key: &str) -> Option<String> {
+    let needle = key.as_bytes();
+    let mut i = 0;
+    while i + needle.len() < blob.len() {
+        if blob[i..].starts_with(needle) {
+            let rest = &blob[i + needle.len()..];
+            if let Some(s) = parse_json_string_value(rest) {
+                return Some(s);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_json_string_value(rest: &[u8]) -> Option<String> {
+    let start = rest.iter().position(|&b| b == b'[' || b == b'"')?;
+    let slice = &rest[start..];
+    if slice.first() == Some(&b'[') {
+        let end = slice.iter().rposition(|&b| b == b']')?;
+        return Some(String::from_utf8_lossy(&slice[..=end]).to_string());
+    }
+    if slice.first() != Some(&b'"') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut esc = false;
+    for &b in slice.iter().skip(1) {
+        if esc {
+            out.push(b as char);
+            esc = false;
+            continue;
+        }
+        if b == b'\\' {
+            esc = true;
+            continue;
+        }
+        if b == b'"' {
+            return Some(out);
+        }
+        out.push(b as char);
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::safecopy::Grants;
+    use std::fs;
+
+    #[test]
+    fn grant_paths_ipc_command_removed() {
+        let lib = include_str!("lib.rs");
+        assert!(lib.contains("paths_are_granted,"));
+        assert!(
+            !lib
+                .lines()
+                .any(|l| l.trim() == "grant_paths," || l.contains("fn grant_paths(")),
+            "grant_paths must not be a Tauri command"
+        );
+        let bridge = include_str!("../examples/bridge.rs");
+        assert!(!bridge.contains("\"grant_paths\""));
+    }
+
+    #[test]
+    fn bulk_add_refuses_root_and_system() {
+        assert!(reject_for_bulk_add("C:\\"));
+        assert!(reject_for_bulk_add("C:/"));
+        assert!(reject_for_bulk_add("/"));
+        assert!(reject_for_bulk_add(r"C:\Windows\System32"));
+        assert!(reject_for_bulk_add("/etc/passwd"));
+        assert!(!reject_for_bulk_add(r"D:\Games\Content"));
+    }
+
+    #[test]
+    fn imported_path_not_granted_without_picked_list() {
+        let d = crate::testutil::TmpDir::new("picked-import");
+        let grants = Grants::with_file(d.join("grants.json"));
+        let picked = PickedFolders::load(d.path().to_path_buf());
+        fs::create_dir_all(d.join("lib/games")).unwrap();
+        let lib = d.join("lib/games").display().to_string();
+        // Simulates settings/import only — not on picked list.
+        picked.restore_grants(&grants);
+        assert!(grants.check(&lib).is_err());
+    }
+
+    #[test]
+    fn dialog_picked_folder_is_restored() {
+        let d = crate::testutil::TmpDir::new("picked-restore");
+        let grants = Grants::with_file(d.join("grants.json"));
+        let picked = PickedFolders::load(d.path().to_path_buf());
+        fs::create_dir_all(d.join("lib/game")).unwrap();
+        fs::write(d.join("lib/game/x"), b"x").unwrap();
+        let lib = d.join("lib");
+        picked.record_dialog_pick(&grants, &lib);
+        grants.clear_persist();
+        picked.restore_grants(&grants);
+        assert!(grants.check(d.join("lib/game/x").to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn remember_approved_skips_root() {
+        let d = crate::testutil::TmpDir::new("picked-mig");
+        let grants = Grants::with_file(d.join("grants.json"));
+        let picked = PickedFolders::load(d.path().to_path_buf());
+        fs::create_dir_all(d.join("good")).unwrap();
+        let good = d.join("good").display().to_string();
+        picked.remember_approved(&grants, &[r"E:\".into(), good.clone()]);
+        assert!(grants.check(&good).is_ok());
+        let saved: Vec<PathBuf> =
+            serde_json::from_str(&fs::read_to_string(d.join("picked-folders.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.len(), 1);
+    }
+}

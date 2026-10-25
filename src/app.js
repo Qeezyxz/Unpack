@@ -85,20 +85,35 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.remove("show"), 2600);
 }
 
-// Dismissable notice, shown once (Rust deletes the notice file when it is read).
-function showMigrationNotice(msg) {
+// Dismissable notices (queued so two at startup do not overlap).
+const migrationNoticeQueue = [];
+let migrationNoticeOpen = false;
+function drainMigrationNotices() {
+  if (migrationNoticeOpen || !migrationNoticeQueue.length) return;
+  migrationNoticeOpen = true;
+  const msg = migrationNoticeQueue.shift();
   const el = document.createElement("div");
-  el.id = "migration-notice";
+  el.className = "migration-notice";
   el.setAttribute("role", "status");
-  el.style.cssText = "position:fixed;left:50%;bottom:24px;transform:translateX(-50%);max-width:640px;z-index:9999;padding:12px 16px;border-radius:8px;background:var(--panel,#222);color:var(--text,#eee);border:1px solid var(--accent,#5a8);box-shadow:0 4px 16px rgba(0,0,0,.4);display:flex;gap:12px;align-items:flex-start";
   const t = document.createElement("div");
+  t.className = "migration-notice-text";
   t.textContent = msg;
   const b = document.createElement("button");
+  b.type = "button";
+  b.className = "btn btn-primary btn-sm";
   b.textContent = "OK";
   b.setAttribute("data-migration-ok", "");
-  b.onclick = () => el.remove();
+  b.onclick = () => {
+    el.remove();
+    migrationNoticeOpen = false;
+    drainMigrationNotices();
+  };
   el.append(t, b);
   document.body.appendChild(el);
+}
+function showMigrationNotice(msg) {
+  if (msg) migrationNoticeQueue.push(String(msg));
+  drainMigrationNotices();
 }
 
 // Red error banner: stays on top of every dialog until dismissed or the next job starts.
@@ -1092,7 +1107,7 @@ function tileColor(tid) {
 function gameTile(g, coverUrl) {
   const [a, b] = tileColor(g.title_id);
   const initials = g.name.replace(/[^\p{L}\p{N} ]/gu, "").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
-  const tile = `<svg class="tile" viewBox="0 0 64 80" aria-hidden="true" ${coverUrl ? "hidden" : ""}><defs><linearGradient id="t${escapeHtml(g.title_id)}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${a} 70% 55%)"/><stop offset="1" stop-color="hsl(${b} 70% 38%)"/></linearGradient></defs><rect width="64" height="80" rx="10" fill="url(#t${escapeHtml(g.title_id)})"/><circle cx="52" cy="14" r="22" fill="#fff" fill-opacity=".08"/><path d="M0 62 L64 46 V80 H0z" fill="#000" fill-opacity=".18"/><text x="32" y="44" text-anchor="middle" font-family="Outfit, sans-serif" font-weight="700" font-size="22" fill="#fff">${escapeHtml(initials)}</text><text x="32" y="72" text-anchor="middle" font-family="Outfit, sans-serif" font-size="7" fill="#fff" fill-opacity=".8">${escapeHtml(g.title_id)}</text></svg>`;
+  const tile = `<svg class="tile" viewBox="0 0 64 80" aria-hidden="true"${coverUrl ? " hidden" : ""}><defs><linearGradient id="t${escapeHtml(g.title_id)}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${a} 70% 55%)"/><stop offset="1" stop-color="hsl(${b} 70% 38%)"/></linearGradient></defs><rect width="64" height="80" rx="10" fill="url(#t${escapeHtml(g.title_id)})"/><circle cx="52" cy="14" r="22" fill="#fff" fill-opacity=".08"/><path d="M0 62 L64 46 V80 H0z" fill="#000" fill-opacity=".18"/><text x="32" y="44" text-anchor="middle" font-family="Outfit, sans-serif" font-weight="700" font-size="22" fill="#fff">${escapeHtml(initials)}</text><text x="32" y="72" text-anchor="middle" font-family="Outfit, sans-serif" font-size="7" fill="#fff" fill-opacity=".8">${escapeHtml(g.title_id)}</text></svg>`;
   const img = coverUrl
     ? `<img class="lib-cover" data-lib-cover-path="${escapeHtml(g.path)}" src="${escapeHtml(coverUrl)}" alt="" loading="lazy"/>`
     : `<img class="lib-cover" data-lib-cover-path="${escapeHtml(g.path)}" alt="" hidden/>`;
@@ -1107,16 +1122,37 @@ function patchLibraryCoverArt(view) {
     const img = root.querySelector(`[data-lib-cover-path="${CSS.escape(g.path)}"]`);
     if (!img || img.getAttribute("src") === url) continue;
     img.src = url;
-    img.hidden = false;
+    img.removeAttribute("hidden");
     const tile = img.nextElementSibling;
-    if (tile?.classList?.contains("tile")) tile.hidden = true;
+    if (tile?.classList?.contains("tile")) tile.setAttribute("hidden", "");
   }
 }
-async function syncLibraryGrants() {
+let libraryGrants = {};
+function normLibPath(p) {
+  return String(p).replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
+}
+async function refreshLibraryGrants() {
   if (!N.IS_DESKTOP) return;
-  const paths = [...N.settings.libraries];
-  if (N.settings.destMode === "folder" && N.settings.destPath) paths.push(N.settings.destPath);
-  await N.invoke("grant_paths", { paths: [...new Set(paths.filter(Boolean))] }).catch(() => {});
+  const paths = N.settings.libraries.filter(Boolean);
+  if (!paths.length) {
+    libraryGrants = {};
+    return;
+  }
+  const flags = await N.invoke("paths_are_granted", { paths }).catch(() => paths.map(() => false));
+  libraryGrants = {};
+  paths.forEach((p, i) => { libraryGrants[p] = !!flags[i]; });
+}
+async function grantLibraryAccess(expectedPath) {
+  const picked = await N.pickFolder("Grant Unpack access to this folder — pick it again in the dialog.");
+  if (!picked) return;
+  if (normLibPath(picked) !== normLibPath(expectedPath)) {
+    toast("That was a different folder. Pick the library folder shown in Settings.");
+    return;
+  }
+  await refreshLibraryGrants();
+  retryDlcNotFound(true);
+  if (libraryView) openLibrary(true);
+  else render();
 }
 const EMPTY_LIB_ART = `<svg viewBox="0 0 120 80" width="120" height="80" aria-hidden="true"><rect x="14" y="18" width="30" height="40" rx="6" fill="var(--elevated)" stroke="var(--border-strong)" transform="rotate(-8 29 38)"/><rect x="45" y="12" width="30" height="40" rx="6" fill="var(--elevated)" stroke="var(--accent)"/><rect x="76" y="18" width="30" height="40" rx="6" fill="var(--elevated)" stroke="var(--border-strong)" transform="rotate(8 91 38)"/><path d="M54 32h12M60 26v12" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/><ellipse cx="60" cy="72" rx="40" ry="3" fill="var(--border)"/></svg>`;
 function filterLibraryGames(games) {
@@ -1306,7 +1342,7 @@ function renderLibrary() {
     : `<div class="lib-grid">${L.games.map((g, i) => { const c = L.copying[g.path]; return `<div class="lib-card" data-lib-path="${escapeHtml(g.path)}">
         ${gameTile(g, L.covers?.[g.path])}
         <div class="lib-info"><strong title="${escapeHtml(g.path)}">${escapeHtml(g.name)}</strong>
-          ${L.coverGrantHint?.[g.path] ? `<span class="meta warn-text">Re-pick this game's library folder in Settings to show cover art.</span>` : ""}
+          ${L.coverGrantHint?.[g.path] ? `<span class="meta warn-text">Grant access to this game's library folder in Settings to show cover art.</span>` : ""}
           <span>${escapeHtml(g.title_id)} · ${g.size_approx ? "about " : ""}${formatBytes(g.game_size)} · <span class="pill">${escapeHtml(libraryKindLabel(g.kind))}</span></span>
           <span><span class="pill">${g.dlc_count} DLC</span> ${g.dlc_count ? formatBytes(g.dlc_size) : ""} ${g.tu_count ? `<span class="pill">${g.tu_count} TU</span>` : ""}</span>
           ${c ? `<div class="qbar"><div data-job-bar="${escapeHtml(c.id)}" class="qbar-fill"></div></div><span class="${c.error ? "danger" : ""}" data-job-status="${escapeHtml(c.id)}">${escapeHtml(c.error || c.status)}</span>` : ""}
@@ -3383,7 +3419,10 @@ function renderSettings() {
       <div class="set-row"><div class="txt"><strong>Move DLC instead of copying</strong><small>Deletes the original DLC file only after the copy in the game folder is checked.</small></div>
         <label class="switch"><input type="checkbox" data-set-movedlc aria-label="Move DLC instead of copying" ${N.settings.moveDlc ? "checked" : ""}/><span></span></label></div>
       <div class="set-row set-stack"><div class="txt"><strong>Game library folders</strong><small>Where Unpack looks for your games (GOD folders or <code>Content\\0000000000000000</code>). The chosen output folder is always included.</small></div>
-        <div class="cmp-list set-mt">${N.settings.libraries.map((l, i) => `<div class="row"><span class="name" title="${escapeHtml(l)}">${escapeHtml(l)}</span><button class="btn btn-quiet" data-lib-remove="${i}" type="button" aria-label="Remove">${SV(14, 14, ICONS.x)}</button></div>`).join("") || `<div class="preview-empty set-empty">No extra folders yet.</div>`}</div>
+        <div class="cmp-list set-mt">${N.settings.libraries.map((l, i) => {
+          const need = libraryGrants[l] === false;
+          return `<div class="row${need ? " row-warn" : ""}"><span class="name" title="${escapeHtml(l)}">${escapeHtml(l)}</span>${need ? `<span class="warn-text set-grant-hint">No file access</span><button class="btn btn-secondary btn-sm" data-lib-grant="${i}" type="button">Grant access</button>` : ""}<button class="btn btn-quiet" data-lib-remove="${i}" type="button" aria-label="Remove">${SV(14, 14, ICONS.x)}</button></div>`;
+        }).join("") || `<div class="preview-empty set-empty">No extra folders yet.</div>`}</div>
         ${foundRoots ? `<div class="cmp-list set-mt">${foundRoots.length ? foundRoots.map((r, i) => `<div class="row"><span class="name">${escapeHtml(r)}</span><button class="btn btn-secondary btn-sm" data-root-add="${i}" type="button" ${N.settings.libraries.includes(r) ? "disabled" : ""}>${N.settings.libraries.includes(r) ? "Added" : "Add"}</button></div>`).join("") : `<div class="preview-empty set-empty">No Content folders found at the top of any drive.</div>`}</div>` : ""}
         <div class="actions set-mt"><button class="btn btn-secondary btn-sm" data-lib-add type="button">Add folder…</button><button class="btn btn-secondary btn-sm" data-lib-scan type="button">Scan drives for Content folders</button></div></div>
       <div class="set-row"><div class="txt"><strong>Multi-disc ISO companions</strong><small>When another disc of the same game sits next to an ISO, choose whether to offer it, always add it to the convert queue, or never prompt. Disc 2 alone is never added without disc 1.</small></div>
@@ -3422,10 +3461,10 @@ function renderSettings() {
   </div></div>`;
 }
 function bindSettings() {
-  app.querySelector("[data-action=settings]")?.addEventListener("click", () => { settingsOpen = true; render(); app.querySelector("[data-settings-close]")?.focus(); });
+  app.querySelector("[data-action=settings]")?.addEventListener("click", async () => { settingsOpen = true; await refreshLibraryGrants(); render(); app.querySelector("[data-settings-close]")?.focus(); });
   const root = app.querySelector("[data-settings]");
   if (!root) return;
-  const close = () => { settingsOpen = false; confirmDelIso = false; foundRoots = null; syncLibraryGrants(); render(); app.querySelector("[data-action=settings]")?.focus(); };
+  const close = () => { settingsOpen = false; confirmDelIso = false; foundRoots = null; render(); app.querySelector("[data-action=settings]")?.focus(); };
   root.querySelector("[data-settings-close]")?.addEventListener("click", close);
   app.querySelector("[data-settings-overlay]")?.addEventListener("click", (e) => { if (e.target === e.currentTarget) close(); });
   root.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
@@ -3456,10 +3495,11 @@ function bindSettings() {
   root.querySelector("[data-set-release]")?.addEventListener("change", (e) => { N.settings.releaseCheck = e.target.checked; });
   root.querySelector("[data-set-export]")?.addEventListener("click", () => exportSettings());
   root.querySelector("[data-set-import]")?.addEventListener("click", () => importSettings());
-  root.querySelectorAll("[data-lib-remove]").forEach((b) => b.addEventListener("click", () => { const l = N.settings.libraries; l.splice(Number(b.dataset.libRemove), 1); N.settings.libraries = l; syncLibraryGrants(); render(); }));
-  root.querySelector("[data-lib-add]")?.addEventListener("click", async () => { const p = await N.pickFolder("Add a game library folder"); if (p) { N.settings.libraries = [...N.settings.libraries, p]; syncLibraryGrants(); retryDlcNotFound(true); render(); } });
+  root.querySelectorAll("[data-lib-remove]").forEach((b) => b.addEventListener("click", () => { const l = N.settings.libraries; l.splice(Number(b.dataset.libRemove), 1); N.settings.libraries = l; refreshLibraryGrants().then(() => render()); }));
+  root.querySelector("[data-lib-add]")?.addEventListener("click", async () => { const p = await N.pickFolder("Add a game library folder"); if (p) { N.settings.libraries = [...N.settings.libraries, p]; await refreshLibraryGrants(); retryDlcNotFound(true); render(); } });
   root.querySelector("[data-lib-scan]")?.addEventListener("click", async () => { foundRoots = await N.invoke("dlc_scan_drives").catch(() => []); render(); });
-  root.querySelectorAll("[data-root-add]").forEach((b) => b.addEventListener("click", () => { const r = foundRoots[Number(b.dataset.rootAdd)]; if (r) { N.settings.libraries = [...N.settings.libraries, r]; syncLibraryGrants(); retryDlcNotFound(true); render(); } }));
+  root.querySelectorAll("[data-root-add]").forEach((b) => b.addEventListener("click", async () => { const r = foundRoots[Number(b.dataset.rootAdd)]; if (r) { N.settings.libraries = [...N.settings.libraries, r]; await refreshLibraryGrants(); retryDlcNotFound(true); render(); } }));
+  root.querySelectorAll("[data-lib-grant]").forEach((b) => b.addEventListener("click", async () => { const l = N.settings.libraries[Number(b.dataset.libGrant)]; if (l) await grantLibraryAccess(l); }));
   root.querySelector("[data-deliso-yes]")?.addEventListener("click", () => { N.settings.deleteIsoAfterGod = true; confirmDelIso = false; render(); });
   root.querySelector("[data-deliso-no]")?.addEventListener("click", () => { confirmDelIso = false; render(); });
   root.querySelector("[data-set-autowrite]")?.addEventListener("change", (e) => { const m = app.querySelector(".desk [data-setting=autoWrite]"); if (m) { m.checked = e.target.checked; m.dispatchEvent(new Event("change")); } });
@@ -4534,11 +4574,7 @@ async function initDesktop() {
     nativeOk = false;
   }
   await N.initNativeEvents();
-  await syncLibraryGrants();
-  if (!localStorage.getItem("unpack.libraryGrantsSynced") && N.settings.libraries.length) {
-    localStorage.setItem("unpack.libraryGrantsSynced", "1");
-    showMigrationNotice("Your saved game library folders were approved for file access and cover art.");
-  }
+  await refreshLibraryGrants();
   await N.invoke("discord_set_enabled", { enabled: N.settings.discordPresence }).catch(() => {});
   // One-time notice when the update had to set the older settings profile aside (R19 L5).
   for (const msg of await N.invoke("migration_notices").catch(() => [])) showMigrationNotice(msg);

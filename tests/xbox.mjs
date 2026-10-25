@@ -5,7 +5,6 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 const TMP = os.tmpdir();
-import path from "path";
 import { execFileSync, spawn } from "child_process";
 const W = path.join(TMP, "unpack-xbox-e2e"), ROOT = W + "/console", LIB = W + "/lib";
 const FTP_PORT = 2121 + Math.floor(Math.random() * 500);

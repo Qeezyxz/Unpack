@@ -4,7 +4,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 const TMP = os.tmpdir();
-import { execFileSync } from "child_process";
+import { execFileSync, spawn } from "child_process";
 const W = path.join(TMP, "unpack-dlc-e2e"), OUT = W + "/out", SRC = W + "/src";
 fs.rmSync(W, { recursive: true, force: true });
 fs.mkdirSync(SRC + "/pack/sub", { recursive: true });
@@ -22,12 +22,26 @@ fs.writeFileSync(OUT + "/Halo 3 (GOD)/4D5307E6/00000002/MAPPACK1", "SOMETHING EL
 // a second library with the other game (console layout), added in Settings
 const LIB2 = W + "/usb";
 fs.mkdirSync(LIB2 + "/Content/0000000000000000/0ABCDEF1/00007000", { recursive: true });
+const tauri = new URL("../src-tauri/", import.meta.url).pathname;
+const PORT = 18900 + Math.floor(Math.random() * 40);
+const br = spawn("./target/debug/examples/bridge", ["../src"], {
+  cwd: tauri,
+  env: {
+    ...process.env,
+    UNPACK_BRIDGE_PORT: String(PORT),
+    UNPACK_TEST_DRIVES: LIB2,
+    UNPACK_7ZA: tauri + "binaries/7za-x86_64-unknown-linux-gnu",
+  },
+  stdio: ["ignore", "ignore", "pipe"],
+});
+await new Promise((r) => br.stderr.on("data", (d) => /bridge on/.test(d) && r()));
+const BR = `http://127.0.0.1:${PORT}`;
 const b = await puppeteer.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox"] });
 const p = await b.newPage(); await p.setViewport({ width: 1180, height: 900 });
 const errors = []; p.on("pageerror", (e) => errors.push(e.message));
 await p.evaluateOnNewDocument(fs.readFileSync(new URL("./test-shim.js", import.meta.url), "utf8"));
 await p.evaluateOnNewDocument(() => { if (!sessionStorage.getItem("x")) { localStorage.clear(); localStorage.setItem("unpack.theme", "dark"); sessionStorage.setItem("x", "1"); } });
-await p.goto(`http://127.0.0.1:${process.env.UNPACK_BRIDGE_PORT || 18790}/`, { waitUntil: "load" });
+await p.goto(`${BR}/`, { waitUntil: "load" });
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 await wait(900);
 let fails = 0; const check = (n, ok, i = "") => { if (!ok) fails++; console.log((ok ? "PASS " : "FAIL ") + n + (i ? " — " + i : "")); };
@@ -87,6 +101,7 @@ await p.keyboard.press("Escape"); await wait(200);
 check("tips dismissible", await p.evaluate(() => { document.querySelector("[data-tips-done]")?.click(); return localStorage.getItem("unpack.tipsDone") === "1"; }));
 check("no page errors", !errors.length, errors.join("; "));
 await b.close();
+br.kill();
 fs.rmSync(W, { recursive: true, force: true });
 if (process.env.UPDATE_SHOTS !== "1") fs.rmSync(path.join(TMP, "unpack-shots-dlc"), { recursive: true, force: true });
 process.exit(fails ? 1 : 0);

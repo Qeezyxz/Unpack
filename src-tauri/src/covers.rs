@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -60,11 +60,15 @@ pub fn prepare_cover_bytes(raw: &[u8]) -> Option<Vec<u8>> {
     if !is_image(raw) {
         return None;
     }
-    let img = image::load_from_memory(raw).ok()?;
-    let (w, h) = (img.width(), img.height());
+    let (w, h) = image::ImageReader::new(Cursor::new(raw))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
     if w > MAX_DECODE_DIM || h > MAX_DECODE_DIM {
         return None;
     }
+    let img = image::load_from_memory(raw).ok()?;
     let scaled = if w > COVER_MAX_W || h > COVER_MAX_H {
         img.thumbnail(COVER_MAX_W, COVER_MAX_H)
     } else {
@@ -182,6 +186,7 @@ fn note_failure(cache_dir: &Path, title_id: &str) {
 }
 
 fn clear_failure(cache_dir: &Path, title_id: &str) {
+    let _g = FAILURE_LOCK.lock().unwrap();
     let tid = title_id.to_ascii_uppercase();
     let mut map = read_failures(cache_dir);
     if map.remove(&tid).is_some() {
@@ -465,6 +470,17 @@ mod tests {
         assert!(out.len() < 50_000);
         let decoded = image::load_from_memory(&out).unwrap();
         assert!(decoded.width() <= COVER_MAX_W && decoded.height() <= COVER_MAX_H);
+    }
+
+    #[test]
+    fn oversize_png_header_rejected_before_decode() {
+        let mut png = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, 0x49, 0x48, 0x44, 0x52,
+        ];
+        png.extend_from_slice(&8192u32.to_be_bytes());
+        png.extend_from_slice(&8192u32.to_be_bytes());
+        png.extend_from_slice(&[8, 2, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(prepare_cover_bytes(&png).is_none());
     }
 
     #[test]

@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha1::{Digest, Sha1};
 
@@ -339,7 +340,16 @@ impl Grants {
             match serde_json::from_str::<Vec<PathBuf>>(&s) {
                 Ok(v) => g.persist.lock().unwrap().extend(v.into_iter().take(5000)),
                 Err(_) => {
-                    let bak = file.with_extension("json.bak");
+                    let first = file.with_extension("json.bak");
+                    let bak = if first.exists() {
+                        let ts = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        file.with_file_name(format!("grants.corrupt-{ts}.json.bak"))
+                    } else {
+                        first
+                    };
                     let _ = fs::copy(&file, &bak);
                 }
             }
@@ -368,15 +378,22 @@ impl Grants {
             let _ = fs::remove_file(&tmp);
         }
     }
-    /// Grant every path that canonicalizes (e.g. saved library folders from Settings).
-    pub fn grant_paths(&self, paths: &[impl AsRef<Path>]) {
-        for p in paths {
-            if p.as_ref().as_os_str().is_empty() {
-                continue;
-            }
-            self.grant(p.as_ref());
+    /// True when `p` canonicalizes to a granted path or is inside one.
+    pub fn is_granted(&self, p: &str) -> bool {
+        if p.trim().is_empty() {
+            return false;
         }
+        let Ok(c) = fs::canonicalize(p) else {
+            return false;
+        };
+        self.allowed(&simplify(c))
     }
+    /// Drop every persisted grant (used before rebuilding from `picked-folders.json`).
+    pub fn clear_persist(&self) {
+        self.persist.lock().unwrap().clear();
+        self.save();
+    }
+
     /// User-picked / scan-approved path — persisted across restarts.
     pub fn grant(&self, p: &Path) {
         let Ok(c) = fs::canonicalize(p) else { return };
@@ -673,17 +690,6 @@ mod tests {
     }
 
     #[test]
-    fn grant_paths_batch() {
-        let d = tmp("grant-batch");
-        fs::create_dir_all(d.join("a")).unwrap();
-        fs::create_dir_all(d.join("b/game")).unwrap();
-        let g = Grants::default();
-        g.grant_paths(&[d.join("a"), d.join("b")]);
-        assert!(g.check(d.join("b/game").to_str().unwrap()).is_ok());
-        fs::remove_dir_all(&d).unwrap();
-    }
-
-    #[test]
     fn grants_save_atomic_and_corrupt_load() {
         let d = tmp("grants-io");
         let f = d.join("state/grants.json");
@@ -704,6 +710,27 @@ mod tests {
             .filter(|n| n.to_string_lossy().contains(".tmp"))
             .collect();
         assert!(stray.is_empty(), "{stray:?}");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn grants_corrupt_backup_not_overwritten() {
+        let d = tmp("grants-bak");
+        let f = d.join("state/grants.json");
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(&f, b"not json").unwrap();
+        let _ = Grants::with_file(f.clone());
+        let bak1 = f.with_extension("json.bak");
+        assert!(bak1.is_file());
+        fs::write(&f, b"{bad again}").unwrap();
+        let _ = Grants::with_file(f.clone());
+        assert!(bak1.is_file());
+        let extra = fs::read_dir(d.join("state"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("grants.corrupt-"))
+            .count();
+        assert_eq!(extra, 1);
         fs::remove_dir_all(&d).unwrap();
     }
 

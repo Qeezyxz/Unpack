@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """Build the small archive fixtures the Rust and UI suites read from UNPACK_TESTDATA / TESTDATA.
 
-    python3 tests/make_testdata.py [/workspace/testdata]
+    python3 tests/make_testdata.py <dest-dir>
 
 Everything is generated with the bundled 7-Zip (or a system 7za) and the standard library, so a fresh
 checkout needs no external files. The big (300 MiB) and ISO fixtures are built on demand by the suites.
 Existing files are left alone; delete the folder to rebuild.
-"""
-import os, shutil, struct, subprocess, sys, zipfile
 
-dest = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("UNPACK_TESTDATA", "/workspace/testdata"))
+If you omit the path, a fresh directory under the system temp folder is used (never the shared repo tree).
+"""
+import os, shutil, struct, subprocess, sys, tempfile, zipfile
+
+if len(sys.argv) > 1:
+    dest = os.path.abspath(sys.argv[1])
+elif os.environ.get("UNPACK_TESTDATA"):
+    dest = os.path.abspath(os.environ["UNPACK_TESTDATA"])
+else:
+    dest = tempfile.mkdtemp(prefix="unpack-testdata-")
+    print(f"using temp testdata dir {dest}", file=sys.stderr)
 sz = os.environ.get("UNPACK_7ZA") or next((p for p in ["/usr/lib/7zip/7za", "/usr/bin/7za", "/usr/bin/7zz", "/usr/bin/7z"] if os.path.exists(p)), None)
 if not sz:
     sys.exit("7-Zip not found (set UNPACK_7ZA)")

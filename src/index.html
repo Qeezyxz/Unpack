@@ -149,6 +149,9 @@
     .preview-empty { min-height: 10rem; display: grid; place-items: center; color: var(--muted); font-size: 0.86rem; text-align: center; padding: 1.5rem; }
     .toast { position: fixed; bottom: 1.25rem; left: 50%; transform: translate(-50%, 12px); background: var(--elevated); border: 1px solid var(--border-strong); color: var(--fg); padding: 0.7rem 1rem; border-radius: 12px; font-size: 0.86rem; z-index: 40; opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s var(--ease); box-shadow: var(--shadow); max-width: min(34rem, 92vw); }
     .toast.show { opacity: 1; transform: translate(-50%, 0); }
+    .migration-notice { position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%); max-width: min(40rem, 92vw); z-index: 50; padding: 0.85rem 1rem; border-radius: 12px; background: var(--elevated); color: var(--fg); border: 1px solid var(--border-strong); box-shadow: var(--shadow); display: flex; gap: 0.75rem; align-items: flex-start; }
+    .migration-notice-text { flex: 1; font-size: 0.86rem; line-height: 1.45; }
+    .lib-card svg.tile[hidden] { display: none; }
     .overlay { position: fixed; inset: 0; background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(6px); display: grid; place-items: center; z-index: 30; padding: 1rem; animation: fade .2s ease; }
     @keyframes fade { from { opacity: 0; } }
     .dialog { width: min(26rem, 100%); background: var(--card); border: 1px solid var(--border-strong); border-radius: 20px; padding: 1.3rem; box-shadow: 0 30px 80px -30px rgba(0,0,0,.6); animation: pop .28s var(--ease); }
@@ -215,6 +218,8 @@
     .set-warn { white-space: pre-line; margin: .2rem 0 .6rem; }
     .dialog .set-row input[type=number] { width: 6rem; flex: none; margin: 0; }
     .dialog-settings .cmp-list .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .cmp-list .row-warn { background: color-mix(in srgb, var(--warn, #c90) 12%, transparent); }
+    .set-grant-hint { font-size: 0.76rem; margin-right: 0.35rem; }
     .set-row strong { display: block; font-weight: 500; font-size: 0.9rem; }
     .set-row small { display: block; color: var(--muted); font-size: 0.76rem; margin-top: 0.15rem; line-height: 1.45; }
     .switch { position: relative; width: 42px; height: 24px; flex: none; }

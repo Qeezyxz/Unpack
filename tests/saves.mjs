@@ -4,7 +4,6 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 const TMP = os.tmpdir();
-import path from "path";
 import { spawn } from "child_process";
 
 const W = path.join(TMP, "unpack-saves-e2e");

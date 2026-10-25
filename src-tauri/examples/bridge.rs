@@ -261,15 +261,6 @@ fn extra(
             .and_then(|d| unpack_lib::migrate::take_notice_in(std::path::Path::new(&d)))
             .into_iter()
             .collect::<Vec<_>>())),
-        "grant_paths" => {
-            a["paths"]
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .filter_map(|v| v.as_str())
-                .for_each(|p| GRANTS.grant(std::path::Path::new(p)));
-            Ok(Value::Null)
-        }
         "__plant_migration_notice" => {
             let d = std::env::var_os("UNPACK_TEST_NOTICE_DIR")
                 .ok_or("UNPACK_TEST_NOTICE_DIR not set")?;

@@ -18,6 +18,7 @@ pub mod library;
 pub mod migrate;
 pub mod modnames;
 pub mod mods;
+pub mod picked_folders;
 pub mod preflight;
 pub mod safecopy;
 pub mod saves;
@@ -1055,11 +1056,10 @@ async fn mod_copy(
 }
 
 #[tauri::command]
-async fn dlc_scan_drives(grants: State<'_, safecopy::Grants>) -> Result<Vec<String>, String> {
+async fn dlc_scan_drives(_grants: State<'_, safecopy::Grants>) -> Result<Vec<String>, String> {
     let roots = tauri::async_runtime::spawn_blocking(dlc::scan_content_roots)
         .await
         .map_err(|e| e.to_string())?;
-    roots.iter().for_each(|r| grants.grant(Path::new(r)));
     Ok(roots)
 }
 
@@ -1068,12 +1068,13 @@ async fn dlc_scan_drives(grants: State<'_, safecopy::Grants>) -> Result<Vec<Stri
 async fn pick_path(
     app: AppHandle,
     grants: State<'_, safecopy::Grants>,
+    picked_store: State<'_, picked_folders::PickedFolders>,
     kind: String,
     title: String,
 ) -> Result<Vec<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let a = app.clone();
-    let picked: Vec<PathBuf> = tauri::async_runtime::spawn_blocking(move || {
+    let chosen: Vec<PathBuf> = tauri::async_runtime::spawn_blocking(move || {
         let d = a.dialog().file().set_title(&title);
         let v = if kind == "folder" {
             d.blocking_pick_folder().map(|p| vec![p])
@@ -1087,8 +1088,10 @@ async fn pick_path(
     })
     .await
     .map_err(|e| e.to_string())?;
-    picked.iter().for_each(|p| grants.grant(p));
-    Ok(picked.iter().map(|p| p.display().to_string()).collect())
+    for p in &chosen {
+        picked_store.record_dialog_pick(&grants, p);
+    }
+    Ok(chosen.iter().map(|p| p.display().to_string()).collect())
 }
 
 #[allow(clippy::too_many_arguments)] // Tauri command surface: one arg per invoke parameter
@@ -1211,6 +1214,7 @@ fn set_taskbar_progress(app: AppHandle, pct: Option<u64>) -> Result<(), String> 
 async fn pick_save(
     app: AppHandle,
     grants: State<'_, safecopy::Grants>,
+    picked_store: State<'_, picked_folders::PickedFolders>,
     title: String,
     default_path: Option<String>,
 ) -> Result<Option<String>, String> {
@@ -1227,7 +1231,7 @@ async fn pick_save(
     .map_err(|e| e.to_string())?;
     if let Some(ref p) = picked {
         if let Some(parent) = p.parent() {
-            grants.grant(parent);
+            picked_store.record_dialog_pick(&grants, parent);
         }
     }
     Ok(picked.map(|p| p.display().to_string()))
@@ -1407,10 +1411,10 @@ fn migration_notices() -> Vec<String> {
     migrate::take_notices()
 }
 
-/// Persist grants for folders saved in Settings (library locations, output folder).
+/// Whether each path is inside a folder the user picked in a native dialog (or a prior pick on disk).
 #[tauri::command]
-fn grant_paths(grants: State<'_, safecopy::Grants>, paths: Vec<String>) {
-    grants.grant_paths(&paths);
+fn paths_are_granted(grants: State<'_, safecopy::Grants>, paths: Vec<String>) -> Vec<bool> {
+    paths.iter().map(|p| grants.is_granted(p)).collect()
 }
 
 #[tauri::command]
@@ -1905,7 +1909,9 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir().join("Unpack"));
+            let picked_store = picked_folders::PickedFolders::load(dir.clone());
             let grants = safecopy::Grants::with_file(dir.join("grants.json"));
+            picked_store.restore_grants(&grants);
             ftp::set_resume_dir(dir.join("ftp-resume"));
             // Built-in menus (ships empty): validated once; their files are granted for this
             // session so Copy to USB / Send to Xbox work on them. Read-only in the UI.
@@ -1921,6 +1927,8 @@ pub fn run() {
             for m in &menus.menus {
                 grants.grant_session(Path::new(&m.path));
             }
+            picked_store.run_library_migration_if_needed(app.handle(), &grants);
+            app.manage(picked_store);
             app.manage(grants);
             app.manage(menus);
             app.manage(discord::PresenceHandle::start());
@@ -2003,7 +2011,7 @@ pub fn run() {
             discord_set_activity,
             discord_set_enabled,
             migration_notices,
-            grant_paths,
+            paths_are_granted,
             error_help,
             preflight_local,
             lan_discover,
