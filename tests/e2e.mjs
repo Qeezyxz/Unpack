@@ -269,6 +269,7 @@ if (want("csp")) {
   await q.goto(`http://127.0.0.1:${process.env.UNPACK_BRIDGE_PORT || 18790}/`, { waitUntil: "load" });
   const hdr = await q.evaluate(async () => (await fetch("/")).headers.get("content-security-policy") || "");
   check("page served with app CSP (no unsafe-eval)", /wasm-unsafe-eval/.test(hdr) && !/'unsafe-eval'/.test(hdr), hdr);
+  check("style-src has no unsafe-inline", !/style-src[^;]*unsafe-inline/i.test(hdr), hdr);
   for (const [f, n] of [["sample.rar", 2], ["plain.7z", 4]]) {
     await q.goto(`http://127.0.0.1:${process.env.UNPACK_BRIDGE_PORT || 18790}/`, { waitUntil: "load" });
     const inp = await q.$("input[type=file]");

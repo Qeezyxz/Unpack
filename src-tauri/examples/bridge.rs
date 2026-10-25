@@ -259,6 +259,18 @@ fn extra(
             Ok(Value::Null)
         }
         // The harness can't run a real migration: tests plant the notice file in a temp folder.
+        "paths_are_granted" => {
+            let paths = a["paths"]
+                .as_array()
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|x| x.as_str())
+                        .map(|p| GRANTS.is_granted(p))
+                        .collect::<Vec<bool>>()
+                })
+                .unwrap_or_default();
+            Ok(json!(paths))
+        }
         "migration_notices" => Ok(json!(std::env::var_os("UNPACK_TEST_NOTICE_DIR")
             .and_then(|d| unpack_lib::migrate::take_notice_in(std::path::Path::new(&d)))
             .into_iter()
@@ -424,9 +436,10 @@ fn extra(
                     v.iter()
                         .filter_map(|x| x.as_str())
                         .filter(|s| !s.is_empty())
-                        .map(PathBuf::from)
-                        .collect()
+                        .map(|s| GRANTS.check(s))
+                        .collect::<Result<Vec<_>, _>>()
                 })
+                .transpose()?
                 .unwrap_or_default();
             Ok(serde_json::to_value(unpack_lib::library::scan(&libs)).unwrap())
         }
@@ -768,9 +781,11 @@ fn extra(
                 .map(|v| {
                     v.iter()
                         .filter_map(|x| x.as_str())
-                        .map(PathBuf::from)
-                        .collect()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| GRANTS.check(s))
+                        .collect::<Result<Vec<_>, _>>()
                 })
+                .transpose()?
                 .unwrap_or_default();
             let dir = std::env::temp_dir().join("unpack-bridge-lib-cache");
             let max_age = a["maxAgeSecs"].as_u64().unwrap_or(0);

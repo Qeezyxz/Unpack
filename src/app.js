@@ -1275,6 +1275,7 @@ function libraryIndex(libs, maxAgeSecs, scanId) {
 
 async function openLibrary(forceFresh = false) {
   cancelLibraryScan(); // a new scan replaces any one still running
+  if (N.IS_DESKTOP) await refreshLibraryGrants();
   if (forceFresh && N.IS_DESKTOP) N.invoke("library_cover_reset").catch(() => {}); // Refresh retries covers that failed before
   const scanId = uid();
   libraryView = {
@@ -1298,7 +1299,15 @@ async function openLibrary(forceFresh = false) {
     libraryView.scanMessage = p.message || libraryView.scanMessage;
     render();
   });
-  const libs = dlcLibraries();
+  const allLibs = dlcLibraries();
+  const libs = allLibs.filter((l) => libraryGrants[l] !== false);
+  if (!libs.length && allLibs.length) {
+    toast("Grant access to your library folders in Settings to scan them.");
+    libraryView.loading = false;
+    libraryView.games = [];
+    render();
+    return;
+  }
   const maxAge = forceFresh ? 0 : 3600;
   let timedOut = false;
   let timer;

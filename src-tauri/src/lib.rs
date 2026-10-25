@@ -651,19 +651,26 @@ fn dlc_match_games(libraries: Vec<String>, title_id: String) -> Vec<String> {
         .collect()
 }
 
+fn granted_library_roots(
+    grants: &safecopy::Grants,
+    libraries: &[String],
+) -> Result<Vec<PathBuf>, String> {
+    libraries
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| grants.check(s))
+        .collect()
+}
+
 #[tauri::command]
-async fn library_scan(libraries: Vec<String>) -> Result<Vec<library::Game>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        library::scan(
-            &libraries
-                .iter()
-                .filter(|s| !s.trim().is_empty())
-                .map(PathBuf::from)
-                .collect::<Vec<_>>(),
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())
+async fn library_scan(
+    grants: State<'_, safecopy::Grants>,
+    libraries: Vec<String>,
+) -> Result<Vec<library::Game>, String> {
+    let libs = granted_library_roots(&grants, &libraries)?;
+    tauri::async_runtime::spawn_blocking(move || library::scan(&libs))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1498,6 +1505,7 @@ async fn god_verify_only(path: String) -> Result<String, String> {
 async fn library_index(
     app: AppHandle,
     jobs: State<'_, Jobs>,
+    grants: State<'_, safecopy::Grants>,
     libraries: Vec<String>,
     allow_cover_network: bool,
     max_age_secs: Option<u64>,
@@ -1508,11 +1516,7 @@ async fn library_index(
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("library-cache");
-    let libs: Vec<PathBuf> = libraries
-        .iter()
-        .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from)
-        .collect();
+    let libs = granted_library_roots(&grants, &libraries)?;
     let scan_id = scan_id.unwrap_or_default();
     if !scan_id.is_empty() {
         jobs.register(&scan_id);

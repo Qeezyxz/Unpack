@@ -1,9 +1,12 @@
 //! Folders the user chose in a native file dialog. Persisted separately from settings and used
 //! to restore path grants on startup (the webview cannot add to this list).
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::safecopy::{plain, simplify, Grants};
 
@@ -22,8 +25,15 @@ impl PickedFolders {
         let file = app_data.join(FILE);
         let mut paths = Vec::new();
         if let Ok(s) = fs::read_to_string(&file) {
-            if let Ok(v) = serde_json::from_str::<Vec<PathBuf>>(&s) {
-                paths = v.into_iter().take(5000).collect();
+            match serde_json::from_str::<Vec<PathBuf>>(&s) {
+                Ok(v) => paths = v.into_iter().take(5000).collect(),
+                Err(e) => {
+                    backup_corrupt(&file);
+                    eprintln!(
+                        "unpack: {} is corrupt ({e}); kept previous list empty and backed up the file",
+                        file.display()
+                    );
+                }
             }
         }
         PickedFolders {
@@ -40,33 +50,58 @@ impl PickedFolders {
                 let _ = fs::create_dir_all(d);
             }
             let body = serde_json::to_string(&*paths).unwrap_or_default();
-            let _ = fs::write(f, body);
+            static N: AtomicU64 = AtomicU64::new(0);
+            let tmp = f.with_file_name(format!(
+                ".picked-folders.{}.{:?}.{}.tmp",
+                std::process::id(),
+                std::thread::current().id(),
+                N.fetch_add(1, Ordering::SeqCst)
+            ));
+            if let Ok(mut out) = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)
+            {
+                if out.write_all(body.as_bytes()).is_ok()
+                    && out.sync_all().is_ok()
+                    && fs::rename(&tmp, f).is_ok()
+                {
+                    return;
+                }
+            }
+            let _ = fs::remove_file(&tmp);
         }
     }
 
-    /// A path the user chose in a native dialog: remember for auto-restore and grant now.
+    /// A path the user chose in a native dialog: grant now; remember for auto-restore when safe.
     pub fn record_dialog_pick(&self, grants: &Grants, p: &Path) {
         let Ok(c) = fs::canonicalize(p) else {
             return;
         };
         let c = simplify(c);
-        {
-            let mut paths = self.paths.lock().unwrap();
-            if !paths.iter().any(|x| x == &c) {
-                paths.push(c.clone());
-            }
+        let disp = c.display().to_string();
+        if is_system_path(&disp) {
+            return;
         }
-        self.save();
-        grants.grant(&c);
+        if allow_auto_restore(&c) {
+            grants.grant(&c);
+            {
+                let mut paths = self.paths.lock().unwrap();
+                if !paths.iter().any(|x| x == &c) {
+                    paths.push(c.clone());
+                }
+            }
+            self.save();
+        } else {
+            grants.grant_session(&c);
+        }
     }
 
     /// Approved paths (migration confirm) that pass bulk safety rules.
     pub fn remember_approved(&self, grants: &Grants, paths: &[String]) {
         for p in paths {
-            if p.trim().is_empty() {
-                continue;
-            }
-            if reject_for_bulk_add(p) {
+            if p.trim().is_empty() || reject_for_bulk_add(p) {
                 continue;
             }
             let pb = PathBuf::from(p);
@@ -77,6 +112,9 @@ impl PickedFolders {
                 continue;
             };
             let c = simplify(c);
+            if !allow_auto_restore(&c) {
+                continue;
+            }
             {
                 let mut list = self.paths.lock().unwrap();
                 if !list.iter().any(|x| x == &c) {
@@ -93,9 +131,6 @@ impl PickedFolders {
         grants.clear_persist();
         let paths = self.paths.lock().unwrap().clone();
         for p in paths {
-            if !p.exists() {
-                continue;
-            }
             if !allow_auto_restore(&p) {
                 continue;
             }
@@ -147,7 +182,76 @@ impl PickedFolders {
     }
 }
 
-/// Hostile roots we never auto-restore (whole OS volumes).
+fn backup_corrupt(file: &Path) {
+    let first = file.with_extension("json.bak");
+    let bak = if first.exists() {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        file.with_file_name(format!(
+            "picked-folders.corrupt-{ts}.json.bak"
+        ))
+    } else {
+        first
+    };
+    let _ = fs::copy(file, &bak);
+}
+
+/// True for `/` on Unix and the Windows system volume root (e.g. `C:\`), not removable USB roots like `E:\`.
+pub fn is_system_drive_root(p: &Path) -> bool {
+    if p == Path::new("/") {
+        return true;
+    }
+    if !is_bare_drive_root(p) {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        if let Some(sys) = windows_system_volume_root() {
+            return same_bare_root(p, &sys);
+        }
+    }
+    is_hostile_root(p)
+}
+
+#[cfg(windows)]
+fn windows_system_volume_root() -> Option<PathBuf> {
+    let sys = std::env::var("SystemRoot")
+        .or_else(|_| std::env::var("WINDIR"))
+        .ok()?;
+    let p = PathBuf::from(sys);
+    let s = p.to_string_lossy();
+    if s.len() >= 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic() {
+        let ch = char::from(s.as_bytes()[0]);
+        return Some(PathBuf::from(format!("{}:\\", ch)));
+    }
+    None
+}
+
+#[cfg(windows)]
+fn same_bare_root(a: &Path, b: &Path) -> bool {
+    normalize_bare_root(a) == normalize_bare_root(b)
+}
+
+#[cfg(windows)]
+fn normalize_bare_root(p: &Path) -> String {
+    let s = p.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
+    if s == "/" {
+        return "/".into();
+    }
+    #[cfg(windows)]
+    if s.len() == 2 && s.as_bytes()[1] == b':' {
+        return format!("{}:", char::from(s.as_bytes()[0]).to_ascii_uppercase());
+    }
+    #[cfg(windows)]
+    if s.len() == 3 && s.as_bytes()[1] == b':' && s.as_bytes()[2] == b'\\' {
+        return format!("{}:", char::from(s.as_bytes()[0]).to_ascii_uppercase());
+    }
+    s.to_ascii_lowercase()
+}
+
+/// Hostile roots we never auto-restore (legacy check; prefer `is_system_drive_root`).
 pub fn is_hostile_root(p: &Path) -> bool {
     let s = p.to_string_lossy();
     if s == "/" {
@@ -195,6 +299,7 @@ fn regex_hostile(s: String) -> bool {
             || s.starts_with("c:\\program files")
             || s.starts_with("c:\\program files (x86)")
             || s.starts_with("c:\\programdata")
+            || s.starts_with("c:\\users\\")
             || s.starts_with("c:\\$recycle.bin")
             || s.starts_with("c:\\system volume information"))
     {
@@ -216,18 +321,19 @@ fn regex_hostile(s: String) -> bool {
         || s.starts_with("\\windows\\")
 }
 
-/// Paths we refuse when seeding from settings / import (never from dialog session grant).
+/// Paths we refuse when seeding from settings / import (not dialog picks).
 pub fn reject_for_bulk_add(p: &str) -> bool {
-    is_system_path(p) || is_bare_drive_root(Path::new(p)) || is_hostile_root(Path::new(p))
+    let pb = Path::new(p);
+    is_system_path(p) || is_system_drive_root(pb)
 }
 
-/// Whether a remembered path may be re-granted on startup.
+/// Whether a remembered path may be re-granted on startup (USB volume roots like `E:\` are OK).
 pub fn allow_auto_restore(p: &Path) -> bool {
     if !p.exists() {
         return false;
     }
     let disp = p.display().to_string();
-    if is_system_path(&disp) || is_hostile_root(p) {
+    if is_system_path(&disp) || is_system_drive_root(p) {
         return false;
     }
     true
@@ -337,13 +443,37 @@ mod tests {
     }
 
     #[test]
-    fn bulk_add_refuses_root_and_system() {
-        assert!(reject_for_bulk_add("C:\\"));
-        assert!(reject_for_bulk_add("C:/"));
+    fn bulk_add_refuses_system_paths_and_system_drive() {
         assert!(reject_for_bulk_add("/"));
         assert!(reject_for_bulk_add(r"C:\Windows\System32"));
         assert!(reject_for_bulk_add("/etc/passwd"));
         assert!(!reject_for_bulk_add(r"D:\Games\Content"));
+        assert!(!reject_for_bulk_add(r"E:\"));
+        assert!(reject_for_bulk_add(r"C:\"));
+    }
+
+    #[test]
+    fn auto_restore_rules() {
+        assert!(!allow_auto_restore(Path::new("/")));
+        assert!(!allow_auto_restore(Path::new(r"C:\")));
+        let d = crate::testutil::TmpDir::new("picked-restore-rules");
+        fs::create_dir_all(d.join("usb")).unwrap();
+        assert!(allow_auto_restore(&d.join("usb")));
+    }
+
+    #[test]
+    fn system_drive_root_detects_slash() {
+        assert!(is_system_drive_root(Path::new("/")));
+        assert!(!is_system_drive_root(Path::new(r"E:\")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_usb_root_may_restore_when_present() {
+        if Path::new(r"E:\").exists() {
+            assert!(allow_auto_restore(Path::new(r"E:\")));
+            assert!(!allow_auto_restore(Path::new(r"C:\")));
+        }
     }
 
     #[test]
@@ -353,7 +483,6 @@ mod tests {
         let picked = PickedFolders::load(d.path().to_path_buf());
         fs::create_dir_all(d.join("lib/games")).unwrap();
         let lib = d.join("lib/games").display().to_string();
-        // Simulates settings/import only — not on picked list.
         picked.restore_grants(&grants);
         assert!(grants.check(&lib).is_err());
     }
@@ -373,17 +502,38 @@ mod tests {
     }
 
     #[test]
-    fn remember_approved_skips_root() {
+    fn remember_approved_skips_system_drive_root() {
         let d = crate::testutil::TmpDir::new("picked-mig");
         let grants = Grants::with_file(d.join("grants.json"));
         let picked = PickedFolders::load(d.path().to_path_buf());
         fs::create_dir_all(d.join("good")).unwrap();
         let good = d.join("good").display().to_string();
-        picked.remember_approved(&grants, &[r"E:\".into(), good.clone()]);
+        picked.remember_approved(&grants, &[r"C:\".into(), good.clone()]);
         assert!(grants.check(&good).is_ok());
         let saved: Vec<PathBuf> =
             serde_json::from_str(&fs::read_to_string(d.join("picked-folders.json")).unwrap())
                 .unwrap();
         assert_eq!(saved.len(), 1);
+    }
+
+    #[test]
+    fn corrupt_picked_folders_backed_up() {
+        let d = crate::testutil::TmpDir::new("picked-corrupt");
+        let file = d.join("picked-folders.json");
+        fs::write(&file, b"{not json").unwrap();
+        let picked = PickedFolders::load(d.path().to_path_buf());
+        assert!(picked.paths.lock().unwrap().is_empty());
+        assert!(d.join("picked-folders.json.bak").exists());
+    }
+
+    #[test]
+    fn picked_folders_save_is_atomic() {
+        let d = crate::testutil::TmpDir::new("picked-atomic");
+        let picked = PickedFolders::load(d.path().to_path_buf());
+        fs::create_dir_all(d.join("a")).unwrap();
+        picked.record_dialog_pick(&Grants::with_file(d.join("grants.json")), &d.join("a"));
+        let raw = fs::read_to_string(d.join("picked-folders.json")).unwrap();
+        let v: Vec<PathBuf> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v.len(), 1);
     }
 }
