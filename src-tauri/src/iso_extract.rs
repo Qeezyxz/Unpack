@@ -698,16 +698,12 @@ pub fn extract_registered(
     job_id: &str,
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<ExtractedXex, String> {
-    let (path, root, delete_allowed, ident, sealed) = god::take_extracted_token(token)?;
+    let (path, root, delete_allowed, ident, sealed, stage) = god::take_extracted_token(token)?;
     let changed = "This ISO was replaced or changed after it was extracted (another archive in the batch may have overwritten it), so it was not converted.";
     if god::identity(&path)? != ident {
         return Err(changed.into());
     }
-    let out_parent = root
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    let out_parent = god::out_parent_for(&root, &stage);
     let r = extract_named(&path, &out_parent, None, jobs, job_id, progress)?;
     if god::identity(&path)? != ident {
         return Err(format!(
@@ -728,6 +724,10 @@ pub fn extract_registered(
         merged: r.merged,
         warning: r.warning.clone(),
     };
+    if stage.is_some() {
+        out.kept_reason = Some("the temporary ISO copy on your PC's drive was removed".into());
+        return Ok(out);
+    }
     if !want_delete {
         return Ok(out);
     }

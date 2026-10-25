@@ -458,14 +458,16 @@ fn extra(
                 .filter_map(|x| x.as_str())
                 .enumerate()
                 .map(|(i, p)| {
-                    match unpack_lib::mods::check_mod_path(&GRANTS, p).and_then(|p| unpack_lib::mods::identify_learned(
-                        &p,
-                        a["hints"]
-                            .get(i)
-                            .and_then(|h| h.as_str())
-                            .filter(|h| !h.is_empty()),
-                        &learned,
-                    )) {
+                    match unpack_lib::mods::check_mod_path(&GRANTS, p).and_then(|p| {
+                        unpack_lib::mods::identify_learned(
+                            &p,
+                            a["hints"]
+                                .get(i)
+                                .and_then(|h| h.as_str())
+                                .filter(|h| !h.is_empty()),
+                            &learned,
+                        )
+                    }) {
                         Ok(m) => json!({"Ok": m}),
                         Err(e) => json!({"Err": e}),
                     }
@@ -729,7 +731,12 @@ fn extra(
                 serde_json::to_value(unpack_lib::preflight::check_local_dest(
                     &PathBuf::from(dest),
                     need,
-                    &unpack_lib::preflight::large_files_in(&paths),
+                    &unpack_lib::preflight::fat_blocks(
+                        &PathBuf::from(dest),
+                        &paths,
+                        unpack_lib::archive::find_7za().as_deref(),
+                        a["autoIso"].as_str().unwrap_or("off"),
+                    ),
                 ))
                 .unwrap(),
             )

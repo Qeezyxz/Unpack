@@ -541,9 +541,11 @@ fn convert_opts(
     // R29: in a Content folder, GOD placement shares the type folder's lock with archive
     // placement and Replace recovery, across processes.
     let _type_lock = match (keep_existing, final_layout.con_header_file_path().parent()) {
-        (true, Some(ct)) => Some(crate::archive::lock_type_folder(ct, &|| jobs.is_cancelled(job_id), &mut || {
-            progress(100, crate::destlock::WAIT_MESSAGE)
-        })?),
+        (true, Some(ct)) => Some(crate::archive::lock_type_folder(
+            ct,
+            &|| jobs.is_cancelled(job_id),
+            &mut || progress(100, crate::destlock::WAIT_MESSAGE),
+        )?),
         _ => None,
     };
     if keep_existing && same_media_there() {
@@ -798,6 +800,45 @@ struct ExtractedIso {
     /// never deleted.
     sealed: Option<[u8; 20]>,
     born: std::time::Instant,
+    /// Set for an ISO staged off a FAT32 destination: (staging folder, real output parent).
+    staged: Option<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+/// A staged ISO taken for conversion. Dropping it (success, error, cancel or panic) deletes the
+/// staged ISO, and the whole staging folder once no other registered ISO still lives in it.
+pub struct StageGuard {
+    iso: PathBuf,
+    dir: PathBuf,
+    pub out_parent: PathBuf,
+}
+impl Drop for StageGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.iso);
+        if !stage_in_use(&self.dir) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
+/// True while a registered (not yet converted) ISO lives in staging folder `dir`.
+pub fn stage_in_use(dir: &Path) -> bool {
+    registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .values()
+        .any(|e| e.born.elapsed() < TOKEN_TTL && e.staged.as_ref().is_some_and(|(d, _)| d == dir))
+}
+
+/// Mark tokens from an extraction into `stage_dir` as staged: they convert into `out_parent`
+/// and the staged copy is always removed afterwards (never the user's file, so no delete opt-in).
+pub fn mark_staged(tokens: &[String], stage_dir: &Path, out_parent: &Path) {
+    let mut reg = registry().lock().unwrap_or_else(|p| p.into_inner());
+    for t in tokens {
+        if let Some(e) = reg.get_mut(t) {
+            e.delete_allowed = false;
+            e.staged = Some((stage_dir.to_path_buf(), out_parent.to_path_buf()));
+        }
+    }
 }
 
 const TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(12 * 3600);
@@ -870,6 +911,7 @@ pub fn register_extracted(paths: &[String], root: &Path, delete_allowed: bool) -
                             ident,
                             sealed: None,
                             born: std::time::Instant::now(),
+                            staged: None,
                         },
                     );
                     t
@@ -904,15 +946,44 @@ pub struct ExtractedGod {
 #[allow(clippy::type_complexity)] // tuple bundles paths, delete flag, identity, and optional disc hash
 pub fn take_extracted_token(
     token: &str,
-) -> Result<(PathBuf, PathBuf, bool, IsoIdentity, Option<[u8; 20]>), String> {
+) -> Result<
+    (
+        PathBuf,
+        PathBuf,
+        bool,
+        IsoIdentity,
+        Option<[u8; 20]>,
+        Option<StageGuard>,
+    ),
+    String,
+> {
     let mut reg = registry().lock().unwrap_or_else(|p| p.into_inner());
     let e = reg
         .remove(token)
         .ok_or("Unknown or already used ISO token (it wasn't extracted in this session).")?;
+    drop(reg);
+    let guard = e.staged.map(|(dir, out_parent)| StageGuard {
+        iso: e.path.clone(),
+        dir,
+        out_parent,
+    });
     if e.born.elapsed() >= TOKEN_TTL {
         return Err("This extracted ISO's token expired; extract the archive again.".into());
     }
-    Ok((e.path, e.root, e.delete_allowed, e.ident, e.sealed))
+    Ok((e.path, e.root, e.delete_allowed, e.ident, e.sealed, guard))
+}
+
+/// Where converted output goes: the real destination for a staged ISO, else next to the
+/// extraction folder.
+pub fn out_parent_for(root: &Path, guard: &Option<StageGuard>) -> PathBuf {
+    match guard {
+        Some(g) => g.out_parent.clone(),
+        None => root
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .to_path_buf(),
+    }
 }
 
 pub fn convert_registered(
@@ -923,25 +994,12 @@ pub fn convert_registered(
     progress: &mut dyn FnMut(u32, &str),
 ) -> Result<ExtractedGod, String> {
     // Single use: the token is consumed here, whatever happens next.
-    let (path, root, delete_allowed, ident, sealed) = {
-        let mut reg = registry().lock().unwrap_or_else(|p| p.into_inner());
-        let e = reg
-            .remove(token)
-            .ok_or("Unknown or already used ISO token (it wasn't extracted in this session).")?;
-        if e.born.elapsed() >= TOKEN_TTL {
-            return Err("This extracted ISO's token expired; extract the archive again.".into());
-        }
-        (e.path, e.root, e.delete_allowed, e.ident, e.sealed)
-    };
+    let (path, root, delete_allowed, ident, sealed, stage) = take_extracted_token(token)?;
     let changed = "This ISO was replaced or changed after it was extracted (another archive in the batch may have overwritten it), so it was not converted.";
     if identity(&path)? != ident {
         return Err(changed.into());
     }
-    let out_parent = root
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    let out_parent = out_parent_for(&root, &stage);
     let r = convert_named(&path, &out_parent, None, jobs, job_id, progress)?;
     if identity(&path)? != ident {
         return Err(format!(
@@ -961,6 +1019,10 @@ pub fn convert_registered(
         merged: r.merged,
         warning: r.warning.clone(),
     };
+    if stage.is_some() {
+        out.kept_reason = Some("the temporary ISO copy on your PC's drive was removed".into());
+        return Ok(out);
+    }
     if !want_delete {
         return Ok(out);
     }
@@ -1227,7 +1289,9 @@ pub(crate) mod tests;
 /// Remove `root` and the empty folders under it, bottom up; anything holding a file stays.
 /// Links are never followed or removed.
 pub fn remove_empty_tree(root: &Path) -> bool {
-    let Ok(md) = fs::symlink_metadata(root) else { return false };
+    let Ok(md) = fs::symlink_metadata(root) else {
+        return false;
+    };
     if !md.is_dir() {
         return false;
     }
@@ -1235,7 +1299,9 @@ pub fn remove_empty_tree(root: &Path) -> bool {
     if let Ok(rd) = fs::read_dir(root) {
         for e in rd.flatten() {
             let p = e.path();
-            let dir = fs::symlink_metadata(&p).map(|m| m.is_dir()).unwrap_or(false);
+            let dir = fs::symlink_metadata(&p)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
             if !(dir && remove_empty_tree(&p)) {
                 empty = false;
             }
