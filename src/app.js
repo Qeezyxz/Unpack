@@ -1287,8 +1287,8 @@ function renderFolderConfirm() {
   const f = folderConfirm;
   return `<div class="overlay" data-folder-overlay><div class="dialog" role="dialog" aria-modal="true"><h3>Add archives from folder?</h3>
     <p>${f.archives.length} archive${f.archives.length === 1 ? "" : "s"} / ISO found under <code>${escapeHtml(f.folder)}</code>. Add them to the extract queue? (Create archive is still a separate button.)</p>
-    <ul class="sc-list" style="max-height:40vh;overflow:auto">${f.archives.slice(0, 40).map((p) => `<li><span>${escapeHtml(N.baseName(p))}</span></li>`).join("")}${f.archives.length > 40 ? `<li class="meta">…and ${f.archives.length - 40} more</li>` : ""}</ul>
-    <div class="actions" style="justify-content:flex-end"><button class="btn btn-quiet" data-folder-cancel type="button">Cancel</button><button class="btn btn-primary" data-folder-ok type="button">Add ${f.archives.length} to queue</button></div>
+    <ul class="sc-list" class="sc-list sc-list-scroll">${f.archives.slice(0, 40).map((p) => `<li><span>${escapeHtml(N.baseName(p))}</span></li>`).join("")}${f.archives.length > 40 ? `<li class="meta">…and ${f.archives.length - 40} more</li>` : ""}</ul>
+    <div class="actions actions-end"><button class="btn btn-quiet" data-folder-cancel type="button">Cancel</button><button class="btn btn-primary" data-folder-ok type="button">Add ${f.archives.length} to queue</button></div>
   </div></div>`;
 }
 
@@ -1309,13 +1309,13 @@ function renderLibrary() {
           ${L.coverGrantHint?.[g.path] ? `<span class="meta warn-text">Re-pick this game's library folder in Settings to show cover art.</span>` : ""}
           <span>${escapeHtml(g.title_id)} · ${g.size_approx ? "about " : ""}${formatBytes(g.game_size)} · <span class="pill">${escapeHtml(libraryKindLabel(g.kind))}</span></span>
           <span><span class="pill">${g.dlc_count} DLC</span> ${g.dlc_count ? formatBytes(g.dlc_size) : ""} ${g.tu_count ? `<span class="pill">${g.tu_count} TU</span>` : ""}</span>
-          ${c ? `<div class="qbar"><div data-job-bar="${escapeHtml(c.id)}" style="width:${c.progress || 0}%"></div></div><span class="${c.error ? "danger" : ""}" data-job-status="${escapeHtml(c.id)}">${escapeHtml(c.error || c.status)}</span>` : ""}
+          ${c ? `<div class="qbar"><div data-job-bar="${escapeHtml(c.id)}" class="qbar-fill"></div></div><span class="${c.error ? "danger" : ""}" data-job-status="${escapeHtml(c.id)}">${escapeHtml(c.error || c.status)}</span>` : ""}
           <div class="actions"><button class="btn btn-quiet btn-sm" data-lib-show="${i}" type="button" title="Show this game's folder in Explorer">Show</button><button class="btn btn-secondary btn-sm" data-lib-usb="${i}" type="button" title="Copy the game with its DLC and title updates to a USB drive's Content folder" ${c && !c.done && !c.error ? "disabled" : ""}>${icon("out")} Copy to USB…</button>${N.IS_DESKTOP ? `<button class="btn btn-secondary btn-sm" data-lib-xbox="${i}" type="button" title="Send this game to your Xbox over WiFi / LAN (FTP)">${SV(16, 16, ICONS.xbox)} Send to Xbox</button>` : ""}</div>
         </div></div>`; }).join("")}</div>`}`;
   return `<div class="overlay" data-lib-overlay><div class="dialog dialog-xl" data-library role="dialog" aria-modal="true" aria-labelledby="lib-h">
-    <h3 id="lib-h">${icon("disc")} Library <span class="meta" style="margin:0 0 0 .3rem">${L.games.length ? L.games.length + " game" + (L.games.length === 1 ? "" : "s") : ""}</span></h3>
+    <h3 id="lib-h">${icon("disc")} Library <span class="meta meta-h">${L.games.length ? L.games.length + " game" + (L.games.length === 1 ? "" : "s") : ""}</span></h3>
     ${body}
-    <div class="actions" style="justify-content:flex-end;margin-top:1rem"><button class="btn btn-secondary" data-lib-refresh type="button" title="Scan the library folders again">Refresh</button><button class="btn btn-primary" data-lib-close type="button">Done</button></div>
+    <div class="actions actions-end-mt"><button class="btn btn-secondary" data-lib-refresh type="button" title="Scan the library folders again">Refresh</button><button class="btn btn-primary" data-lib-close type="button">Done</button></div>
   </div></div>`;
 }
 async function copyGameToUsb(g) {
@@ -1493,7 +1493,7 @@ function renderXbox() {
       <div class="xb-send-head"><strong title="${escapeHtml(s.src)}">${escapeHtml(s.name)}</strong>
         <select data-xb-kind="${i}" ${lock} aria-label="Type">${Object.entries(XBOX_KINDS).map(([k, v]) => `<option value="${k}" ${s.kind === k ? "selected" : ""}>${escapeHtml(v)}</option>`).join("")}</select>
         <select data-xb-drive="${i}" ${s.running || s.kind === "custom" ? "disabled" : ""} aria-label="Drive">${drives.map((d) => `<option ${s.drive === d ? "selected" : ""}>${escapeHtml(d)}</option>`).join("")}</select>
-        ${["god", "dlc", "tu"].includes(s.kind) ? `<input data-xb-tid="${i}" value="${escapeHtml(s.tid || "")}" maxlength="8" placeholder="TitleID" aria-label="TitleID" style="width:6.5rem" ${lock}/>` : ""}
+        ${["god", "dlc", "tu"].includes(s.kind) ? `<input data-xb-tid="${i}" value="${escapeHtml(s.tid || "")}" maxlength="8" class="inp-w65" placeholder="TitleID" aria-label="TitleID" ${lock}/>` : ""}
       </div>
       <div class="xb-dest"><span class="meta">To</span><input data-xb-dest="${i}" value="${escapeHtml(s.dest || "")}" aria-label="Destination folder on the console" spellcheck="false" ${lock} class="${s.destError ? "bad" : ""}"/>
         <button class="btn btn-quiet btn-sm" data-xb-browse="${i}" type="button" ${lock} title="Pick the folder in the console browser on the right">Browse…</button>
@@ -1502,19 +1502,19 @@ function renderXbox() {
         ${last && last !== s.dest && !s.running ? `<button class="chip" data-xb-last="${i}" type="button" title="Your last custom folder for this type">Last: ${escapeHtml(last)}</button>` : ""}
         ${N.settings.destPresets.length ? `<select data-xb-preset="${i}" aria-label="Destination preset"><option value="">Preset…</option>${N.settings.destPresets.map((pr, pi) => `<option value="${pi}">${escapeHtml(pr.name)}</option>`).join("")}</select>` : ""}</div>
       ${s.destError ? `<div class="danger" data-xb-desterr="${i}">${escapeHtml(s.destError)}</div>` : ""}
-      <div class="qbar"><div data-job-bar="${escapeHtml(s.id)}" style="width:${s.progress || 0}%"></div></div>
+      <div class="qbar"><div data-job-bar="${escapeHtml(s.id)}" class="qbar-fill"></div></div>
       <div class="xb-send-foot"><span class="${s.error ? "danger" : "meta"}" data-job-status="${escapeHtml(s.id)}">${escapeHtml(s.error || s.status)}</span>
         <span class="actions">${s.running ? `<button class="btn btn-quiet btn-sm" data-xb-cancel="${i}" type="button">Cancel</button>` : `<button class="btn btn-primary btn-sm" data-xb-go="${i}" type="button" ${X.busy || s.destError || X.sends.some((o) => o.running) ? "disabled" : ""}>${s.error && /Resume|resume/.test(s.error) ? "Resume" : s.done ? "Send again" : `${SV(16, 16, ICONS.xbox)} Send`}</button><button class="btn btn-quiet btn-sm" data-xb-remove="${i}" type="button">Remove</button>`}</span></div>
     </div>`; }).join("");
   return `<div class="overlay" data-xb-overlay><div class="dialog dialog-xl" data-xbox role="dialog" aria-modal="true" aria-labelledby="xb-h">
-    <h3 id="xb-h">${SV(18, 18, ICONS.xbox)} Send to Xbox <span class="meta" style="margin:0 0 0 .3rem">FTP over WiFi / LAN</span></h3>
+    <h3 id="xb-h">${SV(18, 18, ICONS.xbox)} Send to Xbox <span class="meta meta-h">FTP over WiFi / LAN</span></h3>
     <div class="xb-con">
       ${X.consoles.length ? `<select data-xb-saved aria-label="Saved consoles"><option value="">Saved consoles…</option>${X.consoles.map((k, j) => `<option value="${j}">${escapeHtml(k.name)} · ${escapeHtml(k.host)}</option>`).join("")}</select>` : ""}
-      <input data-xb-f="name" value="${escapeHtml(c.name)}" placeholder="Name" aria-label="Console name" style="width:8rem"/>
-      <input data-xb-f="host" value="${escapeHtml(c.host)}" placeholder="Console IP, e.g. 192.168.1.50" aria-label="Console IP" style="width:13rem"/>
-      <input data-xb-f="port" value="${escapeHtml(String(c.port))}" aria-label="Port" style="width:4rem" inputmode="numeric"/>
-      <input data-xb-f="user" autocomplete="off" value="${escapeHtml(c.user)}" aria-label="FTP user" style="width:7rem"/>
-      <input data-xb-f="pass" type="password" autocomplete="off" value="${escapeHtml(c.pass)}" aria-label="FTP password" style="width:7rem"/>
+      <input data-xb-f="name" value="${escapeHtml(c.name)}" class="inp-w8" placeholder="Name" aria-label="Console name"/>
+      <input data-xb-f="host" value="${escapeHtml(c.host)}" class="inp-w13" placeholder="Console IP, e.g. 192.168.1.50" aria-label="Console IP"/>
+      <input data-xb-f="port" value="${escapeHtml(String(c.port))}" class="inp-w4" aria-label="Port" inputmode="numeric"/>
+      <input data-xb-f="user" autocomplete="off" value="${escapeHtml(c.user)}" class="inp-w7" aria-label="FTP user"/>
+      <input data-xb-f="pass" type="password" autocomplete="off" value="${escapeHtml(c.pass)}" class="inp-w7" aria-label="FTP password"/>
       <label class="meta" title="Use 2 transfers at once if the console's FTP server allows a second connection (falls back to 1 automatically)"><input type="checkbox" data-xb-parallel ${c.parallel ? "checked" : ""}/> 2 at once</label>
       <button class="btn btn-primary btn-sm" data-xb-connect type="button" ${X.busy ? "disabled" : ""} title="Log in and list the console's drives">${X.busy ? `<span class="spin">◌</span>` : ""} Connect / Test</button>
       <button class="btn btn-secondary btn-sm" data-xb-save type="button">Save console</button>
@@ -1523,16 +1523,16 @@ function renderXbox() {
     ${X.ftpLock?.busy ? `<div class="xb-lock" data-xb-lock>${escapeHtml(X.ftpLock.subsystem || "FTP")} busy: ${escapeHtml(X.ftpLock.detail || "another job is using the console")}</div>` : ""}
     ${X.error ? `<div class="error-box danger" data-xb-error>${escapeHtml(X.error)}</div>` : X.status ? `<div class="meta" data-xb-status>${escapeHtml(X.status)}</div>` : ""}
     <div class="xb-body">
-      <section class="xb-queue"><div class="actions" style="margin:0 0 .6rem"><button class="btn btn-secondary btn-sm" data-xb-files type="button">${SV(16, 16, ICONS.plus)} Add files…</button><button class="btn btn-secondary btn-sm" data-xb-folder type="button">${icon("folder")} Add folder…</button><button class="btn btn-quiet btn-sm" data-xb-lib type="button">From Library…</button><button class="btn btn-quiet btn-sm" data-xb-mods type="button">From Mod Menus…</button></div>
+      <section class="xb-queue"><div class="actions actions-mb6"><button class="btn btn-secondary btn-sm" data-xb-files type="button">${SV(16, 16, ICONS.plus)} Add files…</button><button class="btn btn-secondary btn-sm" data-xb-folder type="button">${icon("folder")} Add folder…</button><button class="btn btn-quiet btn-sm" data-xb-lib type="button">From Library…</button><button class="btn btn-quiet btn-sm" data-xb-mods type="button">From Mod Menus…</button></div>
         ${sends || `<div class="meta">Nothing queued. Add files, or use <b>Send to Xbox</b> on a game in the Library or a mod in Mod Menus. Unpack detects GOD games, DLC, title updates and XEX games and picks the right folder.</div>`}
-        <p class="meta" style="margin-top:.6rem">Uploads go to a <code>.part</code> file, are renamed when complete and their size is checked on the console. Existing files are never overwritten. Only local network addresses are allowed.</p></section>
+        <p class="meta meta-mt6">Uploads go to a <code>.part</code> file, are renamed when complete and their size is checked on the console. Existing files are never overwritten. Only local network addresses are allowed.</p></section>
       <section class="xb-browse">${X.drives.length ? `<div class="xb-drives" data-xb-drives><span class="meta">Send to drive</span><select data-xb-defdrive aria-label="Default drive for this console">${X.drives.map((d) => `<option ${xboxDrive() === d ? "selected" : ""}>${escapeHtml(d)}</option>`).join("")}</select><span class="meta">${X.drives.length} drive${X.drives.length === 1 ? "" : "s"} on this console${X.drives.filter((d) => /^usb/i.test(d)).length > 1 ? " · pick which USB" : ""}</span>
-        <button class="btn btn-quiet btn-sm" data-xb-preset-save type="button" title="Save current folder as a named preset">Save preset</button></div>` : ""}${X.pickFor != null && X.sends[X.pickFor] ? `<div class="xb-pick" data-xb-pickbar>Pick a folder for <b>${escapeHtml(X.sends[X.pickFor].name)}</b>, then <button class="btn btn-primary btn-sm" data-xb-usehere type="button" ${X.entries && X.path !== "/" ? "" : "disabled"}>Use ${escapeHtml(X.path)}</button><button class="btn btn-quiet btn-sm" data-xb-pickcancel type="button">Cancel</button></div>` : ""}${browser}${X.entries ? `<div class="actions" style="margin-top:.5rem"><button class="btn btn-quiet btn-sm" data-xb-refresh type="button">Refresh</button>${X.path !== "/" ? `<button class="btn btn-quiet btn-sm" data-xb-mkdir type="button">New folder</button>` : ""}${X.sends.length && X.path !== "/" ? `<button class="btn btn-secondary btn-sm" data-xb-allhere type="button" title="Set every queued item's destination to this folder" ${X.sends.some((o) => o.running) ? "disabled" : ""}>Send all to this folder</button>` : ""}
+        <button class="btn btn-quiet btn-sm" data-xb-preset-save type="button" title="Save current folder as a named preset">Save preset</button></div>` : ""}${X.pickFor != null && X.sends[X.pickFor] ? `<div class="xb-pick" data-xb-pickbar>Pick a folder for <b>${escapeHtml(X.sends[X.pickFor].name)}</b>, then <button class="btn btn-primary btn-sm" data-xb-usehere type="button" ${X.entries && X.path !== "/" ? "" : "disabled"}>Use ${escapeHtml(X.path)}</button><button class="btn btn-quiet btn-sm" data-xb-pickcancel type="button">Cancel</button></div>` : ""}${browser}${X.entries ? `<div class="actions actions-mt5"><button class="btn btn-quiet btn-sm" data-xb-refresh type="button">Refresh</button>${X.path !== "/" ? `<button class="btn btn-quiet btn-sm" data-xb-mkdir type="button">New folder</button>` : ""}${X.sends.length && X.path !== "/" ? `<button class="btn btn-secondary btn-sm" data-xb-allhere type="button" title="Set every queued item's destination to this folder" ${X.sends.some((o) => o.running) ? "disabled" : ""}>Send all to this folder</button>` : ""}
         <button class="btn btn-quiet btn-sm" data-xb-save-back type="button" title="Download save from console to your PC">Backup save</button>
         <button class="btn btn-quiet btn-sm" data-xb-save-restore type="button" title="Upload save to console (backs up existing files first)">Restore save</button>
         <button class="btn btn-quiet btn-sm" data-xb-shots type="button" title="Aurora screenshot gallery">Screenshots</button></div>` : ""}</section>
     </div>
-    <div class="actions" style="justify-content:flex-end;margin-top:1rem"><button class="btn btn-primary" data-xb-close type="button">Done</button></div>
+    <div class="actions actions-end-mt"><button class="btn btn-primary" data-xb-close type="button">Done</button></div>
   </div></div>${X.shots || X.shotsBusy ? `<div class="overlay" data-xb-shots-overlay><div class="dialog dialog-lg" data-xb-shots role="dialog" aria-modal="true">
     <h3>${icon("image")} Screenshot gallery <span class="meta">${escapeHtml(X.shots?.drive || xboxDrive() || "")}</span></h3>
     ${X.shotsBusy ? `<div class="meta"><span class="spin">◌</span> Listing screenshots…</div>` : `<div class="xb-shot-grid" data-xb-shot-grid>${(X.shots?.list || []).map((s, i) => `<figure class="xb-shot" data-xb-shot="${i}"><div class="xb-shot-thumb">${X.shots.thumbs?.[s.name] ? `<img src="${X.shots.thumbs[s.name]}" alt="">` : icon("image")}</div><figcaption><span class="meta">${escapeHtml(s.name)}</span><br>${formatBytes(s.size)}</figcaption></figure>`).join("") || `<div class="meta">No screenshots on this drive.</div>`}</div>
@@ -1797,7 +1797,7 @@ function renderHomebrew() {
       <select data-hb-cat aria-label="Category"><option value="">All categories</option>${HB_CATS.map((c) => `<option value="${escapeHtml(c)}" ${homebrewView.cat === c ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}</select>
     </div>
     <div class="hb-grid">${cards}</div>
-    <div class="actions" style="justify-content:flex-end;margin-top:1rem"><button class="btn btn-primary" data-hb-close type="button">Done</button></div>
+    <div class="actions actions-end-mt"><button class="btn btn-primary" data-hb-close type="button">Done</button></div>
   </div></div>`;
 }
 function bindHomebrew() {
@@ -1904,7 +1904,7 @@ function renderModDetails(it, i) {
     <div class="md-row"><span class="meta">Location</span><span class="md-path" title="${escapeHtml(it.path)}">${escapeHtml(it.path)}</span></div>
     <label class="md-row"><span class="meta">Notes</span>${it.builtin ? `<span>Built-in (read-only) · version ${escapeHtml(it.builtin.version || "?")}${it.builtin.sha256 ? ` · SHA-256 checked` : ""}</span>` : `<textarea class="mod-notes" data-mod-notes="${i}" rows="2" maxlength="500" placeholder="Version, what it's for…">${escapeHtml(it.notes)}</textarea>`}</label>
     <label class="md-row"><span class="meta">Copies to</span><select data-mod-mode="${i}" ${it.error ? "disabled" : ""}>${modes.map((m) => `<option value="${m}" ${it.mode === m ? "selected" : ""}>${MODE_LABEL[m]}</option>`).join("")}</select></label>
-    ${c ? `<div class="qbar"><div data-job-bar="${escapeHtml(c.id)}" style="width:${c.progress || 0}%"></div></div><div class="${c.error ? "danger" : "meta"}" data-mod-status data-job-status="${escapeHtml(c.id)}">${escapeHtml(c.error || c.status)}</div>` : ""}
+    ${c ? `<div class="qbar"><div data-job-bar="${escapeHtml(c.id)}" class="qbar-fill"></div></div><div class="${c.error ? "danger" : "meta"}" data-mod-status data-job-status="${escapeHtml(c.id)}">${escapeHtml(c.error || c.status)}</div>` : ""}
     <div class="actions"><button class="btn btn-primary btn-sm" data-mod-copy="${i}" type="button" title="Copy to a USB drive or folder (checks free space, never overwrites)" ${it.error || (c && !c.done && !c.error) ? "disabled" : ""}>${icon("out")} Copy to USB…</button><button class="btn btn-secondary btn-sm" data-mod-xbox="${i}" type="button" title="Send to your Xbox over WiFi / LAN (FTP)" ${it.error ? "disabled" : ""}>${SV(16, 16, ICONS.xbox)} Send to Xbox</button><button class="btn btn-quiet btn-sm" data-mod-show="${i}" type="button">Show</button>${it.builtin ? "" : `<button class="btn btn-quiet btn-sm" data-mod-remove="${i}" type="button" title="Remove from this list (the file itself is not touched)">Remove</button>`}</div>
   </aside>`;
 }
@@ -1922,18 +1922,18 @@ function renderMods() {
         <span class="meta">${g ? escapeHtml(g.name) : `<span class="warn-text">Which game?</span>`}</span>
         <span><span class="pill">${escapeHtml(TYPE_LABEL[it.info?.kind] || "?")}</span>${g?.how === "guess" ? ` <span class="pill pill-soft">${g.conf}%</span>` : ""}${it.builtin ? ` <span class="pill" data-builtin-pill>Built-in</span>` : ""}${it.copy?.done ? ` <span class="pill ok">copied</span>` : ""}</span></button>`; }).join("")}</div>`;
   return `<div class="overlay" data-mods-overlay><div class="dialog dialog-xl mods-dialog" data-mods role="dialog" aria-modal="true" aria-labelledby="mods-h">
-    <h3 id="mods-h">${SV(18, 18, ICONS.mod)} Mod Menus <span class="meta" style="margin:0 0 0 .3rem">${M.items.length ? M.items.length + " item" + (M.items.length === 1 ? "" : "s") : ""}</span></h3>
+    <h3 id="mods-h">${SV(18, 18, ICONS.mod)} Mod Menus <span class="meta meta-h">${M.items.length ? M.items.length + " item" + (M.items.length === 1 ? "" : "s") : ""}</span></h3>
     <p class="mods-note" role="note">For offline / modded-console use. Unpack doesn't include or link to any mods and ships no catalog. It only goes online when you click Download, or Refresh / Install for a catalog you set up — the page itself stays offline.</p>
     <div class="mods-tabs"><button class="btn btn-sm ${M.tab === "library" || !M.tab ? "btn-secondary" : "btn-quiet"}" data-mods-tab="library" type="button">Your files</button><button class="btn btn-sm ${M.tab === "download" ? "btn-secondary" : "btn-quiet"}" data-mods-tab="download" type="button">Download from link</button><button class="btn btn-sm ${M.tab === "names" ? "btn-secondary" : "btn-quiet"}" data-mods-tab="names" type="button">Known names${(M.names || []).length ? ` (${M.names.length})` : ""}</button><button class="btn btn-sm ${M.tab === "catalog" ? "btn-secondary" : "btn-quiet"}" data-mods-tab="catalog" type="button">Catalog${catalogView?.updates ? ` <span class="pill" data-cat-upd-count>${catalogView.updates} update${catalogView.updates === 1 ? "" : "s"}</span>` : ""}</button></div>
     ${M.tab === "download" ? renderModsDownload(M) : ""}${M.tab === "names" ? renderModNames(M) : ""}${M.tab === "catalog" ? renderCatalog() : ""}
-    <div class="mods-bar" ${M.tab === "download" || M.tab === "names" || M.tab === "catalog" ? 'style="display:none"' : ""}>
+    <div class="mods-bar${M.tab === "download" || M.tab === "names" || M.tab === "catalog" ? " is-hidden" : ""}">
       <input data-mods-q type="search" value="${escapeHtml(M.q)}" placeholder="Search your mods…" aria-label="Search your mods" />
       <select data-mods-fgame aria-label="Filter by game"><option value="">All games</option>${[...games].sort((a, b) => a[1].localeCompare(b[1])).map(([t, n]) => `<option value="${escapeHtml(t)}" ${M.fGame === t ? "selected" : ""}>${escapeHtml(n)}</option>`).join("")}${unknown ? `<option value="?" ${M.fGame === "?" ? "selected" : ""}>Game unknown (${unknown})</option>` : ""}</select>
       <select data-mods-ftype aria-label="Filter by type"><option value="">All types</option>${Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${M.fType === k ? "selected" : ""}>${v}</option>`).join("")}</select>
       <button class="btn btn-secondary btn-sm" data-mods-add-files type="button" title="Add .xex plugins or packages">${SV(16, 16, ICONS.plus)} Add files…</button><button class="btn btn-secondary btn-sm" data-mods-add-folder type="button" title="Add a whole mod folder">${icon("folder")} Add folder…</button>
     </div>
-    <div class="mods-body" ${M.tab === "download" || M.tab === "names" || M.tab === "catalog" ? 'style="display:none"' : ""}>${grid}${M.sel >= 0 && M.items[M.sel] && !M.loading ? renderModDetails(M.items[M.sel], M.sel) : ""}</div>
-    <div class="actions" style="justify-content:flex-end;margin-top:1rem"><button class="btn btn-primary" data-mods-close type="button">Done</button></div>
+    <div class="mods-body${M.tab === "download" || M.tab === "names" || M.tab === "catalog" ? " is-hidden" : ""}">${grid}${M.sel >= 0 && M.items[M.sel] && !M.loading ? renderModDetails(M.items[M.sel], M.sel) : ""}</div>
+    <div class="actions actions-end-mt"><button class="btn btn-primary" data-mods-close type="button">Done</button></div>
   </div></div>`;
 }
 const EMPTY_MODS_ART = `<svg viewBox="0 0 120 80" width="120" height="80" aria-hidden="true"><rect x="30" y="14" width="60" height="44" rx="8" fill="var(--elevated)" stroke="var(--border-strong)"/><path d="M40 28h22M40 36h30M40 44h16" stroke="var(--border-strong)" stroke-width="2.5" stroke-linecap="round"/><circle cx="84" cy="54" r="13" fill="var(--card)" stroke="var(--accent2)" stroke-width="2"/><path d="M84 48v12M78 54h12" stroke="var(--accent2)" stroke-width="2.5" stroke-linecap="round"/><ellipse cx="60" cy="74" rx="40" ry="3" fill="var(--border)"/></svg>`;
@@ -1970,7 +1970,7 @@ function renderModNames(M) {
     <div class="actions"><button class="btn btn-quiet btn-sm" data-mn-export type="button">Export list…</button><button class="btn btn-quiet btn-sm" data-mn-import type="button">Import list…</button></div>
     <div class="mod-list">${L.map((x, i) => `<div class="mod-row" data-mn-row="${i}"><div class="mod-info"><input data-mn-key="${i}" value="${escapeHtml(x.key)}" maxlength="80" aria-label="Mod name" /><span class="meta">${escapeHtml(x.gname || "")} · ${escapeHtml(x.tid)}</span>
       ${P && P.i === i ? `<input data-mn-gsearch value="${escapeHtml(P.q || "")}" placeholder="Search games" aria-label="Search games" />${P.results ? `<div class="chips">${P.results.map((g, k) => `<button class="chip" data-mn-gres="${k}" type="button">${escapeHtml(g.name)} <span>${escapeHtml(g.title_id)}</span></button>`).join("") || `<span class="meta">No match.</span>`}</div>` : ""}` : ""}</div>
-      <div class="actions"><button class="btn btn-quiet btn-sm" data-mn-remap="${i}" type="button">Change game…</button><button class="btn btn-quiet btn-sm" data-mn-del="${i}" type="button">Delete</button></div></div>`).join("") || `<div class="preview-empty" style="min-height:3rem">No known mod names yet. Pick a game for a mod in “Your files” and it's remembered here.</div>`}</div></div>`;
+      <div class="actions"><button class="btn btn-quiet btn-sm" data-mn-remap="${i}" type="button">Change game…</button><button class="btn btn-quiet btn-sm" data-mn-del="${i}" type="button">Delete</button></div></div>`).join("") || `<div class="preview-empty preview-empty-short">No known mod names yet. Pick a game for a mod in “Your files” and it's remembered here.</div>`}</div></div>`;
 }
 let exportFmtPrompt = null; // { resolve }
 function askExportFormat() {
@@ -1997,7 +1997,7 @@ function renderDlcPick() {
   return `<div class="overlay" data-dlc-pick-overlay><div class="dialog" role="dialog" aria-modal="true"><h3>Which game gets this package?</h3>
     <p class="meta">${escapeHtml(P.row.status || "")}</p>
     <div class="mod-list">${P.games.map((g, i) => `<button class="chip" data-dlc-pick="${i}" type="button">${escapeHtml(g.name)} <span>${escapeHtml(N.baseName(g.path))}</span></button>`).join("") || `<span class="meta">No matching games in your library folders.</span>`}</div>
-    <div class="actions" style="justify-content:flex-end;margin-top:1rem"><button class="btn btn-quiet" data-dlc-pick-skip type="button">Skip</button></div>
+    <div class="actions actions-end-mt"><button class="btn btn-quiet" data-dlc-pick-skip type="button">Skip</button></div>
   </div></div>`;
 }
 function bindDlcPick() {
@@ -2270,7 +2270,7 @@ function renderCatalog() {
   const setup = C.edit ? `<div class="mods-dl cat-setup" data-cat-setup>
       <p class="meta">Unpack doesn't include a catalog. If someone runs one, they give you its <b>address</b> and <b>public key</b>. Unpack only loads a catalog whose signature matches that key, and checks every file's SHA-256 before installing.</p>
       <div class="actions"><label class="meta"><input type="radio" name="cat-src" data-cat-src="remote" ${f.source === "remote" ? "checked" : ""}/> From a web address</label><label class="meta"><input type="radio" name="cat-src" data-cat-src="local" ${f.source === "local" ? "checked" : ""}/> From a file on this PC</label></div>
-      ${f.source === "local" ? `<div class="actions"><input data-cat-f="local_file" value="${escapeHtml(f.local_file)}" placeholder="catalog.json (its .sig must be next to it)" spellcheck="false" readonly style="flex:1"/><button class="btn btn-secondary btn-sm" data-cat-pickfile type="button">Pick file…</button></div>`
+      ${f.source === "local" ? `<div class="actions"><input data-cat-f="local_file" value="${escapeHtml(f.local_file)}" placeholder="catalog.json (its .sig must be next to it)" class="inp-flex1" spellcheck="false" readonly/><button class="btn btn-secondary btn-sm" data-cat-pickfile type="button">Pick file…</button></div>`
         : `<label>Catalog address<input data-cat-f="url" type="url" value="${escapeHtml(f.url)}" placeholder="https://…/catalog.json" spellcheck="false"/></label><label>Signature address (optional)<input data-cat-f="sig_url" type="url" value="${escapeHtml(f.sig_url)}" placeholder="Default: the catalog address + .sig" spellcheck="false"/></label>`}
       <label>Owner's public key (Ed25519)<input data-cat-f="pubkey" value="${escapeHtml(f.pubkey)}" placeholder="64 hex characters" spellcheck="false" maxlength="64"/></label>
       <div class="actions"><button class="btn btn-primary btn-sm" data-cat-save type="button" ${C.busy ? "disabled" : ""}>Save and load</button>${cfg.source ? `<button class="btn btn-quiet btn-sm" data-cat-editcancel type="button">Cancel</button>` : ""}</div></div>`
@@ -2298,7 +2298,7 @@ function renderCatalog() {
           ${e.notes ? `<span class="meta">${escapeHtml(e.notes)}</span>` : ""}
           ${pf && !pf.busy ? `<div class="cat-pf" data-cat-pf="${escapeHtml(e.id)}">${pf.blockers.map((b) => `<div class="danger">✕ ${escapeHtml(b)}</div>`).join("")}${pf.warnings.map((w) => `<div class="warn-text">! ${escapeHtml(w)}</div>`).join("")}${pf.info.map((i) => `<div class="meta">${escapeHtml(i)}</div>`).join("")}${pf.ok && !pf.warnings.length ? `<div class="meta ok">✓ Ready to install${pf.free != null ? ` (${formatBytes(pf.free)} free)` : ""}</div>` : ""}</div>` : pf?.busy ? `<div class="meta"><span class="spin">◌</span> Checking…</div>` : ""}
           ${cf ? `<div class="cat-confirm" data-cat-confirm="${escapeHtml(e.id)}"><div class="warn-text">${escapeHtml(cf.text)}</div><div class="actions">${cf.kind === "slot" ? `<button class="btn btn-primary btn-sm" data-cat-yes="${escapeHtml(e.id)}" type="button">Replace plugin${cf.slot}</button>` : `<button class="btn btn-primary btn-sm" data-cat-yes="${escapeHtml(e.id)}" type="button">Install anyway</button>`}<button class="btn btn-quiet btn-sm" data-cat-no="${escapeHtml(e.id)}" type="button">Cancel</button></div></div>` : ""}
-          ${run ? `${busy ? `<div class="qbar"><div data-job-bar="${escapeHtml(run.id)}" style="width:${run.progress || 0}%"></div></div>` : ""}<div class="${run.error ? "danger" : "meta"}" data-job-status="${escapeHtml(run.id)}" data-cat-status="${escapeHtml(e.id)}">${escapeHtml(run.error || run.status || "")}</div>` : ""}</div>
+          ${run ? `${busy ? `<div class="qbar"><div data-job-bar="${escapeHtml(run.id)}" class="qbar-fill"></div></div>` : ""}<div class="${run.error ? "danger" : "meta"}" data-job-status="${escapeHtml(run.id)}" data-cat-status="${escapeHtml(e.id)}">${escapeHtml(run.error || run.status || "")}</div>` : ""}</div>
           <div class="mod-act"><div class="actions">
             ${only ? (e.source_page ? `<button class="btn btn-secondary btn-sm" data-cat-page="${escapeHtml(e.id)}" type="button">Open source page</button>` : "")
               : `${busy ? `<button class="btn btn-quiet btn-sm" data-cat-cancel="${escapeHtml(e.id)}" type="button">Cancel</button>` : `<button class="btn btn-quiet btn-sm" data-cat-check="${escapeHtml(e.id)}" type="button" ${catTarget() ? "" : "disabled"}>Check</button>
@@ -2362,12 +2362,12 @@ function renderModsDownload(M) {
       <button class="btn btn-quiet btn-sm" data-dl-import type="button" title="Import saved links from JSON or CSV">Import list…</button>
       ${job && !job.done && !job.error ? `<button class="btn btn-quiet btn-sm" data-dl-cancel type="button">Cancel</button>` : ""}
     </div>
-    ${job ? `<div class="qbar"><div data-job-bar="${escapeHtml(job.id)}" style="width:${job.progress || 0}%"></div></div><div class="${job.error ? "danger" : "meta"}" data-job-status="${escapeHtml(job.id)}">${escapeHtml(job.error || job.status || "")}</div>` : ""}
+    ${job ? `<div class="qbar"><div data-job-bar="${escapeHtml(job.id)}" class="qbar-fill"></div></div><div class="${job.error ? "danger" : "meta"}" data-job-status="${escapeHtml(job.id)}">${escapeHtml(job.error || job.status || "")}</div>` : ""}
     ${d.last ? `<div class="dl-result"><strong>${escapeHtml(d.last.name)}</strong> · ${formatBytes(d.last.bytes)}<div class="meta">SHA-256: <code data-dl-sha>${escapeHtml(d.last.sha256)}</code></div>
       <div class="actions"><button class="btn btn-secondary btn-sm" data-dl-add-mod type="button">Add to Mod library</button>
       ${hb ? `<button class="btn btn-secondary btn-sm" data-dl-usb-apps type="button" title="Copy into USB\\Apps\\${escapeHtml(hb.name)}">Copy to USB Apps…</button>` : `<button class="btn btn-quiet btn-sm" data-dl-usb-apps type="button">Copy to USB Apps…</button>`}
       <button class="btn btn-quiet btn-sm" data-dl-show type="button">Show</button></div></div>` : ""}
-    <h4 class="meta" style="margin:1rem 0 .4rem">Saved links <span class="meta">(${(M.links || []).length})</span></h4>
+    <h4 class="meta meta-saved">Saved links <span class="meta">(${(M.links || []).length})</span></h4>
     <div class="mod-list">${(M.links || []).map((l, i) => `<div class="mod-row"><div class="mod-info"><strong>${escapeHtml(l.name || l.url)}</strong><span class="meta" title="${escapeHtml(l.url)}">${escapeHtml(l.url)}</span>
       ${l.game ? `<span class="pill">${escapeHtml(l.game)}</span>` : ""}${l.notes ? `<span>${escapeHtml(l.notes)}</span>` : ""}</div>
       <div class="mod-act"><div class="actions"><button class="btn btn-secondary btn-sm" data-dl-reuse="${i}" type="button">Download</button><button class="btn btn-quiet btn-sm" data-dl-edit="${i}" type="button">Edit</button><button class="btn btn-quiet btn-sm" data-dl-del="${i}" type="button" aria-label="Delete">${SV(14,14,ICONS.x)}</button></div></div></div>`).join("") || `<div class="preview-empty">No saved links yet. Paste a URL and click Save link.</div>`}</div>
@@ -2526,7 +2526,7 @@ function renderShortcuts() {
   if (!shortcutsOpen) return "";
   return `<div class="overlay" data-sc-overlay><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="sc-h"><h3 id="sc-h">Keyboard shortcuts</h3>
     <div class="sc-list">${SHORTCUTS.map(([k, v]) => `<div><kbd>${escapeHtml(k)}</kbd><span>${escapeHtml(v)}</span></div>`).join("")}</div>
-    <div class="actions" style="justify-content:flex-end;margin-top:1rem"><button class="btn btn-primary" data-sc-close type="button">Close</button></div></div></div>`;
+    <div class="actions actions-end-mt"><button class="btn btn-primary" data-sc-close type="button">Close</button></div></div></div>`;
 }
 
 // ---- Xbox 360 DLC: install STFS DLC packages into their game's <TitleID>/00000002 folder ----
@@ -2613,7 +2613,7 @@ async function pickDlc() {
 function renderDlcRows(rows) {
   return (rows || []).filter((d) => d.phase !== "hidden").map((d) => `<div class="qrow sub">
         <span class="qname" title="${escapeHtml(d.error || d.path)}"><span class="dot ${escapeHtml(d.phase === "retry" ? "queued" : d.phase)}"></span>${fileIcon("dlc")}<span class="name">${escapeHtml(d.name)}</span></span>
-        <div class="qbar"><div data-job-bar="${escapeHtml(d.id)}" style="width:${d.progress || 0}%"></div></div>
+        <div class="qbar"><div data-job-bar="${escapeHtml(d.id)}" class="qbar-fill"></div></div>
         <span class="qstatus${d.phase === "failed" ? " danger" : ""}" title="${escapeHtml(d.error || d.status)}">${escapeHtml(d.error ? d.status + " — " + d.error : d.status)}</span><span></span>
       </div>`).join("");
 }
@@ -2804,7 +2804,7 @@ function renderComposer() {
     <h3>Create archive</h3>
     <p>${c.items.length} item${c.items.length === 1 ? "" : "s"}${total ? " · " + formatBytes(total) + " of files" : ""}. Drop more files or folders onto the window to add them.</p>
     <div class="cmp-list">${rows || `<div class="preview-empty">Nothing added yet.</div>`}</div>
-    <div class="actions" style="margin:0.6rem 0 1rem">
+    <div class="actions actions-my1">
       <button class="btn btn-secondary" data-cmp-add-files type="button" ${c.busy ? "disabled" : ""}>Add files</button>
       <button class="btn btn-secondary" data-cmp-add-folder type="button" ${c.busy ? "disabled" : ""}>Add folder</button>
     </div>
@@ -2822,11 +2822,11 @@ function renderComposer() {
       </select></label>
       <label>Password (optional)<input data-cmp-pw type="password" autocomplete="new-password" value="${escapeHtml(c.password)}" ${c.busy ? "disabled" : ""} /></label>
     </div>
-    <p class="meta" style="margin:0 0 0.8rem">${c.password ? (c.format === "7z" ? "AES-256. File names are hidden too." : "AES-256. File names stay visible in ZIPs; use 7Z to hide them. Older Windows Explorer can't open AES ZIPs — 7-Zip or Unpack can.") : "No password: anyone can open it."}</p>
-    ${c.busy || c.progress ? `<div class="progress"><div data-job-bar="${escapeHtml(c.id)}" style="width:${c.progress}%"></div></div>` : ""}
+    <p class="meta meta-mb8">${c.password ? (c.format === "7z" ? "AES-256. File names are hidden too." : "AES-256. File names stay visible in ZIPs; use 7Z to hide them. Older Windows Explorer can't open AES ZIPs — 7-Zip or Unpack can.") : "No password: anyone can open it."}</p>
+    ${c.busy || c.progress ? `<div class="progress"><div data-job-bar="${escapeHtml(c.id)}" class="qbar-fill"></div></div>` : ""}
     <div class="status-line"><span data-job-status="${escapeHtml(c.id)}">${escapeHtml(c.status)}</span></div>
     ${c.error ? `<div class="error-box danger">${escapeHtml(c.error)}</div>` : ""}
-    <div class="actions" style="margin-top:1rem">
+    <div class="actions actions-mt1">
       ${c.busy ? `<button class="btn btn-secondary" data-cmp-cancel type="button">Cancel</button>` : `<button class="btn btn-primary" type="submit" ${c.items.length ? "" : "disabled"}>Create…</button><button class="btn btn-secondary" data-cmp-close type="button">Close</button>`}
     </div>
   </form></div>`;
@@ -2995,7 +2995,7 @@ function renderGod() {
         ${fileIcon(i.phase === "done" ? "god" : i.name)}<span class="name" title="${escapeHtml(i.path)}">${escapeHtml(i.name)}</span>${i.auto ? `<span class="pill">AUTO</span>` : ""}
         ${i.phase === "working" || i.phase === "queued" ? `<button class="btn btn-quiet" data-god-cancel="${escapeHtml(i.id)}" type="button">Cancel</button>` : g.busy && i.phase !== "done" ? "" : `<button class="btn btn-quiet" data-god-remove="${escapeHtml(i.id)}" type="button" aria-label="Remove">×</button>`}</div>
       <label class="god-title">Game title <input data-god-title="${escapeHtml(i.id)}" value="${escapeHtml(i.title)}" ${i.phase === "ready" || i.phase === "failed" ? "" : "disabled"} placeholder="Shown on the Xbox dashboard" maxlength="63" /></label>
-      <div class="qbar"><div data-job-bar="${escapeHtml(i.id)}" style="width:${i.progress}%"></div></div>
+      <div class="qbar"><div data-job-bar="${escapeHtml(i.id)}" class="qbar-fill"></div></div>
       <div class="qstatus" data-job-status="${escapeHtml(i.id)}">${escapeHtml(i.status)}</div>
       ${i.discLine ? `<div class="meta" data-god-discs>${escapeHtml(i.discLine)}</div>` : ""}
       ${i.discWarn && i.phase !== "done" ? `<div class="warn-text" data-god-missing>⚠ ${escapeHtml(i.discWarn)}</div>` : ""}
@@ -3006,20 +3006,20 @@ function renderGod() {
     )
     .join("");
   const offer = g.offer?.length && !g.busy ? `<div class="error-box" data-god-offer>Other discs of this game were found next to it: ${g.offer.map((p) => `<code>${escapeHtml(N.baseName(p))}</code>`).join(", ")}. Convert them together so the console shows one game?
-      <div class="actions" style="margin-top:.5rem"><button class="btn btn-secondary btn-sm" data-god-offer-yes type="button">Add ${g.offer.length === 1 ? "it" : "them"}</button><button class="btn btn-quiet btn-sm" data-god-offer-no type="button">No thanks</button></div></div>` : "";
+      <div class="actions actions-mt5"><button class="btn btn-secondary btn-sm" data-god-offer-yes type="button">Add ${g.offer.length === 1 ? "it" : "them"}</button><button class="btn btn-quiet btn-sm" data-god-offer-no type="button">No thanks</button></div></div>` : "";
   const verify = g.verifyPath ? `<div class="meta" data-god-verify-out>${escapeHtml(g.verifyMsg || "")}</div>` : "";
   return `<div class="overlay"><div class="dialog dialog-wide" data-god>
     <h3>Xbox 360 ISO → GOD / extracted folder</h3>
     <p>Turns Xbox 360 (and original Xbox) disc images into either Games on Demand (GOD) for HDD launch, or an extracted folder with <code>default.xex</code> and all game files (needed by many mods). Copy GOD Title-ID folders to <code>Content/0000000000000000/</code> (pick that folder, the <code>Content</code> folder or the drive itself as output and the game goes straight into <code>&lt;TitleID&gt;\\00007000</code>, with no "(GOD)" folder around it; another disc joins the same TitleID folder, and a disc that's already there is skipped), or extracted games to <code>Games\&lt;Name&gt;</code>. Only convert games you own.</p>
     <div class="cmp-list">${rows || `<div class="preview-empty">Add ISO files, or drop them onto the window.</div>`}</div>
     ${offer}
-    <div class="actions" style="margin:0.6rem 0 0.8rem">
+    <div class="actions actions-my08">
       <button class="btn btn-secondary" data-god-add type="button">Add ISOs</button>
       <button class="btn btn-secondary" data-god-dest type="button" ${g.busy ? "disabled" : ""}>${dest ? "Change output folder" : "Choose output folder"}</button>
       <button class="btn btn-quiet" data-god-verify type="button" ${g.busy ? "disabled" : ""} title="Check an existing GOD folder without writing">Verify only…</button>
     </div>
     ${verify}
-    <p class="meta" style="margin:0 0 0.8rem">Output: ${dest ? escapeHtml(dest) : "not chosen yet"}${g.items.some((i) => i.auto) ? " (auto conversions go next to each ISO)" : ""}. Needs about as much free space as each game.</p>
+    <p class="meta meta-mb8">Output: ${dest ? escapeHtml(dest) : "not chosen yet"}${g.items.some((i) => i.auto) ? " (auto conversions go next to each ISO)" : ""}. Needs about as much free space as each game.</p>
     <div class="actions">
       ${g.busy ? `<button class="btn btn-secondary" data-god-cancel-all type="button">Cancel all</button>` : `<button class="btn btn-primary" data-god-go type="button" ${ready && dest ? "" : "disabled"} title="Games on Demand">Convert to GOD ${ready || ""}</button><button class="btn btn-secondary" data-god-xex type="button" ${ready && dest ? "" : "disabled"} title="Extract XDVDFS to Game Name\\ with default.xex">Extract folder (XEX) ${ready || ""}</button><button class="btn btn-quiet" data-god-close type="button">Close</button>`}
     </div>
@@ -3480,13 +3480,13 @@ function renderTree(nodes, depth = 0) {
     .map((n) => {
       if (n.type === "dir") {
         return `<div>
-          <div class="row" style="padding-left:${0.75 + depth * 0.9}rem">${icon("folder")}<span class="name">${escapeHtml(n.name)}</span></div>
+          <div class="row row-indent" data-depth="${depth}">${icon("folder")}<span class="name">${escapeHtml(n.name)}</span></div>
           ${renderTree(n.children || [], depth + 1)}
         </div>`;
       }
       const sel = selectedPath === n.path ? " selected" : "";
       const tag = n.file?.deferred ? `<span class="size">ISO</span>` : "";
-      return `<button class="row${sel}" data-file="${encodeURIComponent(n.path)}" style="padding-left:${0.75 + depth * 0.9}rem">${fileIcon(n.name)}<span class="name">${escapeHtml(n.name)}</span>${tag}<span class="size">${formatBytes(n.size)}</span></button>`;
+      return `<button class="row${sel} row-indent" data-file="${encodeURIComponent(n.path)}" data-depth="${depth}">${fileIcon(n.name)}<span class="name">${escapeHtml(n.name)}</span>${tag}<span class="size">${formatBytes(n.size)}</span></button>`;
     })
     .join("");
 }
@@ -4098,12 +4098,12 @@ function renderQueueJobs() {
       .map(
         (j) => `<div class="qrow${j.id === activeId ? " on" : ""}">
         <button class="qname" data-open="${escapeHtml(j.id)}" type="button"><span class="dot ${escapeHtml(j.phase || "opening")}"></span>${fileIcon(j.name)}<span class="name">${escapeHtml(j.name)}</span></button>
-        <div class="qbar"><div data-job-bar="${escapeHtml(j.id)}" style="width:${j.progress || 0}%"></div></div>
+        <div class="qbar"><div data-job-bar="${escapeHtml(j.id)}" class="qbar-fill"></div></div>
         <span class="qstatus" data-job-status="${escapeHtml(j.id)}">${escapeHtml(j.status || j.phase)}</span>
         ${j.phase === "queued" && waitIds.has(j.id) ? `<span class="actions"><button class="btn btn-quiet btn-sm" data-queue-up="${escapeHtml(j.id)}" type="button" title="Move up">↑</button><button class="btn btn-quiet btn-sm" data-queue-down="${escapeHtml(j.id)}" type="button" title="Move down">↓</button><button class="btn btn-quiet btn-sm" data-queue-front="${escapeHtml(j.id)}" type="button" title="Move to front">⤒</button><button class="btn btn-quiet btn-sm" data-cancel-job="${escapeHtml(j.id)}" type="button">Cancel</button></span>` : j.phase === "saving" || j.phase === "queued" ? `<button class="btn btn-quiet" data-cancel-job="${escapeHtml(j.id)}" type="button">Cancel</button>` : `<span></span>`}
       </div>${(j.gods || []).map((g) => `<div class="qrow sub">
         <span class="qname" title="${escapeHtml(g.error || g.path)}"><span class="dot ${escapeHtml(g.phase)}"></span>${fileIcon(g.phase === "saved" ? "god" : g.name)}<span class="name">${escapeHtml(g.name)}</span></span>
-        <div class="qbar"><div data-job-bar="${escapeHtml(g.id)}" style="width:${g.progress || 0}%"></div></div>
+        <div class="qbar"><div data-job-bar="${escapeHtml(g.id)}" class="qbar-fill"></div></div>
         <span class="qstatus${g.phase === "failed" ? " danger" : ""}" data-job-status="${escapeHtml(g.id)}" data-status-kind="god" title="${escapeHtml(g.error || g.warning || g.status)}">${escapeHtml(godStatusText(g))}</span>
         ${g.phase === "saving" || g.phase === "queued" ? `<button class="btn btn-quiet" data-cancel-gods="${escapeHtml(j.id)}" type="button">Cancel</button>` : `<span></span>`}
       </div>`).join("")}${renderDlcRows(j.dlcRows)}`
@@ -4239,7 +4239,7 @@ function renderJob(job) {
           <button class="btn btn-secondary" data-action="save-zip" ${job.files.length ? "" : "disabled"}>Download as ZIP</button>`}
         </div>
       </div>
-      <div class="progress"><div data-job-bar="${escapeHtml(job.id)}" style="width:${job.progress}%"></div></div>
+      <div class="progress"><div data-job-bar="${escapeHtml(job.id)}" class="qbar-fill"></div></div>
       <div class="status-line">${job.progress > 0 && job.progress < 100 ? `<span class="spin">◌</span>` : ""} <span data-job-status="${escapeHtml(job.id)}">${escapeHtml(job.status)}</span></div>
       ${job.error ? `<div class="error-box danger">${escapeHtml(job.error)}</div>` : ""}
       ${job.warnings?.length ? `<div class="error-box">${job.warnings.map(w => escapeHtml(w)).join("<br>")}</div>` : ""}

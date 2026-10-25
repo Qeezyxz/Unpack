@@ -1660,6 +1660,7 @@ pub(crate) fn lock_type_folder(ct_dst: &Path, cancelled: &dyn Fn() -> bool, wait
             continue;
         }
         if handle_id(&f).is_some() && handle_id(&f) == path_id(&target) {
+            let folder_id = path_id(ct_dst).ok_or_else(|| format!("Could not read {}", ct_dst.display()))?;
             #[cfg(windows)]
             {
                 use std::io::{Seek, Write};
@@ -1668,7 +1669,7 @@ pub(crate) fn lock_type_folder(ct_dst: &Path, cancelled: &dyn Fn() -> bool, wait
                 let _ = writeln!(f, "{FOLDER_SIG} pid={}", std::process::id());
                 let _ = f.set_len(f.stream_position().unwrap_or(0));
             }
-            return Ok(FolderLock { f });
+            return Ok(FolderLock { f, folder: ct_dst.to_path_buf(), folder_id });
         }
         // What we locked is no longer what the path names: drop it and lock the current one.
         swaps += 1;
@@ -1680,6 +1681,21 @@ pub(crate) fn lock_type_folder(ct_dst: &Path, cancelled: &dyn Fn() -> bool, wait
 /// lock file through the same handle, so nothing is left in the Content folder.
 pub(crate) struct FolderLock {
     f: fs::File,
+    /// The locked Content type folder (`<TitleID>\<type>`), not the lock file path on Windows.
+    folder: PathBuf,
+    folder_id: (u64, u64),
+}
+impl FolderLock {
+    /// R29 M / K2: the path must still name the same directory we locked (not moved or renamed).
+    pub(crate) fn ensure_same_folder(&self) -> Result<(), String> {
+        match path_id(&self.folder) {
+            Some(id) if id == self.folder_id => Ok(()),
+            _ => Err(format!(
+                "{} was moved or renamed during the Replace; I stopped and put back only what I could prove was mine.",
+                self.folder.display()
+            )),
+        }
+    }
 }
 impl std::ops::Deref for FolderLock {
     type Target = fs::File;
@@ -1945,6 +1961,27 @@ fn fingerprint(p: &Path) -> Option<String> {
     Some(format!("dir {} {:x}", out.len(), h.finalize()))
 }
 
+type OldHalfEntry = (String, String, bool, String);
+
+fn deserialize_old_halves<'de, D>(d: D) -> Result<Vec<OldHalfEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let rows: Vec<Vec<serde_json::Value>> = serde::Deserialize::deserialize(d)?;
+    rows.into_iter()
+        .map(|r| {
+            if r.len() < 3 {
+                return Err(serde::de::Error::custom("old half entry is too short"));
+            }
+            let live = r[0].as_str().ok_or_else(|| serde::de::Error::custom("old live name"))?.to_string();
+            let aside = r[1].as_str().ok_or_else(|| serde::de::Error::custom("old aside name"))?.to_string();
+            let data = r[2].as_bool().ok_or_else(|| serde::de::Error::custom("old is_data"))?;
+            let fp = r.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Ok((live, aside, data, fp))
+        })
+        .collect()
+}
+
 /// R27/R28: the intent record of one Replace, written (atomically) before anything is renamed.
 /// It names every old half with its aside name and every new half with its live and
 /// set-aside names and its fingerprint, so recovery knows what is old and what is new.
@@ -1952,8 +1989,9 @@ fn fingerprint(p: &Path) -> Option<String> {
 struct ReplaceManifest {
     /// "replacing" -> (recovery) "undoing", or (all new halves in) "finishing".
     phase: String,
-    /// (live name, aside name, is .data)
-    old: Vec<(String, String, bool)>,
+    /// (live name, aside name, is .data, fingerprint of the old half when the note was written)
+    #[serde(deserialize_with = "deserialize_old_halves")]
+    old: Vec<(String, String, bool, String)>,
     /// (live name, set-aside name used if this has to be undone, is .data, fingerprint)
     new: Vec<(String, String, bool, String)>,
 }
@@ -1977,8 +2015,8 @@ fn validate_manifest(m: &ReplaceManifest, tag: &str) -> Result<String, String> {
     }
     let ok_live = |n: &str, data: bool| if data { is_data_name(n) } else { n.len() == 8 && crate::contentdir::is_id8(n) };
     let mut ids = std::collections::BTreeSet::new();
-    for (live, aside, data) in &m.old {
-        if !ok_live(live, *data) || *aside != format!("{ASIDE}{tag}.{live}") {
+    for (live, aside, data, fp) in &m.old {
+        if !ok_live(live, *data) || *aside != format!("{ASIDE}{tag}.{live}") || fp.is_empty() {
             return Err(format!("its entry for {live} doesn't match what I write"));
         }
         ids.insert(live[..8].to_ascii_lowercase());
@@ -2021,7 +2059,7 @@ fn name_of(p: &Path) -> String {
 /// anything that exists), the manifest marked "finishing" and the asides deleted. Any error
 /// undoes what was done, removing only what still matches what it moved in, and never putting
 /// an old half back over something; a kill in between is repaired by `recover_asides`.
-fn replace_unit(ct_dst: &Path, old: [Option<PathBuf>; 2], new: [(&PathBuf, &PathBuf); 2]) -> Result<Vec<String>, String> {
+fn replace_unit(ct_dst: &Path, folder: &FolderLock, old: [Option<PathBuf>; 2], new: [(&PathBuf, &PathBuf); 2]) -> Result<Vec<String>, String> {
     let old: Vec<PathBuf> = old.into_iter().flatten().collect();
     let mut all_names: Vec<String> = old.iter().map(|p| name_of(p)).collect();
     all_names.extend(new.iter().map(|(_, d)| name_of(d)));
@@ -2031,9 +2069,17 @@ fn replace_unit(ct_dst: &Path, old: [Option<PathBuf>; 2], new: [(&PathBuf, &Path
     for (s, _) in new {
         fps.push(fingerprint(s).ok_or_else(|| format!("couldn't read {}", s.display()))?);
     }
+    let mut old_fps = vec![];
+    for p in &old {
+        old_fps.push(fingerprint(p).ok_or_else(|| format!("couldn't read {}", p.display()))?);
+    }
     let mut m = ReplaceManifest {
         phase: "replacing".into(),
-        old: old.iter().map(|p| (name_of(p), format!("{ASIDE}{tag}.{}", name_of(p)), is_data_name(&name_of(p)))).collect(),
+        old: old
+            .iter()
+            .zip(&old_fps)
+            .map(|(p, fp)| (name_of(p), format!("{ASIDE}{tag}.{}", name_of(p)), is_data_name(&name_of(p)), fp.clone()))
+            .collect(),
         new: new
             .iter()
             .zip(&fps)
@@ -2068,9 +2114,12 @@ fn replace_unit(ct_dst: &Path, old: [Option<PathBuf>; 2], new: [(&PathBuf, &Path
             format!("{e}; putting the existing package back also failed: {}", bad.join("; "))
         }
     };
-    for (o, (_, an, _)) in old.iter().zip(&m.old) {
+    for (o, (_, an, _, _)) in old.iter().zip(&m.old) {
         if let Err(e) = st.next() {
             return Err(e.to_string());
+        }
+        if let Err(e) = folder.ensure_same_folder() {
+            return Err(undo(&aside, &[], e));
         }
         let a = ct_dst.join(an);
         if let Err(e) = fs::rename(o, &a) {
@@ -2084,6 +2133,9 @@ fn replace_unit(ct_dst: &Path, old: [Option<PathBuf>; 2], new: [(&PathBuf, &Path
         if let Err(e) = st.next() {
             return Err(e.to_string());
         }
+        if let Err(e) = folder.ensure_same_folder() {
+            return Err(undo(&aside, &moved, e));
+        }
         if let Err(e) = move_new(src, dst) {
             return Err(undo(&aside, &moved, format!("couldn't move {} in ({e})", dst.display())));
         }
@@ -2095,6 +2147,9 @@ fn replace_unit(ct_dst: &Path, old: [Option<PathBuf>; 2], new: [(&PathBuf, &Path
     let mut warns = vec![];
     for (_, a) in aside {
         st.next().map_err(ioe)?;
+        if let Err(e) = folder.ensure_same_folder() {
+            return Err(undo(&[], &[], e));
+        }
         if let Err(e) = remove_any(&a) {
             warns.push(format!("The replaced copy {} couldn't be deleted ({e}); you can delete it.", a.display()));
         }
@@ -2118,7 +2173,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 ///
 /// Notes that don't validate, asides without a note, and stray note temp files that aren't
 /// provably ours are only reported.
-fn recover_asides(ct_dst: &Path, warnings: &mut Vec<String>) {
+fn recover_asides(ct_dst: &Path, folder: &FolderLock, warnings: &mut Vec<String>) {
     let Ok(rd) = fs::read_dir(ct_dst) else { return };
     let names: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     let mut known: std::collections::HashSet<String> = Default::default();
@@ -2149,8 +2204,8 @@ fn recover_asides(ct_dst: &Path, warnings: &mut Vec<String>) {
                 continue;
             }
         };
-        known.extend(m.old.iter().map(|(_, a, _)| a.clone()));
-        if let Err(e) = recover_one(ct_dst, &mpath, &mut m, &id, &mut st, warnings) {
+        known.extend(m.old.iter().map(|(_, a, _, _)| a.clone()));
+        if let Err(e) = recover_one(ct_dst, folder, &mpath, &mut m, &id, &mut st, warnings) {
             warnings.push(format!(
                 "Repairing an interrupted Replace in {} stopped ({e}); I'll try again next time, nothing was lost.",
                 ct_dst.display()
@@ -2174,6 +2229,7 @@ fn recover_asides(ct_dst: &Path, warnings: &mut Vec<String>) {
 
 fn recover_one(
     ct_dst: &Path,
+    folder: &FolderLock,
     mpath: &Path,
     m: &mut ReplaceManifest,
     id: &str,
@@ -2188,6 +2244,10 @@ fn recover_one(
         })
     };
     let old_aside = |data: bool| m.old.iter().find(|o| o.2 == data).map(|o| there(&o.1));
+    let new_header_fp = m.new.iter().find(|(_, _, d, _)| !*d).map(|(_, _, _, fp)| fp.as_str());
+    let new_header_in_place = || {
+        new_header_fp.is_some_and(|fp| live(false).is_some_and(|p| fingerprint(&p).as_deref() == Some(fp)))
+    };
     // A live half of kind `data` is the NEW one when it matches the fingerprint in the note,
     // its old counterpart is still aside (or there was none), and it isn't set aside already.
     let is_new_live = |data: bool, new_aside: &str, fp: &str| {
@@ -2195,11 +2255,20 @@ fn recover_one(
     };
     let unit = ct_dst.join(id).display().to_string();
     let finish = |m: &ReplaceManifest, st: &mut Steps, warnings: &mut Vec<String>| -> std::io::Result<()> {
+        folder.ensure_same_folder().map_err(std::io::Error::other)?;
         let mut removed = 0;
-        for (_, a, _) in &m.old {
+        for (_, a, _, fp) in &m.old {
             if there(a) {
+                let aside = ct_dst.join(a);
+                if fingerprint(&aside).as_deref() != Some(fp) {
+                    warnings.push(format!(
+                        "An earlier Replace of {unit} left {} aside, but it no longer matches what I set aside; I left it for you to check.",
+                        aside.display()
+                    ));
+                    continue;
+                }
                 st.next()?;
-                remove_any(&ct_dst.join(a))?;
+                remove_any(&aside)?;
                 removed += 1;
             }
         }
@@ -2220,20 +2289,33 @@ fn recover_one(
             write_manifest(mpath, m)?;
             return finish(m, st, warnings);
         }
+        if new_header_in_place() && live(true).is_some() {
+            st.next()?;
+            m.phase = "finishing".into();
+            write_manifest(mpath, m)?;
+            return finish(m, st, warnings);
+        }
         st.next()?;
         m.phase = "undoing".into();
         write_manifest(mpath, m)?;
     }
+    if m.phase == "undoing" && new_header_in_place() && live(true).is_some() {
+        st.next()?;
+        m.phase = "finishing".into();
+        write_manifest(mpath, m)?;
+        return finish(m, st, warnings);
+    }
     // undoing
     for (_, na, d, fp) in m.new.clone() {
         if is_new_live(d, &na, &fp) {
+            folder.ensure_same_folder().map_err(std::io::Error::other)?;
             let p = live(d).unwrap();
             st.next()?;
             fs::rename(&p, ct_dst.join(&na))?;
         }
     }
     let mut back = vec![];
-    for (orig, a, d) in m.old.clone() {
+    for (orig, a, d, _) in m.old.clone() {
         if !there(&a) {
             continue;
         }
@@ -2245,6 +2327,7 @@ fn recover_one(
             ));
             return Ok(());
         }
+        folder.ensure_same_folder().map_err(std::io::Error::other)?;
         st.next()?;
         fs::rename(ct_dst.join(&a), ct_dst.join(&orig))?;
         back.push(orig);
@@ -2361,8 +2444,8 @@ fn place_title_trees(
                 }
             }
             // R27: recovery and placement in this type folder run under its lock.
-            let _held = lock_type_folder(&ct_dst, &|| jobs.is_cancelled(job_id), &mut || progress(100, crate::destlock::WAIT_MESSAGE))?;
-            recover_asides(&ct_dst, &mut warnings);
+            let held = lock_type_folder(&ct_dst, &|| jobs.is_cancelled(job_id), &mut || progress(100, crate::destlock::WAIT_MESSAGE))?;
+            recover_asides(&ct_dst, &held, &mut warnings);
             // What is already on the drive, by lowercase MediaID, with its real paths.
             let mut on_drive: std::collections::HashMap<String, (Option<PathBuf>, Option<PathBuf>)> = Default::default();
             if let Ok(rd) = fs::read_dir(&ct_dst) {
@@ -2406,7 +2489,7 @@ fn place_title_trees(
                     }
                     placed += 1;
                 } else if collision == Collision::Replace {
-                    let w = replace_unit(&ct_dst, [old_h, old_d], [(&sh, &dh), (&sd, &dd)])
+                    let w = replace_unit(&ct_dst, &held, [old_h, old_d], [(&sh, &dh), (&sd, &dd)])
                         .map_err(|e| format!("Could not replace {unit}: {e}"))?;
                     warnings.extend(w);
                     placed += 1;
