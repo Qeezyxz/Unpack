@@ -19,9 +19,17 @@ for (const f of files) {
     console.error(`FAIL inline style= in ${f}`);
     fails++;
   }
+  if (/setAttribute\s*\(\s*['"]style['"]/.test(text)) {
+    console.error(`FAIL setAttribute('style' in ${f}`);
+    fails++;
+  }
+  if (/\.style\.cssText\s*=/.test(text)) {
+    console.error(`FAIL .style.cssText assignment in ${f}`);
+    fails++;
+  }
 }
 if (fails) {
-  console.error(`${fails} file(s) with style= attributes`);
+  console.error(`${fails} file(s) with forbidden inline style usage`);
   process.exit(1);
 }
 console.log("PASS no inline style= in src HTML strings");

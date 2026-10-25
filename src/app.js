@@ -651,6 +651,25 @@ function paintJob(job) {
   });
 }
 
+function paintAllJobBars() {
+  for (const job of jobs) {
+    paintJob(job);
+    for (const g of job.gods || []) paintJob(g);
+  }
+  if (libraryView?.copying) {
+    for (const c of Object.values(libraryView.copying)) if (c?.id) paintJob(c);
+  }
+  if (xboxView?.sends) for (const s of xboxView.sends) if (s?.id) paintJob(s);
+  if (modsView?.dl?.job) paintJob(modsView.dl.job);
+  if (modsView?.copy) paintJob(modsView.copy);
+  if (catalogView?.run) {
+    for (const r of Object.values(catalogView.run)) if (r?.id) paintJob(r);
+  }
+  if (composer) paintJob(composer);
+  if (godPanel?.items) for (const i of godPanel.items) if (i?.id) paintJob(i);
+  if (dlcView?.items) for (const d of dlcView.items) if (d?.id) paintJob(d);
+}
+
 async function addPaths(paths, action = "open") {
   if (action === "convert-god") {
     const isos = [];
@@ -1323,7 +1342,7 @@ function renderFolderConfirm() {
   const f = folderConfirm;
   return `<div class="overlay" data-folder-overlay><div class="dialog" role="dialog" aria-modal="true"><h3>Add archives from folder?</h3>
     <p>${f.archives.length} archive${f.archives.length === 1 ? "" : "s"} / ISO found under <code>${escapeHtml(f.folder)}</code>. Add them to the extract queue? (Create archive is still a separate button.)</p>
-    <ul class="sc-list" class="sc-list sc-list-scroll">${f.archives.slice(0, 40).map((p) => `<li><span>${escapeHtml(N.baseName(p))}</span></li>`).join("")}${f.archives.length > 40 ? `<li class="meta">…and ${f.archives.length - 40} more</li>` : ""}</ul>
+    <ul class="sc-list sc-list-scroll">${f.archives.slice(0, 40).map((p) => `<li><span>${escapeHtml(N.baseName(p))}</span></li>`).join("")}${f.archives.length > 40 ? `<li class="meta">…and ${f.archives.length - 40} more</li>` : ""}</ul>
     <div class="actions actions-end"><button class="btn btn-quiet" data-folder-cancel type="button">Cancel</button><button class="btn btn-primary" data-folder-ok type="button">Add ${f.archives.length} to queue</button></div>
   </div></div>`;
 }
@@ -4237,6 +4256,7 @@ function render() {
   `;
   bind();
   updatePresence();
+  paintAllJobBars();
 }
 
 function renderTabs() {
