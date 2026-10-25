@@ -150,7 +150,11 @@ export async function onNativeDrop(onDrop, onHover) {
     else if (t === "drop") {
       onHover(false);
       const paths = ev.payload.paths || [];
-      if (paths.length) onDrop(paths);
+      if (!paths.length) return;
+      void (async () => {
+        const allowed = await invoke("session_drop_prepare", { paths });
+        if (allowed?.length) onDrop(allowed);
+      })();
     }
   });
 }

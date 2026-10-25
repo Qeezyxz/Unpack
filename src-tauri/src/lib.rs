@@ -116,6 +116,23 @@ fn native_info() -> NativeInfo {
     }
 }
 
+#[tauri::command]
+fn session_drop_prepare(
+    paths: Vec<String>,
+    grants: tauri::State<safecopy::Grants>,
+    app: tauri::AppHandle,
+) -> Vec<String> {
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    let (allowed, refused) = picked_folders::prepare_session_drop_paths(&paths, &grants);
+    if let Some(msg) = refused {
+        let _ = app.emit("path-grant-refused", msg);
+    }
+    allowed
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
 #[derive(Serialize)]
 struct FileInfo {
     path: String,
@@ -1954,41 +1971,9 @@ pub fn run() {
             app.manage(discord::PresenceHandle::start());
             Ok(())
         })
-        // Grant dropped folders in Rust (session-only). The page cannot call grant_dir.
-        .on_webview_event(|webview, event| {
-            if let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
-                let grants = webview.state::<safecopy::Grants>();
-                let app = webview.app_handle().clone();
-                let mut refused: Option<String> = None;
-                for p in paths {
-                    let meta = std::fs::symlink_metadata(p);
-                    if let Ok(m) = meta {
-                        if safecopy::is_link(&m) {
-                            continue;
-                        }
-                        let grant_target = if m.is_dir() {
-                            Some(p.as_ref())
-                        } else if m.is_file() {
-                            p.parent()
-                        } else {
-                            None
-                        };
-                        if let Some(target) = grant_target {
-                            match picked_folders::validate_session_grant(target) {
-                                Ok(c) => grants.grant_session(&c),
-                                Err(e) if refused.is_none() => refused = Some(e),
-                                Err(_) => {}
-                            }
-                        }
-                    }
-                }
-                if let Some(msg) = refused {
-                    let _ = app.emit("path-grant-refused", msg);
-                }
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             native_info,
+            session_drop_prepare,
             file_info,
             list_archive,
             read_entry,

@@ -1,9 +1,13 @@
 // TEST ONLY: fake window.__TAURI__ that forwards to examples/bridge.rs. Never loaded by the app.
 (() => {
   const listeners = {};
-  let since = 0;
+  let since = null;
   setInterval(async () => {
-    const r = await fetch("/events?since=" + since).then((r) => r.json());
+    const r = await fetch("/events?since=" + (since ?? 0)).then((r) => r.json());
+    if (since === null) {
+      since = r.next;
+      return;
+    }
     since = r.next;
     for (const e of r.events) (listeners[e.event] || []).forEach((fn) => fn({ payload: e.payload }));
   }, 50);
@@ -40,7 +44,6 @@
     },
     webview: { getCurrentWebview: () => ({ onDragDropEvent: async (fn) => {
       window.__TEST.drop = async (paths) => {
-        await fetch("/invoke/__test_drop_grant", { method: "POST", body: JSON.stringify({ paths }) });
         fn({ payload: { type: "drop", paths } });
       };
     } }) },

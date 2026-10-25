@@ -403,42 +403,26 @@ fn extra(
                 .record_dialog_pick(&GRANTS, std::path::Path::new(p))
                 .map(|_| json!(null))
         }
-        "__test_drop_grant" => {
-            // Mirrors Tauri DragDrop: session-only grants for dropped dirs / file parents.
-            let mut refused: Option<String> = None;
-            for p in a["paths"]
+        "session_drop_prepare" | "__test_drop_grant" => {
+            let paths: Vec<PathBuf> = a["paths"]
                 .as_array()
                 .cloned()
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|x| x.as_str())
-            {
-                let path = std::path::PathBuf::from(p);
-                let Ok(m) = std::fs::symlink_metadata(&path) else {
-                    continue;
-                };
-                if unpack_lib::safecopy::is_link(&m) {
-                    continue;
-                }
-                let grant_target = if m.is_dir() {
-                    Some(path.as_path())
-                } else if m.is_file() {
-                    path.parent()
-                } else {
-                    None
-                };
-                if let Some(target) = grant_target {
-                    match unpack_lib::picked_folders::validate_session_grant(target) {
-                        Ok(c) => GRANTS.grant_session(&c),
-                        Err(e) if refused.is_none() => refused = Some(e),
-                        Err(_) => {}
-                    }
-                }
-            }
+                .map(PathBuf::from)
+                .collect();
+            let (allowed, refused) =
+                unpack_lib::picked_folders::prepare_session_drop_paths(&paths, &GRANTS);
             if let Some(msg) = refused {
                 events.lock().unwrap().push(json!({"event":"path-grant-refused","payload": msg}));
             }
-            Ok(json!(true))
+            Ok(json!(
+                allowed
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+            ))
         }
         "dlc_install" => {
             let libs: Vec<PathBuf> = a["libraries"]

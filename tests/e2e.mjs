@@ -40,7 +40,12 @@ const want = (n) => !tests.length || tests.includes(n);
 check("desktop desk rendered", await p.$("[data-setting=destMode]"));
 await drop(["/etc"]);
 await p.waitForFunction(() => /system location|whole system drive/.test(document.querySelector(".toast")?.textContent || ""), { timeout: 5000 }).catch(() => {});
+await new Promise((r) => setTimeout(r, 400));
 check("hostile folder drop shows refusal toast", await p.evaluate(() => /system location|whole system drive/i.test(document.querySelector(".toast")?.textContent || "")));
+check("refusal toast not overwritten after refused drop", await p.evaluate(() => {
+  const t = document.querySelector(".toast")?.textContent || "";
+  return /system location|whole system drive/i.test(t) && !/no archives/i.test(t);
+}));
 
 if (want("extract")) {
   fs.copyFileSync(D + "/plain.7z", OUT + "/plain.7z");
@@ -224,7 +229,8 @@ if (want("queue")) {
   const outs = fs.readdirSync(Q + "/out").sort();
   check("batch: all finished, queued one cancelled", cancelled && !outs.includes(cancelled) && outs.length === 3, outs.join(",") + " | " + fin.join(" ; "));
   const hist = await p.evaluate(() => [...document.querySelectorAll(".hist-row .name")].map((e) => e.textContent));
-  check("history lists recent jobs", hist.includes("b2.7z") && hist.includes("b3.7z"), hist.slice(0, 6).join(","));
+  const expectHist = ["b1.7z", "b2.7z", "b3.7z"].filter((n) => n !== cancelled + ".7z");
+  check("history lists recent jobs", expectHist.every((n) => hist.includes(n)), hist.slice(0, 6).join(",") + " cancelled=" + cancelled);
   fs.rmSync(Q, { recursive: true, force: true });
 }
 
