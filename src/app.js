@@ -1096,18 +1096,6 @@ function gameTile(g, coverUrl) {
   return `<svg class="tile" viewBox="0 0 64 80" aria-hidden="true"><defs><linearGradient id="t${escapeHtml(g.title_id)}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${a} 70% 55%)"/><stop offset="1" stop-color="hsl(${b} 70% 38%)"/></linearGradient></defs><rect width="64" height="80" rx="10" fill="url(#t${escapeHtml(g.title_id)})"/><circle cx="52" cy="14" r="22" fill="#fff" fill-opacity=".08"/><path d="M0 62 L64 46 V80 H0z" fill="#000" fill-opacity=".18"/><text x="32" y="44" text-anchor="middle" font-family="Outfit, sans-serif" font-weight="700" font-size="22" fill="#fff">${escapeHtml(initials)}</text><text x="32" y="72" text-anchor="middle" font-family="Outfit, sans-serif" font-size="7" fill="#fff" fill-opacity=".8">${escapeHtml(g.title_id)}</text></svg>`;
 }
 const EMPTY_LIB_ART = `<svg viewBox="0 0 120 80" width="120" height="80" aria-hidden="true"><rect x="14" y="18" width="30" height="40" rx="6" fill="var(--elevated)" stroke="var(--border-strong)" transform="rotate(-8 29 38)"/><rect x="45" y="12" width="30" height="40" rx="6" fill="var(--elevated)" stroke="var(--accent)"/><rect x="76" y="18" width="30" height="40" rx="6" fill="var(--elevated)" stroke="var(--border-strong)" transform="rotate(8 91 38)"/><path d="M54 32h12M60 26v12" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/><ellipse cx="60" cy="72" rx="40" ry="3" fill="var(--border)"/></svg>`;
-async function localCoverSrc(gamePath) {
-  if (!N.IS_DESKTOP) return "";
-  for (const name of ["cover.png", "boxart.png", "BoxArt.png"]) {
-    const p = `${gamePath.replace(/[\\/]+$/, "")}/${name}`;
-    try {
-      await N.invoke("file_info", { path: p });
-      const conv = window.__TAURI__?.core?.convertFileSrc;
-      if (conv) return conv(p);
-    } catch {}
-  }
-  return "";
-}
 function filterLibraryGames(games) {
   const q = (libraryView?.q ?? N.settings.libQuery).trim().toLowerCase();
   const kind = libraryView?.filterKind ?? N.settings.libFilterKind;
@@ -1138,10 +1126,6 @@ const LIB_TIMED_OUT = "Library scan timed out. Try a narrower folder (e.g. Conte
 const LIB_KIND_LABEL = { god: "GOD", disc: "Disc", xbla: "XBLA", xbox: "Xbox", app: "App", extracted: "XEX" };
 function libraryKindLabel(k) { return LIB_KIND_LABEL[k] || k; }
 let libCoverRun = 0;
-function coverFileSrc(path) {
-  const conv = window.__TAURI__?.core?.convertFileSrc;
-  return conv ? conv(path) : "";
-}
 async function loadLibraryCovers() {
   const run = ++libCoverRun;
   const view = libraryView;
@@ -1149,11 +1133,10 @@ async function loadLibraryCovers() {
   const games = view.allGames || [];
   const hydrate = async (g) => {
     if (run !== libCoverRun || view !== libraryView || view.covers[g.path]) return;
-    const local = await localCoverSrc(g.path);
-    if (local) { view.covers[g.path] = local; return; }
     try {
-      const cached = await N.invoke("library_cover_cached", { titleId: g.title_id });
-      if (cached) view.covers[g.path] = coverFileSrc(cached);
+      // Local cover beside the game, else the disk cache; no network here.
+      const src = await N.invoke("library_cover", { titleId: g.title_id, gamePath: g.path, allowCoverNetwork: false });
+      if (src) view.covers[g.path] = src;
     } catch {}
   };
   for (let i = 0; i < games.length; i += 8) {
@@ -1168,7 +1151,7 @@ async function loadLibraryCovers() {
       if (view.covers[g.path]) return;
       try {
         const path = await N.invoke("library_cover", { titleId: g.title_id, gamePath: g.path, allowCoverNetwork: true });
-        if (path) view.covers[g.path] = coverFileSrc(path);
+        if (path) view.covers[g.path] = path;
       } catch {}
     }));
     if (view === libraryView) render();
@@ -1197,6 +1180,7 @@ function libraryIndex(libs, maxAgeSecs, scanId) {
 
 async function openLibrary(forceFresh = false) {
   cancelLibraryScan(); // a new scan replaces any one still running
+  if (forceFresh && N.IS_DESKTOP) N.invoke("library_cover_reset").catch(() => {}); // Refresh retries covers that failed before
   const scanId = uid();
   libraryView = {
     loading: true,

@@ -1541,17 +1541,21 @@ async fn library_index(
 #[tauri::command]
 async fn library_cover(
     app: AppHandle,
+    grants: State<'_, safecopy::Grants>,
     title_id: String,
     game_path: String,
     allow_cover_network: bool,
 ) -> Result<Option<String>, String> {
+    if !crate::covers::valid_tid(&title_id) {
+        return Err("Not a TitleID.".into());
+    }
+    let game_path = grants.check(&game_path)?;
     let cache = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("library-cache")
         .join("covers");
-    let game_path = PathBuf::from(game_path);
     tauri::async_runtime::spawn_blocking(move || {
         Ok(crate::covers::resolve_cover(
             &game_path,
@@ -1559,14 +1563,24 @@ async fn library_cover(
             &cache,
             allow_cover_network,
         )
-        .map(|c| c.path))
+        .and_then(|c| crate::covers::data_url(Path::new(&c.path))))
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
+fn library_cover_reset(app: AppHandle) -> Result<(), String> {
+    let cache = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    crate::covers::clear_failures(&cache.join("library-cache").join("covers"));
+    Ok(())
+}
+
+#[tauri::command]
 async fn library_cover_cached(app: AppHandle, title_id: String) -> Result<Option<String>, String> {
+    if !crate::covers::valid_tid(&title_id) {
+        return Err("Not a TitleID.".into());
+    }
     let cache = app
         .path()
         .app_data_dir()
@@ -1574,7 +1588,7 @@ async fn library_cover_cached(app: AppHandle, title_id: String) -> Result<Option
         .join("library-cache")
         .join("covers");
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(crate::covers::cached_file(&cache, &title_id).map(|p| p.display().to_string()))
+        Ok(crate::covers::cached_file(&cache, &title_id).and_then(|p| crate::covers::data_url(&p)))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1953,6 +1967,7 @@ pub fn run() {
             library_index,
             library_cover,
             library_cover_cached,
+            library_cover_reset,
             copy_to_usb,
             mod_identify,
             mod_name_key,
