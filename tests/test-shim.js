@@ -7,7 +7,7 @@
     since = r.next;
     for (const e of r.events) (listeners[e.event] || []).forEach((fn) => fn({ payload: e.payload }));
   }, 50);
-  window.__TEST = { pick: [], folder: null, save: null, drop: null, calls: [], version: "1.7.0" };
+  window.__TEST = { pick: [], folder: null, save: null, drop: null, calls: [], version: "1.7.3" };
   window.__TAURI__ = {
     core: {
       invoke: async (cmd, args) => {

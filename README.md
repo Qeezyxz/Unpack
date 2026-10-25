@@ -1,6 +1,6 @@
 # Unpack: desktop edition
 
-**Version 1.7.0.** Use at your own risk: back up `launch.ini` and anything you convert or copy. See [DISCLAIMER.txt](DISCLAIMER.txt). Licensed under the [Unpack Non-Commercial License](LICENSE); third-party notices are in [THIRD-PARTY.md](THIRD-PARTY.md).
+**Version 1.7.3.** Use at your own risk: back up `launch.ini` and anything you convert or copy. See [DISCLAIMER.txt](DISCLAIMER.txt). Licensed under the [Unpack Non-Commercial License](LICENSE); third-party notices are in [THIRD-PARTY.md](THIRD-PARTY.md).
 
 I'm Justin, and I build Unpack. This repository is its **complete source code** (Tauri 2: Rust backend, plain HTML/JS page). It's public: you can read it, change it and build it yourself. `HANDOFF.md` describes the architecture, the security model, the build and the tests; `PORT-NOTES.md` explains how I merged the 1.6.0 additions into the reviewed code base.
 
@@ -9,7 +9,7 @@ I made Unpack to open and extract **ZIP, RAR, 7Z** (plus TAR, GZ, BZ2, XZ and mo
 ## Install
 
 **Option A (recommended): the installer**
-1. Run `Unpack_1.7.0_x64-setup.exe` (from `dist/` after you build it, or from a release you trust).
+1. Run `Unpack_1.7.3_x64-setup.exe` (from `dist/` after you build it, or from a release you trust).
 2. Windows may show "Windows protected your PC" because the file isn't signed. Click **More info**, then **Run anyway**.
 3. The installer doesn't need admin rights. It installs only for your user account.
 
@@ -26,7 +26,9 @@ Unsigned NSIS / Tauri builds are often flagged only by Trapmine (`Malicious.high
 
 - **Send to Xbox / `launch.ini` (fixed in 1.1.0, hardened since):** older builds could delete `launch.ini` if a transfer was interrupted. Unpack now uploads to a `.part` file, renames it only after the size is checked, and never overwrites a file that is already on the console (a different file at the same place stops the send before anything is written; the DashLaunch catalog install writes a timestamped backup first). USB copy and ISO convert follow the same "finish first, then swap" rule. Keep a backup of your `launch.ini` anyway.
 - A full Xbox drive and a dropped Wi-Fi connection are different messages. Both keep the `.part` file so the next send resumes.
-- **Known issues in 1.7.0 (I plan to fix both in the next update):**
+- **FAT32 drives (fixed in 1.7.3):** FAT32's 4 GB limit is per file, so I only refuse a single file of 4 GB or more, never a big archive or a big total. A game ISO over 4 GB with Auto ISO → GOD on is extracted to a temporary folder on your PC's drive, converted onto the FAT32 drive, and the temporary copy is deleted afterwards. Your PC's drive needs room for everything in the archive (not just the ISO) plus 256 MiB while that happens; if it doesn't have it, I tell you how much is needed. Other game files land next to the `Content` folder, the same as a normal extract; extras like readme `.txt`, `.nfo` and pictures that sit beside the ISO are skipped when the destination is a `Content` folder (never anything inside a game or app folder).
+- **Library (fixed in 1.7.3):** you can set the library folder to a drive root (`D:\`), its `Content` folder, a profile folder (`Content\0000000000000000`) or a single TitleID folder. Refresh always rescans, and a long scan shows progress and can be cancelled.
+- **Known issues from 1.7.0, still open in 1.7.3 (I plan to fix both soon):**
   - If Unpack is killed at the very last step of a **Replace files** into a Content folder, and you then edit the new `.data` files before the next run repairs the package, that repair can leave the old header next to your edited `.data` files. I warn you when this happens, but I don't put things back the way they were.
   - If you rename or move the game's type folder (e.g. `<TitleID>\00007000`) while a Replace is running, the package can end up split across two folders.
 - The bundled 7-Zip is a Windows build; on Linux the tests use the system 7-Zip (23.01 or newer).
